@@ -1,0 +1,44 @@
+# === Models - NEVER commit to git (large binaries) ===
+/models/embedding/*
+!/models/embedding/.gitkeep
+/models/vision/*
+!/models/vision/.gitkeep
+/models/tts/*
+!/models/tts/.gitkeep
+/models/stt/*
+!/models/stt/.gitkeep
+
+# Fallback: ignore any model weights if accidentally placed outside
+**/*.safetensors
+**/*.bin
+**/*.onnx
+**/*.pt
+**/*.ct2
+**/*.engine
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.env
+!.env.example
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs / temp / storage runtime data
+*.log
+storage/database/*
+!storage/database/.gitkeep
+storage/vector/*
+!storage/vector/.gitkeep
+storage/files/*
+!storage/files/.gitkeep
+!storage/files/images/.gitkeep
+tmp/

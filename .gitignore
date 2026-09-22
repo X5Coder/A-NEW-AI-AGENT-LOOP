@@ -1,0 +1,37 @@
+# Runtime data - models (large binary assets)
+project/models/embedding/
+project/models/vision/
+project/models/tts/
+project/models/stt/
+# Keep structure but ignore contents
+!project/models/embedding/.gitkeep
+!project/models/vision/.gitkeep
+!project/models/tts/.gitkeep
+!project/models/stt/.gitkeep
+
+# Alternative: ignore all model binaries everywhere
+**/models/**/ *.safetensors
+**/models/**/ *.bin
+**/models/**/ *.onnx
+**/models/**/ *.pt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs & temp
+*.log
+tmp/

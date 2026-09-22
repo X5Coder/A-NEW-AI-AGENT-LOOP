@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "description": "Local model manifest - single source of truth for auto-download. Paths are relative to project/ root.",
+  "models": [
+    {
+      "id": "embedding",
+      "repo_id": "Qwen/Qwen3-Embedding-0.6B",
+      "revision": "main",
+      "local_dir": "models/embedding/Qwen3-Embedding-0.6B",
+      "purpose": "Tool search via embeddings (plugins/tool-discovery/search)",
+      "type": "embedding",
+      "expected_size_mb": 1200
+    },
+    {
+      "id": "stt",
+      "repo_id": "MohamedRashad/Arabic-Whisper-CodeSwitching-Edition",
+      "revision": "main",
+      "local_dir": "models/stt/whisper-medium-arabic-codeswitched-ct2",
+      "purpose": "Speech-to-text Arabic+English code-switched (CT2 format)",
+      "type": "stt",
+      "ct2_conversion": true,
+      "ct2_source_repo": "MohamedRashad/Arabic-Whisper-CodeSwitching-Edition",
+      "ct2_quantization": "float16",
+      "fallback_ct2_repo": "Systran/faster-whisper-medium",
+      "expected_size_mb": 3100
+    },
+    {
+      "id": "vision",
+      "repo_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+      "revision": "main",
+      "local_dir": "models/vision/SmolVLM2-500M",
+      "purpose": "Vision analysis - image understanding",
+      "type": "vision",
+      "expected_size_mb": 2000,
+      "ignore_patterns": ["onnx/*", "*.onnx", "*.onnx_data"]
+    },
+    {
+      "id": "tts",
+      "repo_id": "Supertone/supertonic-3",
+      "revision": "main",
+      "local_dir": "models/tts/supertonic-3",
+      "purpose": "Text-to-speech multilingual (31 languages) ONNX",
+      "type": "tts",
+      "expected_size_mb": 500
+    }
+  ],
+  "disk_buffer_mb": 5120,
+  "min_free_after_mb": 1024
+}
