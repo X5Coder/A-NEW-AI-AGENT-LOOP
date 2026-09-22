@@ -28,7 +28,7 @@ def main() -> int:
         print("       This is first run on this VPS, will take 5-10 minutes (6.3 GB)")
         ok = ensure_models(auto_download=True, timeout_seconds=1800)
         if not ok:
-            print("\n❌ فشل تحميل النماذج - راجع رسالة المساحة أعلاه", file=sys.stderr)
+            print("\n❌ Model download failed - check disk space message above", file=sys.stderr)
             print("   Fix disk space and re-run: python main.py", file=sys.stderr)
             return 1
         print("[OK] All models downloaded and verified")

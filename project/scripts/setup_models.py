@@ -284,6 +284,12 @@ def _copy_fallback(source: Path, dest: Path) -> None:
 
 
 def ensure_single_model(project_root: Path, entry: dict, force: bool = False) -> str:
+    """
+    Ensure single model is present with resume support:
+    - Complete (marker exists + non-empty) -> skipped
+    - Incomplete (files exist but no marker) -> snapshot_download resumes from last checkpoint
+    - Missing (no dir) -> fresh download
+    """
     repo_id = entry["repo_id"]
     revision = entry.get("revision", "main")
     local_dir_str = entry["local_dir"]
@@ -341,7 +347,8 @@ def check_disk_space(project_root: Path, models: list[dict], force: bool = False
     """
     Check VPS disk space before downloading.
     Required = sum(expected_size for missing models) + buffer + min_free_after
-    Returns True if enough space, False otherwise (prints Arabic+English warning).
+    Returns True if enough space, False otherwise (prints English warning).
+    Resume-aware: only counts missing/incomplete models, complete ones are skipped.
     """
     try:
         manifest = load_manifest(project_root)
@@ -381,23 +388,23 @@ def check_disk_space(project_root: Path, models: list[dict], force: bool = False
     needed_with_reserve = required_mb + min_free_mb
     if available_mb < needed_with_reserve:
         print("\n" + "=" * 70, file=sys.stderr)
-        print("❌ مساحة القرص غير كافية / Insufficient disk space", file=sys.stderr)
+        print("❌ Insufficient disk space", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
-        print(f"  المطلوب للنماذج الناقصة: {missing_mb} MB ({missing_mb/1024:.1f} GB)", file=sys.stderr)
-        print(f"  + احتياطي للبيانات:      {buffer_mb} MB ({buffer_mb/1024:.1f} GB)", file=sys.stderr)
-        print(f"  + احتياطي نظام:          {min_free_mb} MB", file=sys.stderr)
+        print(f"  Required for missing models: {missing_mb} MB ({missing_mb/1024:.1f} GB)", file=sys.stderr)
+        print(f"  + Buffer for user data:     {buffer_mb} MB ({buffer_mb/1024:.1f} GB)", file=sys.stderr)
+        print(f"  + System reserve:           {min_free_mb} MB", file=sys.stderr)
         print(f"  ─────────────────────────", file=sys.stderr)
-        print(f"  الإجمالي المطلوب:        {needed_with_reserve} MB ({needed_with_reserve/1024:.1f} GB)", file=sys.stderr)
-        print(f"  المتاح حالياً:           {available_mb} MB ({available_mb/1024:.1f} GB)", file=sys.stderr)
-        print(f"  الناقص:                  {needed_with_reserve - available_mb} MB", file=sys.stderr)
+        print(f"  Total required:             {needed_with_reserve} MB ({needed_with_reserve/1024:.1f} GB)", file=sys.stderr)
+        print(f"  Available:                  {available_mb} MB ({available_mb/1024:.1f} GB)", file=sys.stderr)
+        print(f"  Shortage:                   {needed_with_reserve - available_mb} MB", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
-        print("  الحل: فضّي مساحة أو استخدم VPS بمساحة أكبر ثم شغّل:", file=sys.stderr)
+        print("  Fix: free up space or use a larger VPS, then run:", file=sys.stderr)
         print("        python scripts/setup_models.py", file=sys.stderr)
         print("=" * 70 + "\n", file=sys.stderr)
         return False
 
-    # Inform user
-    print(f"[SPACE] المتاح: {available_mb/1024:.1f} GB | المطلوب: {needed_with_reserve/1024:.1f} GB (نماذج {missing_mb/1024:.1f} + احتياطي {buffer_mb/1024:.1f} GB) -> OK")
+    # Inform user - English only
+    print(f"[SPACE] Available: {available_mb/1024:.1f} GB | Required: {needed_with_reserve/1024:.1f} GB (models {missing_mb/1024:.1f} + buffer {buffer_mb/1024:.1f} GB) -> OK")
     return True
 
 

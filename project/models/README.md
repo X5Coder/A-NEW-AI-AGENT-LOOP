@@ -12,9 +12,13 @@ Single source of truth: `manifest.json`
 | vision | `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` | `models/vision/SmolVLM2-500M` |
 | tts | `Supertone/supertonic-3` | `models/tts/supertonic-3` |
 
-## Auto-download
-- First time the project runs, `scripts/setup_models.py` is invoked automatically via `models/loader.py:ensure_models()`
-- Idempotent: if `.download_complete` marker exists, it skips
+## Auto-download (Resume-aware)
+- First run, `scripts/setup_models.py` is invoked via `models/loader.py:ensure_models()` or `python main.py`
+- **Resume logic:**
+  - Complete (`.download_complete` exists) → skipped
+  - Incomplete (partial files, no marker) → resumes from last checkpoint via `snapshot_download(resume_download=True)`
+  - Missing → fresh download
+- Disk check: requires models size + 5 GB user buffer + 1 GB reserve; stops with clear English error if insufficient
 - Bounded retries: max 3 per model, with backoff 2s/5s/10s
 - Path security: all `local_dir` values are validated to stay inside `project/models/`
 - No hardcoded secrets: uses `HF_TOKEN` env var if present

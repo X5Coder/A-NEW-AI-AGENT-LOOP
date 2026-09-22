@@ -1,6 +1,6 @@
 # A New Agent Loop
 
-## 🚀 أمر واحد للـ VPS (انسخه وشغّله)
+## 🚀 One-Command VPS Setup (copy & run)
 
 **Linux / Mac:**
 ```bash
@@ -12,31 +12,36 @@ git clone https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP.git && cd A-NEW-AI-AGEN
 git clone https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP.git; Set-Location A-NEW-AI-AGENT-LOOP/project; pip install -e .; python main.py
 ```
 
-هذا الأمر الواحد:
-1. يفحص المساحة (يحتاج 14.2GB فاضي = 6.3GB نماذج + 5GB لبياناتك + 1GB نظام) ولو ناقصة يظهر تنبيه عربي ويتوقف
-2. يحمل الـ 4 نماذج تلقائياً في أماكنها الصحيحة (Resume + 3 محاولات)
-3. يتأكد أن كل نموذج شغال فعلاً
-4. يشغل الأيجنت — تاني مرة يشتغل فوراً
+This single command:
+1. Checks disk space (requires 14.2 GB free = 6.3 GB models + 5 GB user buffer + 1 GB reserve) — stops with clear error if insufficient
+2. Auto-downloads all 4 models to correct locations with resume support
+3. Verifies each model is working
+4. Starts the agent — second run starts instantly
 
-## 🩺 فحص الحالة
+## 🩺 Health Check
 
 ```bash
 python scripts/doctor.py
 python scripts/setup_models.py --check
 ```
 
-## النماذج (6.28GB إجمالي، لا تُرفع لـ GitHub)
+**Resume logic:**
+- Complete → skipped (marker exists)
+- Incomplete → resumes from last checkpoint
+- Missing → fresh download
 
-- `models/embedding/Qwen3-Embedding-0.6B` (1.15GB) - البحث عن الأدوات
-- `models/stt/whisper-medium-arabic-codeswitched-ct2` (2.94GB CT2) - عربي/إنجليزي/مختلط + لايف
-- `models/vision/SmolVLM2-500M` (1.94GB) - تحليل صور
-- `models/tts/supertonic-3` (0.39GB) - نص لصوت
+## Models (6.28 GB total, git-ignored)
 
-## أوامر
+- `models/embedding/Qwen3-Embedding-0.6B` (1.15 GB) - Tool search
+- `models/stt/whisper-medium-arabic-codeswitched-ct2` (2.94 GB CT2) - Arabic/English/code-switched + live
+- `models/vision/SmolVLM2-500M` (1.94 GB) - Image analysis
+- `models/tts/supertonic-3` (0.39 GB) - Text-to-speech
+
+## Commands
 
 ```bash
-python main.py                          # تشغيل (يحمل تلقائي أول مرة)
-python scripts/doctor.py                # فحص شامل
-python scripts/setup_models.py          # تحميل يدوي
-python scripts/setup_models.py --check  # فحص فقط
+python main.py                          # Run (auto-downloads on first run)
+python scripts/doctor.py                # Full health check
+python scripts/setup_models.py          # Manual download
+python scripts/setup_models.py --check  # Check only
 ```
