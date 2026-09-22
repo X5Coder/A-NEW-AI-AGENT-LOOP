@@ -1,0 +1,12 @@
+{
+  "name": "image_memory",
+  "description": "Store and manage image metadata including id, name, storage path, size, type, width, height and vision text. Persistent images are saved and sent with every request; temporary request images are sent once as metadata then auto-cleared after vision or loop end.",
+  "inputs": {
+    "action": {"type": "string", "enum": ["store", "update", "delete", "list", "get", "clear_temp", "clear_all"], "required": true, "description": "Action to perform."},
+    "image_id": {"type": "string", "required": false, "description": "ID of the image. Auto-generated if not provided on store."},
+    "name": {"type": "string", "required": false, "description": "Image file name."},
+    "path": {"type": "string", "required": false, "description": "Path to image in storage."},
+    "vision_text": {"type": "string", "required": false, "description": "Vision analysis text for the image."},
+    "is_persistent": {"type": "boolean", "required": false, "description": "Whether image is persistent (sent every request). Default true."}
+  }
+}

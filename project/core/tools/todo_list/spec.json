@@ -1,0 +1,8 @@
+{
+  "name": "todo_list",
+  "description": "Create and manage a structured task plan. Use for complex or multi-step tasks that need organized execution.",
+  "inputs": {
+    "task": {"type": "string", "required": true, "description": "Task to plan."},
+    "steps": {"type": "array", "required": false, "items": {"type": "string"}, "description": "Ordered execution steps."}
+  }
+}

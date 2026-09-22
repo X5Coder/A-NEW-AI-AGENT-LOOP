@@ -1,0 +1,10 @@
+{
+  "name": "important_memory",
+  "description": "Store, view and delete important facts or notes for long-term memory. Use to persist key information across sessions.",
+  "inputs": {
+    "action": {"type": "string", "enum": ["store", "update", "delete", "list", "get", "clear_all"], "required": true, "description": "Action to perform."},
+    "content": {"type": "string", "required": false, "description": "Fact content to store. Required for store/update."},
+    "key": {"type": "string", "required": false, "description": "Optional key or title for the fact."},
+    "fact_id": {"type": "string", "required": false, "description": "ID of the fact. Required for update/delete/get."}
+  }
+}

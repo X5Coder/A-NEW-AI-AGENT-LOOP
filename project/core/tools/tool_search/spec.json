@@ -1,0 +1,7 @@
+{
+  "name": "tool_search",
+  "description": "Search available tools by capability or intent and return their full specifications for use.",
+  "inputs": {
+    "query": {"type": "string", "required": true, "description": "Capability or action you need."}
+  }
+}

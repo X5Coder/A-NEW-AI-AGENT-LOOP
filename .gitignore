@@ -1,11 +1,13 @@
 # Runtime data - models (large binary assets)
-project/models/embedding/
-project/models/vision/
-project/models/tts/
-project/models/stt/
+project/models/embedding/*
+project/models/vision/*
+project/models/tts/*
+project/models/stt/*
 # Keep structure but ignore contents
 !project/models/embedding/.gitkeep
+!project/models/embedding/service.py
 !project/models/vision/.gitkeep
+!project/models/vision/service.py
 !project/models/tts/.gitkeep
 !project/models/stt/.gitkeep
 

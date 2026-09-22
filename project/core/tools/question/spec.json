@@ -1,0 +1,8 @@
+{
+  "name": "question",
+  "description": "Ask the user a question and wait for their response. Use when input or clarification is required. Supports open-ended answers or up to 4 choices.",
+  "inputs": {
+    "question": {"type": "string", "required": true, "description": "Question to ask."},
+    "options": {"type": "array", "required": false, "items": {"type": "string"}, "maxItems": 4, "description": "Up to 4 choices. Omit for an open-ended answer."}
+  }
+}

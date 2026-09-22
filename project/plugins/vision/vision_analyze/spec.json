@@ -1,0 +1,9 @@
+{
+  "name": "vision_analyze",
+  "description": "Analyze an image and answer questions about its visual content. Use when image understanding is required.",
+  "inputs": {
+    "image_id": {"type": "string", "required": false, "description": "ID of the stored image."},
+    "image_path": {"type": "string", "required": false, "description": "Path to the image."},
+    "prompt": {"type": "string", "required": false, "description": "What to analyze or extract."}
+  }
+}

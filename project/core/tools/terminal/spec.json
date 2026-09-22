@@ -1,0 +1,9 @@
+{
+  "name": "terminal",
+  "description": "Execute shell commands. Use to perform system actions, inspect, create, modify, run, test, or manage files/programs when direct system execution is required.",
+  "inputs": {
+    "command": {"type": "string", "required": true, "description": "Command to execute."},
+    "workdir": {"type": "string", "required": false, "description": "Directory to run in."},
+    "timeout": {"type": "integer", "required": false, "default": 30, "minimum": 1, "maximum": 120, "description": "Timeout in seconds. Default 30."}
+  }
+}

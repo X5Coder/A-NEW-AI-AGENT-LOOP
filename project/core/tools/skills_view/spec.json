@@ -1,0 +1,7 @@
+{
+  "name": "skills_view",
+  "description": "View a skill’s instructions and details. Use after finding a relevant skill to understand how to use it.",
+  "inputs": {
+    "skill_name": {"type": "string", "required": true, "description": "Name of the skill to view."}
+  }
+}

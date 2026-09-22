@@ -1,0 +1,15 @@
+{
+  "name": "scheduler",
+  "description": "Schedule and manage tasks for one-time or repeated execution, starting now or later, with optional recurrence, count, or end time.",
+  "inputs": {
+    "action": {"type": "string", "enum": ["create", "list", "update", "delete", "pause", "resume"], "required": true, "description": "Scheduler action."},
+    "job_id": {"type": "string", "required": false, "description": "Scheduled task ID; required for update, delete, pause, and resume."},
+    "task": {"type": "string", "required": false, "description": "Task to execute; required when creating."},
+    "start_at": {"type": "string", "required": false, "description": "First execution time, such as now, in 2h, or an ISO 8601 date/time. Default now."},
+    "repeat": {"type": "string", "required": false, "description": "Recurrence pattern, such as every 30m, daily at 09:00, or monthly."},
+    "repeat_count": {"type": "integer", "required": false, "minimum": 1, "maximum": 1000, "description": "Total number of executions. Omit for unlimited repetition."},
+    "end_at": {"type": "string", "required": false, "description": "Time after which execution stops."},
+    "timezone": {"type": "string", "required": false, "description": "Timezone for scheduled times. Default user/system timezone."}
+  },
+  "rules": "Omit repeat for one-time tasks. start_at=now with repeat runs immediately, then repeats. repeat_count limits total executions."
+}

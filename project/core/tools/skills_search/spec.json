@@ -1,0 +1,8 @@
+{
+  "name": "skills_search",
+  "description": "Search available skills by semantic meaning. Use when you need to find a skill that can help complete the task.",
+  "inputs": {
+    "query": {"type": "string", "required": true, "description": "Capability or skill needed."},
+    "k": {"type": "integer", "required": false, "default": 5, "minimum": 1, "maximum": 20, "description": "Number of skills. Default 5."}
+  }
+}

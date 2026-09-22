@@ -1,0 +1,8 @@
+{
+  "name": "write_file",
+  "description": "Create or overwrite a file with content. Use when you need to create, replace, or save file data.",
+  "inputs": {
+    "path": {"type": "string", "required": true, "description": "File path."},
+    "content": {"type": "string", "required": true, "description": "Content to write."}
+  }
+}

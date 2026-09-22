@@ -1,8 +1,10 @@
 # === Models - NEVER commit to git (large binaries) ===
 /models/embedding/*
 !/models/embedding/.gitkeep
+!/models/embedding/service.py
 /models/vision/*
 !/models/vision/.gitkeep
+!/models/vision/service.py
 /models/tts/*
 !/models/tts/.gitkeep
 /models/stt/*

@@ -1,0 +1,8 @@
+{
+  "name": "vector_chat_search",
+  "description": "Search the current conversation for semantically relevant past messages. Use when earlier context or details may be needed.",
+  "inputs": {
+    "query": {"type": "string", "required": true, "description": "Information to search for."},
+    "k": {"type": "integer", "required": false, "default": 5, "minimum": 1, "maximum": 20, "description": "Number of results. Default 5."}
+  }
+}

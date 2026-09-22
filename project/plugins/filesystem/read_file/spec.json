@@ -1,0 +1,11 @@
+{
+  "name": "read_file",
+  "description": "Read a file’s contents. Use when you need to inspect or understand existing file data before acting on it.",
+  "inputs": {
+    "path": {
+      "type": "string",
+      "required": true,
+      "description": "File path."
+    }
+  }
+}
