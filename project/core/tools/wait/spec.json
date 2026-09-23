@@ -1,0 +1,8 @@
+{
+  "name": "wait",
+  "description": "Pause execution for a specified duration before continuing the loop. Use when you need to wait for an external process, rate limiting, or polling a long-running job.",
+  "inputs": {
+    "duration": {"type": "integer", "required": true, "minimum": 1, "maximum": 300, "description": "Duration to wait in seconds (1-300)."},
+    "reason": {"type": "string", "required": false, "description": "Optional reason for waiting."}
+  }
+}

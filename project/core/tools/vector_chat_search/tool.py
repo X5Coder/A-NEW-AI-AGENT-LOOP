@@ -52,44 +52,20 @@ def execute(query: str, k: int | None = None) -> dict:
     q = _validate_query(query)
     limit = _validate_k(k)
     event = format_event()
-    history = _load_history()
-    if not history:
-        return {"event": event, "query": q, "k": limit, "results": [], "note": "no history yet"}
-
-    # Try embedding semantic search if model ready
+    # Use persistent per-message vector store (auto-handles delete/edit)
     try:
-        from models.embedding.service import embed_texts, is_ready
-        if is_ready():
-            # embed query + each message content
-            texts = []
-            for m in history:
-                content = m.get("content", "") if isinstance(m, dict) else str(m)
-                if isinstance(content, str) and content.strip():
-                    texts.append(content[:2000])
-                else:
-                    texts.append("")
-            if texts:
-                q_emb = embed_texts([q])[0]
-                doc_embs = embed_texts(texts)
-                # cosine similarity (embeddings are normalized)
-                import numpy as np
-                qv = np.array(q_emb)
-                scores = []
-                for idx, emb in enumerate(doc_embs):
-                    dv = np.array(emb)
-                    score = float(np.dot(qv, dv))
-                    scores.append((score, idx))
-                scores.sort(reverse=True, key=lambda x: x[0])
-                top = scores[:limit]
-                results = []
-                for score, idx in top:
-                    msg = history[idx]
-                    results.append({"score": round(score, 4), "message": msg})
-                return {"event": event, "query": q, "k": limit, "results": results}
+        from core.agent.memory.chat_vector_store import search as vector_search, ensure_synced
+        ensure_synced()
+        results = vector_search(q, k=limit)
+        if results:
+            return {"event": event, "query": q, "k": limit, "results": results}
     except Exception:
         pass
 
-    # Fallback lexical search
+    # Fallback: lexical over history if vector store empty or embedding not ready
+    history = _load_history()
+    if not history:
+        return {"event": event, "query": q, "k": limit, "results": [], "note": "no history yet"}
     q_low = q.lower()
     scored = []
     for idx, m in enumerate(history):
@@ -97,7 +73,7 @@ def execute(query: str, k: int | None = None) -> dict:
         if not isinstance(content, str):
             continue
         c_low = content.lower()
-        score = c_low.count(q_low)  # simple
+        score = c_low.count(q_low)
         if q_low in c_low:
             score += 1
         scored.append((score, idx))

@@ -168,37 +168,50 @@ def _core_tools_block() -> list[dict]:
     return tools
 
 
-def build_context(user_input: str, include_todo: bool = True) -> tuple[str, str, list[dict]]:
+def build_context(user_input: str, include_todo: bool = True, isolated: bool = False, todo_snapshot: dict | None = None) -> tuple[str, str, list[dict]]:
     """
     Returns (system_prompt, user_context_content, core_tools_openai)
     User context is a single professional block to be sent as user message content (system prompt separate).
+    isolated=True for scheduled large tasks: skips last-30 chat history (irrelevant after a day) and uses snapshot.
     """
     if not isinstance(user_input, str):
         raise TypeError("user_input must be string")
-    # system
     system_prompt = _read_system_prompt()
-    # blocks
     env = _env_block()
     mem = _memories_block()
-    chat = _chat_block(limit=30)
-    todo = _todo_block() if include_todo else ""
-    # assemble user context content
+    # isolated mode: no chat history, use snapshot todo
+    if isolated:
+        chat = ""
+        if todo_snapshot and isinstance(todo_snapshot, dict):
+            steps = todo_snapshot.get("steps") or []
+            task = str(todo_snapshot.get("task",""))[:200]
+            tid = todo_snapshot.get("id","")
+            snap = f"[Scheduled Todo Snapshot - isolated, no chat history]\n- [{todo_snapshot.get('status','planned')}] {tid}: {task}\n" + "\n".join([f"  {i+1}. {s}" for i, s in enumerate(steps)])
+            todo = snap
+        else:
+            todo = _todo_block() if include_todo else ""
+    else:
+        chat = _chat_block(limit=30)
+        todo = _todo_block() if include_todo else ""
     parts = []
     parts.append(env)
     if mem:
         parts.append(mem)
     else:
         parts.append("[Memories: empty]")
-    if chat:
-        parts.append(chat)
+    if isolated:
+        parts.append("[Chat: excluded for isolated scheduled execution - large task reliability]")
     else:
-        parts.append("[Chat: no prior messages]")
+        if chat:
+            parts.append(chat)
+        else:
+            parts.append("[Chat: no prior messages]")
     if todo:
         parts.append(todo)
-    # Note about core tools
     parts.append("[Available CORE tools: tool_search, question, vector_chat_search, todo_list, scheduler, skills_search, skills_view, terminal]")
-    # User's current input at end
     parts.append(f"[Current User Input]\n{user_input.strip()}")
+    if isolated:
+        parts.append("[Mode: ISOLATED SCHEDULED EXECUTION - execute exactly as in snapshot, do not ask for clarification, complete the workflow]")
     user_content = "\n\n".join(parts)
     core_tools = _core_tools_block()
     return system_prompt, user_content, core_tools

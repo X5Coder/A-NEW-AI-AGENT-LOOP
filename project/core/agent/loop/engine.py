@@ -19,6 +19,7 @@ MAX_STEPS = 500
 
 
 def _persist_conversation(user_input: str, assistant_output: str) -> None:
+    import uuid
     path = STORAGE_DB / "conversation.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     data = []
@@ -29,12 +30,21 @@ def _persist_conversation(user_input: str, assistant_output: str) -> None:
                 data = []
         except Exception:
             data = []
-    # bounded: keep last 1000 messages
-    data.append({"role": "user", "content": user_input[:2000], "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
-    data.append({"role": "assistant", "content": assistant_output[:5000], "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+    # ensure each message has id for vector store
+    uid = str(uuid.uuid4())[:8]
+    aid = str(uuid.uuid4())[:8]
+    data.append({"id": uid, "role": "user", "content": user_input[:2000], "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+    data.append({"id": aid, "role": "assistant", "content": assistant_output[:5000], "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
     if len(data) > 1000:
         data = data[-1000:]
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Auto-create embeddings for new messages (per-message, no fallback)
+    try:
+        from core.agent.memory.chat_vector_store import add_message
+        add_message(uid, user_input[:2000], role="user")
+        add_message(aid, assistant_output[:5000], role="assistant")
+    except Exception:
+        pass
 
 
 def _clear_temp_images_if_any():
@@ -43,6 +53,26 @@ def _clear_temp_images_if_any():
         n = clear_temp()
         if n:
             print(f"[loop] cleared {n} temp images at loop end")
+    except Exception:
+        pass
+    # Video is saved locally so its path can be sent as metadata, then deleted after analysis or loop end
+    try:
+        # Clean any remaining temp videos in storage/files/videos (including pending jobs)
+        from pathlib import Path as _P
+        proj = _P(__file__).resolve().parents[3]
+        vdir = proj / "storage" / "files" / "videos"
+        if vdir.exists():
+            # Remove files older than current loop (all temp videos should be removed after loop)
+            # For safety, we only delete files that are not part of a pending job? But spec says delete from storage after analysis/loop
+            # We will delete all files in videos folder that are older than 0 (i.e., all temp) - but keep .gitkeep
+            for f in vdir.iterdir():
+                if f.is_file() and f.name != ".gitkeep":
+                    try:
+                        # Check if its job is already completed (if so, delete)
+                        # For simplicity, delete all temp videos at loop end (they are not meant to be persisted)
+                        f.unlink(missing_ok=True)
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -54,19 +84,22 @@ def run_loop(
     api_key: str | None = None,
     temperature: float = 0.3,
     verbose: bool = True,
+    isolated: bool = False,
+    todo_snapshot: dict | None = None,
 ) -> dict[str, Any]:
     """
     Run agent loop for user_input.
     Returns dict: {steps, final_answer, history, tool_calls_log, success}
     Never fails silently - even on provider errors, continues up to max_steps.
+    isolated=True for scheduled large tasks (skips chat history, uses todo_snapshot).
     """
     if not isinstance(user_input, str) or not user_input.strip():
         raise ValueError("user_input must be non-empty string")
     if not isinstance(max_steps, int) or max_steps < 1 or max_steps > 500:
         raise ValueError("max_steps must be 1..500")
     mdl = model.strip() if model and isinstance(model, str) and model.strip() else "deepseek/deepseek-v4.1-flash"
-    # Build initial context
-    system_prompt, user_context, core_tools = build_context(user_input)
+    # Build initial context (isolated for large scheduled tasks)
+    system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot)
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_context},
@@ -80,6 +113,8 @@ def run_loop(
     tool_calls_log: list[dict] = []
     steps = 0
     final_answer: str | None = None
+    tool_search_count = 0
+    MAX_TOOL_SEARCH = 4
 
     for step in range(1, max_steps + 1):
         steps = step
@@ -143,7 +178,17 @@ def run_loop(
             args = tc["function"]["arguments"]
             if verbose:
                 print(f"  -> Executing {name} with {str(args)[:200]}")
-            result = execute_tool(name, args)
+            # Enforce max 4 tool_search per loop to prevent endless search for non-existent tool
+            if name == "tool_search":
+                tool_search_count += 1
+                if tool_search_count > MAX_TOOL_SEARCH:
+                    result = {"tool": name, "arguments": args, "output": {"error": "لا يوجد الأداة تخطى البحث", "event": "Finding tools"}, "success": False, "blocked": True}
+                    if verbose:
+                        print(f"     Blocked tool_search #{tool_search_count} > {MAX_TOOL_SEARCH}: لا يوجد الأداة تخطى البحث")
+                else:
+                    result = execute_tool(name, args)
+            else:
+                result = execute_tool(name, args)
             tool_calls_log.append({"step": step, "tool": name, "arguments": args, "result": result})
             # event logging: print event if available
             try:

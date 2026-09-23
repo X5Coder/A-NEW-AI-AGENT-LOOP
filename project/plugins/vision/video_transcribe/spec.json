@@ -1,0 +1,10 @@
+{
+  "name": "video_transcribe",
+  "description": "Extract audio from a video and transcribe it to text via STT. Returns what was said per timestamp. Process is async with job_id - start with video_path, then poll with job_id. Video is not saved, only metadata is sent.",
+  "inputs": {
+    "video_path": {"type": "string", "required": false, "description": "Path to the video file."},
+    "video_id": {"type": "string", "required": false, "description": "ID of the stored video."},
+    "job_id": {"type": "string", "required": false, "description": "Job ID to poll status. If provided, returns job status."},
+    "language": {"type": "string", "required": false, "description": "Language hint for transcription, e.g. ar, en. Default auto."}
+  }
+}

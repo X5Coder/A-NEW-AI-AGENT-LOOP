@@ -18,8 +18,19 @@ project/
 │   │   ├── context/
 │   │   │   ├── builder.py              # build_context(): system.md + memories + last30 + env + todo + core tools
 │   │   │   └── __init__.py
+│   │   ├── filters/                  # filter layers (audio + triage)
+│   │   │   ├── stt_correction.py       # audio -> whisper -> correction via stt_correction_system.md (no invention)
+│   │   │   ├── triage.py               # strict triage: simple answer vs route_to_main_workflow (saves tokens)
+│   │   │   ├── pipeline.py             # unified: audio→STT→triage→main loop
+│   │   │   └── __init__.py
+│   │   ├── memory/
+│   │   │   ├── chat_vector_store.py    # per-message embeddings: add/delete/update per message, sync with conversation.json
+│   │   │   └── __init__.py
 │   │   └── prompts/
-│   │       └── system.md               # editable system prompt (separate file, user can change)
+│   │       ├── system.md               # editable system prompt (separate file, user can change)
+│   │       ├── scheduler_skill_system.md # prompt for internal skill generation for scheduled jobs (editable, sibling)
+│   │       ├── triage_system.md        # strict triage prompt: simple answer vs route (editable)
+│   │       └── stt_correction_system.md # correction prompt: no invention, only clean (editable)
 │   ├── lm/
 │   │   └── providers/
 │   │       └── openrouter/             # OpenRouter provider for deepseek/deepseek-v4.1-flash
@@ -38,6 +49,9 @@ project/
 │   │   └── important_memory/           # storage service for important facts
 │   │       ├── service.py              # store/update/delete/list for important facts
 │   │       └── __init__.py
+│   ├── scheduler/                  # scheduler engine for large tasks (isolated execution)
+│   │   ├── engine.py               # check_and_execute_due_jobs() every 60s, computes next_run, isolated mode, concurrent via ThreadPool
+│   │   └── __init__.py
 │   └── tools/
 │       ├── registry.py             # tool registry (core + discoverable listing)
 │       ├── tool_search/            # CORE: semantic search over discoverable tools (embedding)
@@ -60,7 +74,7 @@ project/
 │       │   ├── tool.py
 │       │   ├── events.py           # Planning task
 │       │   └── __init__.py
-│       ├── scheduler/              # CORE: schedule tasks (create/list/update/delete/pause/resume)
+│       ├── scheduler/              # CORE: schedule tasks (practical: every create → skill in scheduled_skills via internal LLM, every run sends Skill)
 │       │   ├── spec.json
 │       │   ├── tool.py
 │       │   ├── events.py           # Scheduling · {short schedule}
@@ -75,10 +89,15 @@ project/
 │       │   ├── tool.py
 │       │   ├── events.py           # Opening · {skill_name}
 │       │   └── __init__.py
-│       └── terminal/               # CORE: execute shell commands
+│       ├── terminal/               # CORE: execute shell commands
+│       │   ├── spec.json
+│       │   ├── tool.py
+│       │   ├── events.py           # Running · {command}
+│       │   └── __init__.py
+│       └── wait/                   # CORE: pause before continuing (for polling video jobs)
 │           ├── spec.json
-│           ├── tool.py
-│           ├── events.py           # Running · {command}
+│           ├── tool.py             # sleep(duration) then continue loop
+│           ├── events.py           # Waiting · {duration}
 │           └── __init__.py
 ├── plugins/
 │   ├── tool-discovery/
@@ -102,10 +121,20 @@ project/
 │   │       ├── events.py           # Searching files
 │   │       └── __init__.py
 │   ├── vision/
-│   │   └── vision_analyze/         # DISCOVERABLE: uses SmolVLM2-500M
+│   │   ├── vision_analyze/         # DISCOVERABLE: uses SmolVLM2-500M
+│   │   │   ├── spec.json
+│   │   │   ├── tool.py             # delegates to models/vision/service.py
+│   │   │   ├── events.py           # Analyzing · {image_name}
+│   │   │   └── __init__.py
+│   │   ├── video_analyze/          # DISCOVERABLE: async video frame-by-frame via SmolVLM, job_id, concurrent
+│   │   │   ├── spec.json
+│   │   │   ├── tool.py             # ffmpeg frames + ThreadPool(4) vision per frame
+│   │   │   ├── events.py           # Analyzing video · {video_name}
+│   │   │   └── __init__.py
+│   │   └── video_transcribe/       # DISCOVERABLE: async audio extract via ffmpeg + whisper STT, job_id
 │   │       ├── spec.json
-│   │       ├── tool.py             # delegates to models/vision/service.py
-│   │       ├── events.py           # Analyzing · {image_name}
+│   │       ├── tool.py             # ffmpeg audio + faster_whisper, per timestamp
+│   │       ├── events.py           # Transcribing video · {video_name}
 │   │       └── __init__.py
 │   ├── skills/
 │   │   └── skill_create/           # DISCOVERABLE
@@ -125,6 +154,8 @@ project/
 │           ├── events.py               # Saving/Listing memories
 │           └── __init__.py
 ├── skills/
+│   ├── scheduled_skills/           # auto-generated scheduled skills (practical system: each job → skill via internal LLM)
+│   │   └── scheduled_<job_id>_<name>/ # contains skill.json + README.md, auto-deleted when job deleted
 │   ├── Skill 1/
 │   ├── Skill 2/
 │   └── Skill 3/
@@ -139,7 +170,8 @@ project/
 ├── storage/
 │   ├── database/                   # todos.json, scheduler.json, conversation.json + user_memory.json, agent_memory.json, image_memory.json, important_memory.json
 │   ├── vector/
-│   │   └── tool_embeddings.json    # auto-generated embeddings + hash (detect change -> rebuild, now 7 discoverable tools)
+│   │   ├── tool_embeddings.json    # auto-generated tool embeddings + hash (now 9 discoverable tools, per-spec)
+│   │   └── chat_embeddings.json    # per-message chat embeddings: synced with conversation.json, auto delete/update per message
 │   └── files/
 │       └── images/                 # persistent images stored here
 ├── models/
@@ -167,8 +199,8 @@ project/
 
 ## Ownership Rules
 - `core/memory/` — 4 memories: `user_memory` + `agent_memory` (NOT tools, internal key/value, 200 max), `image_memory` + `important_memory` (storage services, 100/200 max, image has persistent vs temp)
-- `core/tools/` — 8 core tools each own folder with Event (tool_search, question, vector_chat_search, todo_list, scheduler, skills_search, skills_view, terminal)
-- `plugins/` — discoverable tools grouped by category (filesystem/vision/skills/memory), all behind `tool_search` embedding (now 7: read_file, write_file, search_files, vision_analyze, skill_create, image_memory, important_memory)
+- `core/tools/` — 9 core tools each own folder with Event (tool_search, question, vector_chat_search, todo_list, scheduler, skills_search, skills_view, terminal, wait)
+- `plugins/` — discoverable tools grouped by category (filesystem/vision/skills/memory), all behind `tool_search` embedding (now 9: read_file, write_file, search_files, vision_analyze, video_analyze, video_transcribe, skill_create, image_memory, important_memory)
 - `skills/` — reusable skills
 - `web/` — server + frontend/dashboard
 - `gateway/` — telegram/whatsapp/discord adapters (events rendered as per Events table)
@@ -177,13 +209,15 @@ project/
 - `tests/`, `docs/` — tests & documentation
 
 ## Events Contract
-- Core Tools: tool_search→Finding tools, question→Waiting for you, vector_chat_search→Searching memory, todo_list→Planning task, scheduler→Scheduling · {short schedule}, skills_search→Finding skills, skills_view→Opening · {skill_name}, terminal→Running · {command}
-- Discoverable: read_file→Reading · {file_name}, write_file→Writing · {file_name}, search_files→Searching files, vision_analyze→Analyzing · {image_name}, skill_create→Creating skill · {skill_name}, image_memory→Storing/Updating/Listing images, important_memory→Saving/Listing memories
+- Core Tools: tool_search→Finding tools, question→Waiting for you, vector_chat_search→Searching memory, todo_list→Planning task, scheduler→Scheduling · {short schedule}, skills_search→Finding skills, skills_view→Opening · {skill_name}, terminal→Running · {command}, wait→Waiting · {duration}
+- Discoverable: read_file→Reading · {file_name}, write_file→Writing · {file_name}, search_files→Searching files, vision_analyze→Analyzing · {image_name}, video_analyze→Analyzing video · {video_name}, video_transcribe→Transcribing video · {video_name}, skill_create→Creating skill · {skill_name}, image_memory→Storing/Updating/Listing images, important_memory→Saving/Listing memories
 - Rules: {file_name}/{skill_name}/{image_name} filename only, {command} truncated, {short schedule} compact, never display long free-form inputs
+- Tool Search Limit: max 4 calls per loop, 5th returns "لا يوجد الأداة تخطى البحث" to prevent endless search
+- Video Handling: video not saved, only metadata sent; frame analysis via ThreadPool(4) for speed; STT per timestamp
 
 ## Embedding Auto-Logic
 - On startup (`main.py` + `tool_search` first call) -> `plugins/tool-discovery/search/store.py:ensure_embeddings()`:
-  - collects all discoverable specs (verbatim descriptions, now 7)
+  - collects all discoverable specs (verbatim descriptions, now 9)
   - computes SHA256 hash
   - if hash matches stored `storage/vector/tool_embeddings.json` -> reuse
   - else delete old, embed all descriptions via `models/embedding/service.py` (Qwen3-Embedding-0.6B, 3 retries), save new hash+embeddings

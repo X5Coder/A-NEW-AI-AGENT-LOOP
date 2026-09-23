@@ -22,6 +22,7 @@ _CORE_MAP = {
     "skills_search": "core.tools.skills_search.tool",
     "skills_view": "core.tools.skills_view.tool",
     "terminal": "core.tools.terminal.tool",
+    "wait": "core.tools.wait.tool",
 }
 
 _DISCOVERABLE_MAP = {
@@ -29,6 +30,8 @@ _DISCOVERABLE_MAP = {
     "write_file": "plugins.filesystem.write_file.tool",
     "search_files": "plugins.filesystem.search_files.tool",
     "vision_analyze": "plugins.vision.vision_analyze.tool",
+    "video_analyze": "plugins.vision.video_analyze.tool",
+    "video_transcribe": "plugins.vision.video_transcribe.tool",
     "skill_create": "plugins.skills.skill_create.tool",
     "image_memory": "plugins.memory.image_memory.tool",
     "important_memory": "plugins.memory.important_memory.tool",
