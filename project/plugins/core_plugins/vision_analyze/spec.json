@@ -1,0 +1,9 @@
+{
+  "name": "vision_analyze",
+  "description": "An image inspection tool that analyzes visual attachments and image files using local vision models to extract visual details, text, and structure. Use whenever images (such as receipts, diagrams, UI mockups, or photos) are provided or referenced in user requests. Use this to perform grounded visual reasoning directly without terminal workarounds.",
+  "inputs": {
+    "image_id": {"type": "string", "required": false, "controllable": false, "description": "ID of the stored image."},
+    "image_path": {"type": "string", "required": false, "controllable": false, "description": "Path to the image."},
+    "prompt": {"type": "string", "required": false, "description": "What to analyze or extract."}
+  }
+}

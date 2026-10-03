@@ -27,22 +27,8 @@ def _validate_duration(v: Any) -> int:
     return v
 
 
-def _validate_reason(v: Any) -> str | None:
-    if v is None:
-        return None
-    if not isinstance(v, str):
-        raise TypeError("reason must be string")
-    s = v.strip()
-    if not s:
-        return None
-    if len(s) > 500:
-        raise ValueError("reason too long (max 500)")
-    return s
-
-
-def execute(duration: int, reason: str | None = None) -> dict:
+def execute(duration: int) -> dict:
     d = _validate_duration(duration)
-    r = _validate_reason(reason)
     event = format_event(duration=d)
     # Actually sleep - bounded, interruptible by loop's overall timeout
     start = time.time()
@@ -51,8 +37,7 @@ def execute(duration: int, reason: str | None = None) -> dict:
     return {
         "event": event,
         "duration": d,
-        "reason": r,
         "elapsed": round(elapsed, 2),
         "success": True,
-        "message": f"Waited {d}s" + (f" for: {r}" if r else "")
+        "message": f"Waited {d}s"
     }

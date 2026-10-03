@@ -1,4 +1,8 @@
 """Event for skills_view"""
+
+SHOW_ARROW = True
+
+
 def format_event(skill_name: str = "", **_) -> str:
     name = skill_name.strip() if isinstance(skill_name, str) and skill_name.strip() else "skill"
     # Use filename only, never full content

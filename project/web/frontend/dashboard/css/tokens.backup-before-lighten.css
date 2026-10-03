@@ -1,0 +1,61 @@
+/* ============================================================
+   TOKENS — X5Agent workshop design variables
+   Single source of truth for colors, spacing, timing.
+   ============================================================ */
+:root {
+  --dur-fast: 150ms;
+  --dur: 240ms;
+  --dur-slow: 400ms;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  --r-xs: 1px;
+  --r-sm: 2px;
+  --r-md: 3px;
+  --r-lg: 4px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+
+  --sidebar-w: 300px;
+  --toolbar-h: 72px;
+
+  --board: #e6d5b5;
+  --board-hi: #f2e3c4;
+  --board-lo: #d8c4a0;
+
+  --paper: #f2e6c8;
+  --paper-hi: #fbf2d8;
+  --paper-lo: #ddcaa6;
+
+  --ink: #2b2620;
+  --ink-2: #453d31;
+  --ink-3: #6a5d48;
+  --ink-4: #8b7a5e;
+  --ink-5: #a89a7b;
+
+  --black: #17140f;
+
+  /* ---------- WORKSHOP RED ---------- */
+  --red: #b23a2a;
+  --red-hi: #c24835;
+  --red-lo: #8c2418;
+  --red-deep: #6e1810;
+
+  --green: #4d6b36;
+  --green-bright: #5c8142;
+
+  --amber: #9c6f1f;
+
+  --sh-1: 0 1px 1px rgba(60, 45, 25, 0.12), 0 1px 2px rgba(60, 45, 25, 0.08);
+  --sh-2: 0 1px 1px rgba(60, 45, 25, 0.11), 0 2px 4px rgba(60, 45, 25, 0.11);
+  --sh-3: 0 2px 2px rgba(60, 45, 25, 0.1), 0 4px 10px rgba(60, 45, 25, 0.14);
+  --sh-4: 0 3px 4px rgba(60, 45, 25, 0.12), 0 10px 24px rgba(60, 45, 25, 0.18);
+
+  --grain: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' seed='7'/%3E%3CfeColorMatrix values='0 0 0 0 0.30  0 0 0 0 0.24  0 0 0 0 0.14  0 0 0 .30 0'/%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23g)'/%3E%3C/svg%3E");
+}

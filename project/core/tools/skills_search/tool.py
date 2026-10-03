@@ -44,7 +44,7 @@ def _load_skills() -> list[dict]:
             desc = ""
             name = child.name
             # look for README or skill.json
-            for candidate in [child / "skill.json", child / "README.md", child / "description.txt"]:
+            for candidate in [child / "SKILL.md", child / "skill.json", child / "README.md", child / "description.txt"]:
                 if candidate.exists():
                     try:
                         txt = candidate.read_text(encoding="utf-8")

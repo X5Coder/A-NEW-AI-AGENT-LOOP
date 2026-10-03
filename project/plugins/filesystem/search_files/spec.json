@@ -1,9 +1,0 @@
-{
-  "name": "search_files",
-  "description": "Find files by pattern and optionally search their contents. Use to locate relevant files or code before reading or modifying them.",
-  "inputs": {
-    "pattern": {"type": "string", "required": true, "description": "File pattern, e.g. **/*.py."},
-    "query": {"type": "string", "required": false, "description": "Text to search for inside matched files."},
-    "path": {"type": "string", "required": false, "description": "Directory to search. Default ."}
-  }
-}

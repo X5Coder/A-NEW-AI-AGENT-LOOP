@@ -1,8 +1,19 @@
 {
   "name": "skills_search",
-  "description": "Search available skills by semantic meaning. Use when you need to find a skill that can help complete the task.",
+  "description": "A semantic skill catalog search tool that scans available procedural guides and documentation by functional intent. Use whenever you are tasked with complex domain workflows or when the user references an established procedure. Use this to discover and reuse proven recipes instead of reinventing standard execution steps.",
   "inputs": {
-    "query": {"type": "string", "required": true, "description": "Capability or skill needed."},
-    "k": {"type": "integer", "required": false, "default": 5, "minimum": 1, "maximum": 20, "description": "Number of skills. Default 5."}
+    "query": {
+      "type": "string",
+      "required": true,
+      "description": "Capability or skill needed."
+    },
+    "k": {
+      "type": "integer",
+      "required": false,
+      "default": 5,
+      "minimum": 1,
+      "maximum": 20,
+      "description": "Number of skills. Default 5."
+    }
   }
 }

@@ -1,9 +1,0 @@
-{
-  "name": "skill_create",
-  "description": "Create and save a reusable skill. Use when a new capability or workflow should be stored for future use.",
-  "inputs": {
-    "name": {"type": "string", "required": true, "description": "Skill name."},
-    "content": {"type": "string", "required": true, "description": "Skill instructions."},
-    "description": {"type": "string", "required": false, "description": "Brief skill description."}
-  }
-}

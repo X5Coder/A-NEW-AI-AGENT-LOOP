@@ -12,8 +12,36 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-VECTOR_PATH = Path(__file__).resolve().parents[3] / "storage" / "vector" / "chat_embeddings.json"
-CONVERSATION_PATH = Path(__file__).resolve().parents[3] / "storage" / "database" / "conversation.json"
+def _resolve_vector_path() -> Path:
+    # Unified: writes ALWAYS to X5Agent/Data/vector. Fallback legacy only if resolver missing.
+    try:
+        import sys as _sys
+        _proj = Path(__file__).resolve().parents[3]
+        if str(_proj) not in _sys.path:
+            _sys.path.insert(0, str(_proj))
+        from core.paths import data_vector_file
+        return data_vector_file("chat_embeddings.json")
+    except Exception:
+        return Path(__file__).resolve().parents[3] / "storage" / "vector" / "chat_embeddings.json"
+
+
+def _resolve_conversation_candidates() -> list[Path]:
+    # Data first (unified), legacy fallback.
+    legacy = Path(__file__).resolve().parents[3] / "storage" / "database" / "conversation.json"
+    try:
+        import sys as _sys2
+        _proj2 = Path(__file__).resolve().parents[3]
+        if str(_proj2) not in _sys2.path:
+            _sys2.path.insert(0, str(_proj2))
+        from core.paths import data_db_dir as _dd
+        return [_dd() / "conversation.json", legacy]
+    except Exception:
+        return [legacy]
+
+
+VECTOR_PATH = _resolve_vector_path()
+_CONVERSATION_CANDIDATES = _resolve_conversation_candidates()
+CONVERSATION_PATH = _CONVERSATION_CANDIDATES[0]
 
 
 def _load_vectors() -> dict:
@@ -37,13 +65,16 @@ def _save_vectors(data: dict) -> None:
 
 
 def _load_conversation() -> list[dict]:
-    if not CONVERSATION_PATH.exists():
-        return []
-    try:
-        data = json.loads(CONVERSATION_PATH.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+    for cand in _CONVERSATION_CANDIDATES:
+        if not cand.exists():
+            continue
+        try:
+            data = json.loads(cand.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            continue
+    return []
 
 
 def _save_conversation(data: list[dict]) -> None:
@@ -107,11 +138,13 @@ def update_message(message_id: str, new_content: str) -> dict:
     if not isinstance(new_content, str) or not new_content.strip():
         raise ValueError("new_content required")
     mid = message_id.strip()
-    # Update conversation
+    # Update conversation (preserve original role)
     conv = _load_conversation()
+    role = "user"
     updated = False
     for m in conv:
         if str(m.get("id") or m.get("message_id") or "") == mid:
+            role = str(m.get("role") or "user")
             m["content"] = new_content[:4000]
             m["edited_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             updated = True
@@ -124,7 +157,7 @@ def update_message(message_id: str, new_content: str) -> dict:
         del vectors[mid]
     # will be recreated via add
     _save_vectors(vectors)
-    return add_message(mid, new_content, role="user")  # role preserved? we could keep original role
+    return add_message(mid, new_content, role=role)
 
 
 def ensure_synced() -> dict:

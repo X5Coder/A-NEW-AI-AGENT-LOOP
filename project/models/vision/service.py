@@ -119,20 +119,56 @@ def analyze_image(image_path: Optional[str] = None, image_id: Optional[str] = No
     if image_path:
         resolved = _validate_image_path(image_path)
     else:
-        # image_id -> storage/files/images/
+        # image_id -> storage/files/images/{image_id}, or resolve via image_memory entry
         assert image_id is not None
         if "/" in image_id or "\\" in image_id or ".." in image_id:
             raise ValueError("Invalid image_id")
         project_root = Path(__file__).resolve().parents[2]
-        resolved = (project_root / "storage" / "files" / "images" / image_id).resolve()
-        # Validate inside images dir
-        allowed = (project_root / "storage" / "files" / "images").resolve()
+        # Unified media home: Data/files/images first, legacy storage/files/images fallback.
+        allowed_dirs: list[Path] = []
         try:
-            resolved.relative_to(allowed)
-        except ValueError as exc:
-            raise ValueError("image_id escapes allowed directory") from exc
+            import sys as _sys0
+            if str(project_root) not in _sys0.path:
+                _sys0.path.insert(0, str(project_root))
+            from core.paths import data_subdir as _ds0
+            allowed_dirs.append((_ds0("files", "images")).resolve())
+        except Exception:
+            pass
+        allowed_dirs.append((project_root / "storage" / "files" / "images").resolve())
+        resolved = None
+        for allowed in allowed_dirs:
+            cand = (allowed / image_id).resolve()
+            try:
+                cand.relative_to(allowed)
+            except ValueError:
+                continue
+            if cand.exists():
+                resolved = cand
+                break
+        if resolved is None:
+            allowed = allowed_dirs[0]
+            resolved = (allowed / image_id).resolve()
+            try:
+                resolved.relative_to(allowed)
+            except ValueError as exc:
+                raise ValueError("image_id escapes allowed directory") from exc
         if not resolved.exists():
-            raise FileNotFoundError(f"Image id not found: {image_id}")
+            # Fall back to the stored path of the image_memory entry (file name != image_id)
+            try:
+                import sys as _sys
+
+                if str(project_root) not in _sys.path:
+                    _sys.path.insert(0, str(project_root))
+                from core.memory.image_memory.service import get_image
+
+                entry = get_image(image_id)
+            except Exception:
+                entry = None
+            entry_path = (entry or {}).get("path") if isinstance(entry, dict) else None
+            if entry_path:
+                resolved = _validate_image_path(entry_path)
+            else:
+                raise FileNotFoundError(f"Image id not found: {image_id}")
 
     prompt_text = prompt.strip() if prompt and prompt.strip() else "Describe this image in detail."
 
@@ -163,13 +199,13 @@ def analyze_image(image_path: Optional[str] = None, image_id: Optional[str] = No
             # Decode, strip prompt
             decoded = processor.batch_decode(generated, skip_special_tokens=True)[0]
             # SmolVLM output contains prompt + answer; try to extract answer
-            # Split on last occurrence of "assistant"
-            if "assistant" in decoded.lower():
-                # naive split
-                parts = decoded.split("assistant")
-                answer = parts[-1].strip(" :\n")
-            else:
-                answer = decoded.strip()
+            # Split on last occurrence of "assistant" (case-insensitive)
+            import re as _re
+
+            parts = _re.split(r"(?i)assistant", decoded)
+            answer = parts[-1].strip(" :\n") if len(parts) > 1 else decoded.strip()
+            # Drop any leftover user-echo prefix (e.g. "User:")
+            answer = _re.sub(r"(?is)^user\s*:?\s*", "", answer).strip()
             # If answer contains original prompt text, strip it
             if prompt_text in answer:
                 answer = answer.replace(prompt_text, "").strip()

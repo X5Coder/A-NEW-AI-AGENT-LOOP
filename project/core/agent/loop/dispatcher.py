@@ -15,29 +15,42 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # Registry: name -> (module_path, spec)
 _CORE_MAP = {
     "tool_search": "core.tools.tool_search.tool",
+    "trigger_search": "core.tools.trigger_search.tool",
+    "trigger": "core.tools.trigger.tool",
     "question": "core.tools.question.tool",
     "vector_chat_search": "core.tools.vector_chat_search.tool",
+    "document_search": "core.tools.document_search.tool",
     "todo_list": "core.tools.todo_list.tool",
     "scheduler": "core.tools.scheduler.tool",
     "skills_search": "core.tools.skills_search.tool",
     "skills_view": "core.tools.skills_view.tool",
     "terminal": "core.tools.terminal.tool",
     "wait": "core.tools.wait.tool",
+    "workspace": "core.tools.workspace.tool",
 }
 
 _DISCOVERABLE_MAP = {
-    "read_file": "plugins.filesystem.read_file.tool",
-    "write_file": "plugins.filesystem.write_file.tool",
-    "search_files": "plugins.filesystem.search_files.tool",
-    "vision_analyze": "plugins.vision.vision_analyze.tool",
-    "video_analyze": "plugins.vision.video_analyze.tool",
-    "video_transcribe": "plugins.vision.video_transcribe.tool",
-    "skill_create": "plugins.skills.skill_create.tool",
-    "image_memory": "plugins.memory.image_memory.tool",
-    "important_memory": "plugins.memory.important_memory.tool",
+    "read_file": "plugins.core_plugins.read_file.tool",
+    "write_file": "plugins.core_plugins.write_file.tool",
+    "search_files": "plugins.core_plugins.search_files.tool",
+    "vision_analyze": "plugins.core_plugins.vision_analyze.tool",
+    "video_analyze": "plugins.core_plugins.video_analyze.tool",
+    "video_transcribe": "plugins.core_plugins.video_transcribe.tool",
+    "skill_create": "plugins.core_plugins.skill_create.tool",
+    "image_memory": "plugins.core_plugins.image_memory.tool",
+    "important_memory": "plugins.core_plugins.important_memory.tool",
 }
 
 _ALL = {**_CORE_MAP, **_DISCOVERABLE_MAP}
+
+
+def _browser_tool_names() -> set[str]:
+    """Browser tools owned by project/X5Browser/catalog.py. Empty when unavailable."""
+    try:
+        from X5Browser.catalog import ALL_TOOLS
+        return set(ALL_TOOLS)
+    except Exception:
+        return set()
 
 
 def _load_module(dotted: str):
@@ -84,10 +97,11 @@ def execute_tool(name: str, arguments: dict | str | None) -> dict:
     if not isinstance(name, str) or not name.strip():
         return {"error": "tool name missing", "tool": name}
     n = name.strip()
-    if n not in _ALL:
+    _browser_names = _browser_tool_names()
+    if n not in _ALL and n not in _browser_names:
         # Try discover additional plugins dynamically by scanning storage/vector? But just error
-        return {"error": f"Unknown tool: {n}. Available: {sorted(_ALL.keys())}", "tool": n}
-    dotted = _ALL[n]
+        return {"error": f"Unknown tool: {n}. Available: {sorted(list(_ALL.keys()) + sorted(_browser_names))}", "tool": n}
+    dotted = _ALL.get(n, "")
     # Arguments validation: model-generated data is untrusted
     args: dict[str, Any] = {}
     if arguments is None:
@@ -109,12 +123,77 @@ def execute_tool(name: str, arguments: dict | str | None) -> dict:
             return {"error": f"Tool {n} arguments too large (max 10000 chars)", "tool": n}
     except Exception:
         pass
+    if n in _DISCOVERABLE_MAP:
+        # Core plugins are always on (no switches, hidden from UI) — never gated.
+        from core.tools.registry import get_plugin_state, is_core_plugin, is_plugin_effective
+
+        if not is_core_plugin(n):
+            # Disabled plugins (or disabled actions) are blocked even if called directly
+            if not is_plugin_effective(n):
+                return {"tool": n, "arguments": args, "error": f"Plugin disabled: {n}", "success": False}
+            act = args.get("action")
+            if isinstance(act, str):
+                perms = get_plugin_state().get("plugins", {}).get(n, {}).get("permissions", {})
+                if perms.get(act) is False:
+                    return {"tool": n, "arguments": args, "error": f"Permission disabled: {n}.{act}", "success": False}
+    if n in _browser_names:
+        # All browser tools are core plugins: always on, hidden from UI, never gated.
+        # Dangerous ones still ask in restricted mode (handled in engine).
+        try:
+            from X5Browser.tools import execute_browser_tool
+            output = execute_browser_tool(n, args)
+        except (TypeError, ValueError) as e:
+            return {"tool": n, "arguments": args, "error": f"Invalid arguments for {n}: {e}", "success": False}
+        except Exception as e:
+            return {"tool": n, "arguments": args, "error": f"Tool {n} execution failed: {e}", "success": False}
+        # Propagate the inner ok so callers (engine pause, server control)
+        # see real failures instead of a masked success.
+        inner_ok = True
+        try:
+            if isinstance(output, dict) and "ok" in output:
+                inner_ok = bool(output.get("ok"))
+        except Exception:
+            inner_ok = True
+        try:
+            s = json.dumps(output, ensure_ascii=False)
+            if len(s) > 15000:
+                if isinstance(output, dict) and "observation" in output:
+                    output["observation"] = str(output["observation"])[:10000] + "... truncated"
+                elif isinstance(output, dict) and "text" in output:
+                    output["text"] = str(output["text"])[:10000] + "... truncated"
+        except Exception:
+            pass
+        if not inner_ok:
+            err = ""
+            try:
+                if isinstance(output, dict):
+                    err = str(output.get("error") or output.get("message") or "")[:500]
+            except Exception:
+                err = ""
+            return {"tool": n, "arguments": args, "output": output,
+                    "error": err or f"Tool {n} failed", "success": False}
+        return {"tool": n, "arguments": args, "output": output, "success": True}
+    if not dotted:
+        return {"error": f"Unknown tool: {n}", "tool": n}
     try:
         mod = _load_module(dotted)
         if not hasattr(mod, "execute"):
             return {"error": f"Tool {n} has no execute function", "tool": n}
+        # Optional reason is loop-level (shown before the call); only forward it
+        # when the tool accepts it, otherwise drop it so old tools keep working.
+        call_args = args
+        if isinstance(args, dict) and "reason" in args:
+            try:
+                import inspect as _inspect
+                _params = _inspect.signature(mod.execute).parameters
+                _ok = ("reason" in _params) or any(
+                    p.kind == _inspect.Parameter.VAR_KEYWORD for p in _params.values())
+            except Exception:
+                _ok = False
+            if not _ok:
+                call_args = {k: v for k, v in args.items() if k != "reason"}
         # execute with unpacked args - validates inside tool
-        result = mod.execute(**args)  # type: ignore
+        result = mod.execute(**call_args)  # type: ignore
         # Truncate large outputs
         try:
             s = json.dumps(result, ensure_ascii=False)

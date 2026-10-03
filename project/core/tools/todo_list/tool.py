@@ -49,19 +49,34 @@ def _validate_steps(v: Any) -> list[str] | None:
     return cleaned
 
 
-def _storage_path() -> Path:
+def _legacy_path() -> Path:
     return Path(__file__).resolve().parents[3] / "storage" / "database" / "todos.json"
 
 
-def _load_all() -> list[dict]:
-    p = _storage_path()
-    if not p.exists():
-        return []
+def _storage_path() -> Path:
+    # Unified: writes ALWAYS to X5Agent/Data (zip backup). Fallback legacy only if resolver missing.
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
+        import sys as _sys
+        _proj = Path(__file__).resolve().parents[3]
+        if str(_proj) not in _sys.path:
+            _sys.path.insert(0, str(_proj))
+        from core.paths import data_db_file
+        return data_db_file("todos.json")
     except Exception:
-        return []
+        return _legacy_path()
+
+
+def _load_all() -> list[dict]:
+    for p in (_storage_path(), _legacy_path()):
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            continue
+    return []
 
 
 def _save_all(items: list[dict]) -> None:

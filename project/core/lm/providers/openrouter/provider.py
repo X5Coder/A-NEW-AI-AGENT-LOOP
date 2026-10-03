@@ -44,6 +44,119 @@ def _validate_messages(messages: Any) -> list[dict]:
     return messages
 
 
+def _parse_usage_blob(raw_usage: Any) -> dict:
+    try:
+        pt = int(raw_usage.get("prompt_tokens") or 0)
+    except Exception:
+        pt = 0
+    try:
+        ct = int(raw_usage.get("completion_tokens") or 0)
+    except Exception:
+        ct = 0
+    try:
+        tt = int(raw_usage.get("total_tokens") or (pt + ct))
+    except Exception:
+        tt = pt + ct
+    return {"prompt_tokens": max(0, pt), "completion_tokens": max(0, ct), "total_tokens": max(0, tt)}
+
+
+def _chat_stream(resp: Any, on_token: Any, mdl: str) -> dict:
+    """Consume one SSE stream: forward content deltas live, rebuild tool calls.
+
+    Raises when nothing arrived yet (caller retries cleanly); a mid-stream
+    break keeps the partial text (already shown live) instead of replaying.
+    """
+    content_parts: list[str] = []
+    tc_acc: dict[int, dict] = {}
+    finish_reason = None
+    usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    got_any = False
+    try:
+        # Decode bytes as UTF-8 ourselves: requests guesses ISO-8859-1 for
+        # text/event-stream (no charset), which mojibakes Arabic/emoji.
+        for raw in resp.iter_lines(decode_unicode=False):
+            if not raw:
+                continue
+            try:
+                line = raw.decode("utf-8")
+            except Exception:
+                line = raw.decode("utf-8", errors="replace")
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except Exception:
+                continue
+            got_any = True
+            if isinstance(chunk.get("usage"), dict):
+                usage = _parse_usage_blob(chunk.get("usage"))
+                continue
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            ch = choices[0] if isinstance(choices[0], dict) else {}
+            if ch.get("finish_reason"):
+                finish_reason = ch.get("finish_reason")
+            delta = ch.get("delta") if isinstance(ch.get("delta"), dict) else {}
+            piece = delta.get("content")
+            if isinstance(piece, str) and piece:
+                content_parts.append(piece)
+                try:
+                    on_token(piece)
+                except Exception:
+                    pass
+            for tc in delta.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                try:
+                    idx = int(tc.get("index", 0))
+                except Exception:
+                    idx = 0
+                acc = tc_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                if tc.get("id"):
+                    acc["id"] = str(tc.get("id"))
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                if isinstance(fn.get("name"), str) and fn.get("name") and not acc["name"]:
+                    acc["name"] = fn.get("name")
+                if isinstance(fn.get("arguments"), str):
+                    acc["args"] += fn.get("arguments")
+    except Exception:
+        if not got_any:
+            raise
+    tool_calls_norm: list[dict] = []
+    for idx in sorted(tc_acc):
+        acc = tc_acc[idx]
+        args: dict = {}
+        args_raw = acc["args"]
+        if args_raw.strip():
+            try:
+                args = json.loads(args_raw)
+            except Exception:
+                args = {"_raw": args_raw}
+        if acc["name"]:
+            tool_calls_norm.append({
+                "id": acc["id"] or f"call_stream_{idx}",
+                "type": "function",
+                "function": {"name": acc["name"], "arguments": args, "arguments_raw": args_raw},
+            })
+    try:
+        from core.lm.usage import log_usage
+        log_usage(mdl, usage["prompt_tokens"], usage["completion_tokens"])
+    except Exception:
+        pass
+    return {
+        "content": "".join(content_parts) or None,
+        "tool_calls": tool_calls_norm,
+        "raw": {"streamed": True, "model": mdl},
+        "model_used": mdl,
+        "finish_reason": finish_reason,
+        "usage": usage,
+    }
+
+
 def chat(
     messages: list[dict],
     tools: list[dict] | None = None,
@@ -51,11 +164,17 @@ def chat(
     api_key: str | None = None,
     temperature: float = 0.3,
     max_tokens: int = 2048,
+    on_token=None,
 ) -> dict:
     """
     Call OpenRouter chat completions.
     Returns dict with keys: content, tool_calls (list), raw, model_used
     Tool_calls format: [{"id":..., "type":"function", "function":{"name":..., "arguments": {...}}}]
+    When on_token (callable) is given, the request uses SSE streaming and
+    on_token(delta_text) fires live for every content chunk, so the UI can
+    write behind the model. Tool calls are still reconstructed from deltas.
+    Retries happen only before the first byte: a partial stream never replays,
+    so live text can't duplicate.
     """
     msgs = _validate_messages(messages)
     key = _get_api_key(api_key)
@@ -78,13 +197,18 @@ def chat(
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/a-new-agent-loop",
-        "X-Title": "A New Agent Loop",
+        "HTTP-Referer": "https://github.com/x5agent",
+        "X-Title": "X5Agent",
     }
+    stream_cb = on_token if callable(on_token) else None
+    if stream_cb is not None:
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
     last_err: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=TIMEOUT_SECONDS)
+            resp = requests.post(OPENROUTER_URL, headers=headers, json=payload,
+                                 timeout=TIMEOUT_SECONDS, stream=stream_cb is not None)
             # handle rate limit / auth errors with retry only for transient
             if resp.status_code == 429 or 500 <= resp.status_code < 600:
                 # transient
@@ -104,6 +228,14 @@ def chat(
                 # will try again next iteration? Actually we already set fallback, retry
                 continue
             resp.raise_for_status()
+            if stream_cb is not None:
+                try:
+                    return _chat_stream(resp, stream_cb, mdl)
+                finally:
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
             data = resp.json()
             # validate response shape
             if "choices" not in data or not data["choices"]:
@@ -135,12 +267,34 @@ def chat(
                             "type": tc.get("type") or "function",
                             "function": {"name": name, "arguments": args, "arguments_raw": args_raw},
                         })
+            # Measured usage for real cost accounting (OpenRouter returns usage on every call).
+            raw_usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            try:
+                pt = int(raw_usage.get("prompt_tokens") or 0)
+            except Exception:
+                pt = 0
+            try:
+                ct = int(raw_usage.get("completion_tokens") or 0)
+            except Exception:
+                ct = 0
+            try:
+                tt = int(raw_usage.get("total_tokens") or (pt + ct))
+            except Exception:
+                tt = pt + ct
+            usage = {"prompt_tokens": max(0, pt), "completion_tokens": max(0, ct), "total_tokens": max(0, tt)}
+            # Best-effort accounting: must never break the chat call.
+            try:
+                from core.lm.usage import log_usage
+                log_usage(mdl, usage["prompt_tokens"], usage["completion_tokens"])
+            except Exception:
+                pass
             return {
                 "content": content,
                 "tool_calls": tool_calls_norm,
                 "raw": data,
                 "model_used": mdl,
                 "finish_reason": choice.get("finish_reason"),
+                "usage": usage,
             }
         except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as e:
             last_err = e

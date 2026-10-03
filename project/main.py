@@ -11,7 +11,7 @@ from pathlib import Path
 
 def main() -> int:
     print("=" * 70)
-    print("  A New Agent Loop - Starting")
+    print("  X5Agent - Starting")
     print("=" * 70)
 
     # 1. Ensure models (includes disk space check  + 5GB buffer + auto-download)
@@ -45,6 +45,19 @@ def main() -> int:
                 return 1
     except Exception as e:
         print(f"[WARN] verification failed: {e}", file=sys.stderr)
+
+    # 2b. Unify sandbox: ensure X5Agent dirs + one-time legacy storage -> Data migration
+    try:
+        from core.paths import ensure_x5agent, migrate_legacy_to_data_once
+
+        ensure_x5agent()
+        migrated = migrate_legacy_to_data_once()
+        if any(migrated.values()):
+            print(f"[OK] Migrated legacy storage to X5Agent/Data: {migrated}")
+        else:
+            print("[OK] X5Agent sandbox ready (Data is authoritative)")
+    except Exception as e:
+        print(f"[WARN] sandbox ensure failed: {e}", file=sys.stderr)
 
     # 3. Auto-embed tool descriptions for tool_search (detect change -> rebuild)
     try:

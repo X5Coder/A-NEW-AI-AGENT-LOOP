@@ -34,17 +34,50 @@ def _get_search_fn():
     return mod.search  # type: ignore
 
 
-def execute(query: str) -> dict:
+def _validate_top_k(v: Any) -> int:
+    if v is None:
+        return 3
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise TypeError("top_k must be integer")
+    if v < 1 or v > 20:
+        raise ValueError("top_k must be 1..20")
+    return v
+
+
+def execute(query: str, top_k: int | None = None) -> dict:
     q = _validate_query(query)
+    k = _validate_top_k(top_k)
     event = format_event()
     search = _get_search_fn()
     # Do semantic search - this will auto-create embeddings if needed and detect changes
     try:
-        results = search(q, top_k=5)
+        results = search(q, top_k=k)
     except FileNotFoundError as e:
         raise FileNotFoundError(str(e)) from e
     except Exception as e:
         raise RuntimeError(f"tool_search failed: {e}") from e
+
+    # Hide disabled plugins as if they don't exist (server-side kill switch).
+    # A tool whose every action is switched off is hidden too.
+    try:
+        from core.tools.registry import get_plugin_state, is_plugin_effective, plugin_actions
+
+        stored = get_plugin_state().get("plugins", {})
+
+        def _visible(r):
+            name = r.get("name", "")
+            if not is_plugin_effective(name):
+                return False
+            acts = plugin_actions(name)
+            if acts:
+                perms = stored.get(name, {}).get("permissions", {})
+                if all(perms.get(a) is False for a in acts):
+                    return False
+            return True
+
+        results = [r for r in results if _visible(r)]
+    except Exception:
+        pass
 
     # Return full specifications for use as requested
     return {"event": event, "query": q, "results": results, "count": len(results)}

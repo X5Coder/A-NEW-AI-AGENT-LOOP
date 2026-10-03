@@ -3,7 +3,8 @@
   "instructions": [
     "Master Code Rules.md",
     "AGENTS.md",
-    "PROJECT_MAP.md"
+    "PROJECT_MAP.md",
+    "project/skills/frontend-design-pro/SKILL.md"
   ],
   "agent": {
     "build": {

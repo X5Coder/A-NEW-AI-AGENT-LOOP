@@ -1,0 +1,10 @@
+{
+  "name": "video_transcribe",
+  "description": "An asynchronous speech transcription tool that extracts audio from video files and transcribes speech into timestamped text. Use whenever a video contains spoken dialogue, interviews, or lectures that need verbatim transcription. Use this to extract accurate chronological dialogue and spoken facts from media files.",
+  "inputs": {
+    "video_path": {"type": "string", "required": false, "controllable": false, "description": "Path to the video file."},
+    "video_id": {"type": "string", "required": false, "controllable": false, "description": "ID of the stored video."},
+    "job_id": {"type": "string", "required": false, "controllable": false, "description": "Job ID to poll status. If provided, returns job status."},
+    "language": {"type": "string", "required": false, "description": "Language hint for transcription, e.g. ar, en. Default auto."}
+  }
+}

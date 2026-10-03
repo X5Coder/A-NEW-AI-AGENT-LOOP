@@ -1,11 +1,15 @@
 """
-terminal tool - execute shell commands with validation, bounded timeout, no hardcoded secrets.
-Security: validates workdir inside project, blocks dangerous patterns optional, cleans up.
+terminal tool - execute shell commands JAILED inside X5Agent/Workspace only.
+Security: workdir must resolve inside Workspace; commands attempting escape are blocked.
 """
 from __future__ import annotations
 
-import subprocess
+import os
+import re
 import shlex
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 from .events import format_event
@@ -13,6 +17,60 @@ from .events import format_event
 MAX_COMMAND_LEN = 2000
 DEFAULT_TIMEOUT = 30
 MAX_TIMEOUT = 120
+
+
+def _kill_tree(pid: int) -> None:
+    """Kill a process AND its children (a detached server must never linger).
+
+    Never raises: killing is best-effort cleanup.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=15)
+            return
+    except Exception:
+        pass
+    try:
+        os.kill(pid, 9)
+    except Exception:
+        pass
+
+
+def _read_bounded(path: Path) -> str:
+    """Read one captured stream file, bounded to 20KB. Never raises."""
+    try:
+        data = path.read_bytes()
+    except Exception:
+        return ""
+    text = data.decode("utf-8", errors="replace")
+    if len(text) > 20000:
+        text = text[:20000] + "\n... truncated"
+    return text
+
+
+def _workspace_root() -> Path:
+    # Try shared resolver, fallback to local parents computation (never breaks imports).
+    try:
+        import sys as _sys
+        proj = Path(__file__).resolve().parents[3]
+        if str(proj) not in _sys.path:
+            _sys.path.insert(0, str(proj))
+        from core.paths import workspace_root as _ws
+        ws = _ws()
+        try:
+            ws.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return ws.resolve()
+    except Exception:
+        repo = Path(__file__).resolve().parents[4]
+        ws = repo / "X5Agent" / "Workspace"
+        try:
+            ws.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return ws.resolve()
 
 
 def _validate_command(v) -> str:
@@ -23,31 +81,46 @@ def _validate_command(v) -> str:
         raise ValueError("command must be non-empty")
     if len(s) > MAX_COMMAND_LEN:
         raise ValueError(f"command too long (max {MAX_COMMAND_LEN})")
+    # Jail: block any escape attempt outside Workspace.
+    low = s.lower()
+    ws_str = str(_workspace_root()).lower()
+    if ".." in s:
+        raise ValueError("Blocked: outside Workspace (.. not allowed). Workspace only.")
+    # Block absolute paths that are not inside Workspace (Windows drive or unix root).
+    # Find drive-letter absolutes like C:\ or C:/ in the command.
+    for m in re.finditer(r"[A-Za-z]:[\\/]", s):
+        # allow only if the Workspace path itself appears in the command
+        if ws_str not in low:
+            raise ValueError("Blocked: absolute path outside Workspace. Workspace only.")
+            break
+    # Block obvious escape cd commands without Workspace context.
+    escape_cmds = ["cd /", "cd \\", "cd..", "cd ..", "chdir ..", "pushd ..", "popd"]
+    for ec in escape_cmds:
+        if ec in low and ws_str not in low:
+            raise ValueError("Blocked: outside Workspace (cd escape). Workspace only.")
     return s
 
 
 def _validate_workdir(v) -> Path | None:
+    ws = _workspace_root()
     if v is None:
-        return None
+        return ws
     if not isinstance(v, str):
         raise TypeError("workdir must be string")
     s = v.strip()
     if not s:
-        return None
+        return ws
     p = Path(s)
-    # If relative, resolve against project root
-    project_root = Path(__file__).resolve().parents[3]
+    # If relative, resolve against Workspace (model device), NOT project root.
     if not p.is_absolute():
-        p = (project_root / s).resolve()
+        p = (ws / s).resolve()
     else:
         p = p.resolve()
-    # Must exist and be inside project root or be project root itself
+    # Must be inside Workspace or be Workspace itself - nothing else.
     try:
-        # Allow inside project root
-        p.relative_to(project_root.resolve())
+        p.relative_to(ws)
     except ValueError:
-        # Disallow escaping project
-        raise ValueError(f"workdir must be inside project directory: {project_root}")
+        raise ValueError(f"Blocked: workdir must be inside Workspace: {ws}") from None
     if not p.exists() or not p.is_dir():
         raise FileNotFoundError(f"workdir not found: {p}")
     return p
@@ -69,41 +142,66 @@ def execute(command: str, workdir: str | None = None, timeout: int | None = None
     to = _validate_timeout(timeout)
     event = format_event(command=cmd)
 
-    project_root = Path(__file__).resolve().parents[3]
-    cwd = str(wd) if wd else str(project_root)
+    ws = _workspace_root()
+    cwd = str(wd) if wd else str(ws)
 
+    # Output goes to FILES, never pipes. A long-running/server command detaches
+    # a grandchild that inherits the stdout handle; with pipes that handle stays
+    # open after the timeout, so subprocess would block forever waiting to close
+    # it and the whole agent loop would hang. Files have no such handle.
+    tmpdir = Path(tempfile.mkdtemp(prefix="x5term_"))
+    out_path = tmpdir / "stdout.txt"
+    err_path = tmpdir / "stderr.txt"
+    timed_out = False
+    returncode = -1
     try:
-        # Use shell=False security? But spec says execute shell commands, so we need shell
-        # We use subprocess.run with shell=True but validate command length and timeout.
-        # For Windows, shell=True is needed for builtins like dir
-        # We capture output bounded
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=to,
-            encoding="utf-8",
-            errors="replace",
-        )
-        # Bounded output: truncate to 20KB
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-        if len(stdout) > 20000:
-            stdout = stdout[:20000] + "\n... truncated"
-        if len(stderr) > 20000:
-            stderr = stderr[:20000] + "\n... truncated"
+        with open(out_path, "wb") as out_f, open(err_path, "wb") as err_f:
+            popen_kwargs: dict = {}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            proc = subprocess.Popen(
+                cmd,
+                shell=True,
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=out_f,
+                stderr=err_f,
+                **popen_kwargs,
+            )
+            try:
+                proc.wait(timeout=to)
+                returncode = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_tree(proc.pid)
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    pass
+
+        stdout = _read_bounded(out_path)
+        stderr = _read_bounded(err_path)
+        if timed_out:
+            note = (
+                f"Command still running after {to}s and was stopped. Long-running "
+                "commands (servers, watchers) must be started DETACHED with their "
+                "output redirected to a file, e.g. "
+                'start "" /B cmd /c "python -m http.server 8123 > server.log 2>&1" '
+                "then read server.log to check it."
+            )
+            stderr = ((stderr + "\n") if stderr else "") + note
+            stderr = stderr[:20000]
         return {
             "event": event,
             "command": cmd,
             "workdir": cwd,
-            "returncode": result.returncode,
+            "returncode": returncode,
             "stdout": stdout,
             "stderr": stderr,
-            "success": result.returncode == 0,
+            "success": (not timed_out) and returncode == 0,
+            "timeout": timed_out,
         }
-    except subprocess.TimeoutExpired:
-        return {"event": event, "command": cmd, "workdir": cwd, "returncode": -1, "stdout": "", "stderr": f"Command timed out after {to}s", "success": False, "timeout": True}
     except Exception as e:
         raise RuntimeError(f"Terminal execution failed: {e}") from e
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

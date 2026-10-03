@@ -1,3 +1,6 @@
+SHOW_ARROW = False
+
+
 def format_event(duration: int = 0, **_) -> str:
     try:
         d = int(duration)

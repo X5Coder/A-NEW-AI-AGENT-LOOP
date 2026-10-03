@@ -1,0 +1,8 @@
+{
+  "name": "كل يوم الساعة 8 الصبح حللي ملف sales.csv وطلعي تقر",
+  "description": "كل يوم الساعة 8 الصبح حللي ملف sales.csv وطلعي تقرير مفصل وابعتيه واتساب مع تحليل شامل للاتجاهات",
+  "content": "# Scheduled Task: كل يوم الساعة 8 الصبح حللي ملف sales.csv وطلعي تقرير مفصل وابعتيه واتساب مع تحليل شامل للاتجاهات\n\n## Original Input\nكل يوم الساعة 8 الصبح حللي ملف sales.csv وطلعي تقرير مفصل وابعتيه واتساب مع تحليل شامل للاتجاهات\n\n## Steps (from todo 7fcd3042)\n1. اقرأ ملف sales.csv\n2. حللي البيانات\n3. أنشئ تقرير PDF\n4. أرسل التقرير واتساب\n\n## Execution\nExecute the workflow exactly as planned, using available tools.\n",
+  "instructions": "# Scheduled Task: كل يوم الساعة 8 الصبح حللي ملف sales.csv وطلعي تقرير مفصل وابعتيه واتساب مع تحليل شامل للاتجاهات\n\n## Original Input\nكل يوم الساعة 8 الصبح حللي ملف sales.csv وطلعي تقرير مفصل وابعتيه واتساب مع تحليل شامل للاتجاهات\n\n## Steps (from todo 7fcd3042)\n1. اقرأ ملف sales.csv\n2. حللي البيانات\n3. أنشئ تقرير PDF\n4. أرسل التقرير واتساب\n\n## Execution\nExecute the workflow exactly as planned, using available tools.\n",
+  "created_at": "2026-09-22T23:05:35Z",
+  "auto_created_for_scheduler": true
+}

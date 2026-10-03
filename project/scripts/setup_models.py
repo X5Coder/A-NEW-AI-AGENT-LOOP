@@ -32,6 +32,7 @@ def get_project_root() -> Path:
 
 
 def get_allowed_models_root(project_root: Path) -> Path:
+    # Weights live in project/models/<type>/<name> (first download lands here).
     return (project_root / "models").resolve()
 
 
@@ -163,8 +164,8 @@ def handle_ct2_conversion(project_root: Path, entry: dict, final_dir: Path) -> b
 
     source_repo = entry.get("ct2_source_repo") or entry["repo_id"]
     quantization = entry.get("ct2_quantization", "float16")
-    # Temporary source download dir
-    tmp_source = project_root / "models" / "stt" / "_tmp_source_hf"
+    # Temporary source download dir (inside Models root, cleaned after conversion)
+    tmp_source = get_allowed_models_root(project_root) / "_tmp_source_hf"
     tmp_source.mkdir(parents=True, exist_ok=True)
 
     print(f"  [STT] CT2 mode enabled. Source: {source_repo} -> {final_dir} (quantization={quantization})")

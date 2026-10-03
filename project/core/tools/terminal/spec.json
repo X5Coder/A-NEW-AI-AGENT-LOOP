@@ -1,9 +1,24 @@
 {
   "name": "terminal",
-  "description": "Execute shell commands. Use to perform system actions, inspect, create, modify, run, test, or manage files/programs when direct system execution is required.",
+  "description": "A workspace shell execution tool that runs command-line commands INSIDE X5Agent/Workspace only and returns standard output, errors, and exit codes. Use whenever you need to execute scripts, run automated tests, inspect workspace files, or check environment configurations. Any workdir or path outside Workspace is BLOCKED. Use this to autonomously perform verified system actions instead of passively delegating them to the user.",
   "inputs": {
-    "command": {"type": "string", "required": true, "description": "Command to execute."},
-    "workdir": {"type": "string", "required": false, "description": "Directory to run in."},
-    "timeout": {"type": "integer", "required": false, "default": 30, "minimum": 1, "maximum": 120, "description": "Timeout in seconds. Default 30."}
+    "command": {
+      "type": "string",
+      "required": true,
+      "description": "Command to execute."
+    },
+    "workdir": {
+      "type": "string",
+      "required": false,
+      "description": "Directory to run in."
+    },
+    "timeout": {
+      "type": "integer",
+      "required": false,
+      "default": 30,
+      "minimum": 1,
+      "maximum": 120,
+      "description": "Timeout in seconds. Default 30."
+    }
   }
 }

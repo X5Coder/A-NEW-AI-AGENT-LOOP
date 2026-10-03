@@ -44,19 +44,38 @@ def _validate_job_id(v: Any, required: bool) -> str | None:
     return s if s else None
 
 
+def _legacy_path(name: str) -> Path:
+    return Path(__file__).resolve().parents[3] / "storage" / "database" / name
+
+
+def _data_path(name: str) -> Path:
+    # Unified: writes ALWAYS to X5Agent/Data (zip backup). Fallback legacy only if resolver missing.
+    try:
+        import sys as _sys
+        _proj = Path(__file__).resolve().parents[3]
+        if str(_proj) not in _sys.path:
+            _sys.path.insert(0, str(_proj))
+        from core.paths import data_db_file
+        return data_db_file(name)
+    except Exception:
+        return _legacy_path(name)
+
+
 def _storage_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "storage" / "database" / "scheduler.json"
+    return _data_path("scheduler.json")
 
 
 def _load_jobs() -> list[dict]:
-    p = _storage_path()
-    if not p.exists():
-        return []
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+    for p in (_data_path("scheduler.json"), _legacy_path("scheduler.json")):
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            continue
+    return []
 
 
 def _save_jobs(jobs: list[dict]) -> None:
@@ -66,14 +85,16 @@ def _save_jobs(jobs: list[dict]) -> None:
 
 
 def _load_todos() -> list[dict]:
-    p = Path(__file__).resolve().parents[3] / "storage" / "database" / "todos.json"
-    if not p.exists():
-        return []
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+    for p in (_data_path("todos.json"), _legacy_path("todos.json")):
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            continue
+    return []
 
 
 def _find_recent_todo_for_task(task: str) -> dict | None:
@@ -93,22 +114,32 @@ def _find_recent_todo_for_task(task: str) -> dict | None:
 
 def _load_chat_snippet(limit: int = 30) -> str:
     """Collect last chat messages as context for skill generation (all details from chat)."""
-    db = Path(__file__).resolve().parents[3] / "storage" / "database"
-    for cand in [db / "conversation.json", db / "chat.json"]:
-        if not cand.exists():
-            continue
-        try:
-            data = json.loads(cand.read_text(encoding="utf-8"))
-            if isinstance(data, list) and data:
-                last = data[-limit:]
-                lines = []
-                for m in last:
-                    role = m.get("role","user")
-                    content = str(m.get("content",""))[:300]
-                    lines.append(f"{role}: {content}")
-                return "\n".join(lines)
-        except Exception:
-            continue
+    legacy_db = Path(__file__).resolve().parents[3] / "storage" / "database"
+    try:
+        import sys as _sys2
+        _proj2 = Path(__file__).resolve().parents[3]
+        if str(_proj2) not in _sys2.path:
+            _sys2.path.insert(0, str(_proj2))
+        from core.paths import data_db_dir as _dd
+        data_db = _dd()
+    except Exception:
+        data_db = legacy_db
+    for db in (data_db, legacy_db):
+        for cand in [db / "conversation.json", db / "chat.json"]:
+            if not cand.exists():
+                continue
+            try:
+                data = json.loads(cand.read_text(encoding="utf-8"))
+                if isinstance(data, list) and data:
+                    last = data[-limit:]
+                    lines = []
+                    for m in last:
+                        role = m.get("role","user")
+                        content = str(m.get("content",""))[:300]
+                        lines.append(f"{role}: {content}")
+                    return "\n".join(lines)
+            except Exception:
+                continue
     return ""
 
 
@@ -122,7 +153,7 @@ def _get_api_key() -> str | None:
 
 def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_snippet: str) -> str:
     """Internal LLM request using scheduler_skill_system.md. Returns skill markdown or raises with actual error (per situation)."""
-    system_path = Path(__file__).resolve().parents[2] / "agent" / "prompts" / "scheduler_skill_system.md"
+    system_path = Path(__file__).resolve().parents[3] / "prompts" / "scheduler_skill_system.md"
     system_prompt = ""
     if system_path.exists():
         try:

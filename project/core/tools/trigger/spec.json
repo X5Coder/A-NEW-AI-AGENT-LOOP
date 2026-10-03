@@ -1,0 +1,11 @@
+{
+  "name": "trigger",
+  "description": "An event trigger management tool that creates, inspects, updates, and deletes reactive event monitors to execute one-time automated skills immediately upon external events. Use whenever you need to configure or manage reactive triggers for system events (such as file creation or modification). Use this to achieve immediate event-driven autonomy without continuous manual polling.",
+  "inputs": {
+    "action": {"type": "string", "enum": ["create", "list", "get", "delete", "update"], "required": true, "description": "Action to perform."},
+    "trigger_name": {"type": "string", "required": false, "description": "Name of the trigger to create, from trigger_search, e.g. filesystem_new_file"},
+    "task": {"type": "string", "required": false, "description": "Task to run when triggered, will be turned into a Skill"},
+    "config": {"type": "object", "required": false, "description": "Plugin-specific config for the trigger, e.g. {\"watch_path\": \"storage/files/watch\"}"},
+    "trigger_id": {"type": "string", "required": false, "description": "ID of the trigger for get/delete/update"}
+  }
+}

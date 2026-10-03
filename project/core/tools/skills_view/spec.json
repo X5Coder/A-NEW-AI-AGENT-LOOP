@@ -1,7 +1,11 @@
 {
   "name": "skills_view",
-  "description": "View a skill’s instructions and details. Use after finding a relevant skill to understand how to use it.",
+  "description": "A skill inspection tool that retrieves and reads the complete markdown instructions and parameter guidelines of a specified skill. Use immediately after identifying a relevant skill or when a known skill name is provided. Use this to obtain exact ground-truth procedural steps required to execute specialized tasks correctly.",
   "inputs": {
-    "skill_name": {"type": "string", "required": true, "description": "Name of the skill to view."}
+    "skill_name": {
+      "type": "string",
+      "required": true,
+      "description": "Name of the skill to view."
+    }
   }
 }

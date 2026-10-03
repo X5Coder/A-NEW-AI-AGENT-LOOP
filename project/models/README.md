@@ -7,10 +7,10 @@ Single source of truth: `manifest.json`
 
 | id | repo | local path |
 |---|---|---|
-| embedding | `Qwen/Qwen3-Embedding-0.6B` | `models/embedding/Qwen3-Embedding-0.6B` |
-| stt | `MohamedRashad/Arabic-Whisper-CodeSwitching-Edition` (CT2) | `models/stt/whisper-medium-arabic-codeswitched-ct2` |
-| vision | `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` | `models/vision/SmolVLM2-500M` |
-| tts | `Supertone/supertonic-3` | `models/tts/supertonic-3` |
+| embedding | `Qwen/Qwen3-Embedding-0.6B` | `project/models/embedding/Qwen3-Embedding-0.6B` |
+| stt | `MohamedRashad/Arabic-Whisper-CodeSwitching-Edition` (CT2) | `project/models/stt/whisper-medium-arabic-codeswitched-ct2` |
+| vision | `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` | `project/models/vision/SmolVLM2-500M` |
+| tts | `Supertone/supertonic-3` | `project/models/tts/supertonic-3` |
 
 ## Auto-download (Resume-aware)
 - First run, `scripts/setup_models.py` is invoked via `models/loader.py:ensure_models()` or `python main.py`
@@ -44,12 +44,8 @@ python scripts/setup_models.py --only stt --force
 ```
 
 ## Git hygiene
-`project/.gitignore` + root `.gitignore` exclude:
-- `models/embedding/*`
-- `models/vision/*`
-- `models/tts/*`
-- `models/stt/*`
-Only `.gitkeep` placeholders are tracked.
+`project/models/` weights are git-ignored (root `.gitignore`).
+Only code (`service.py`, configs) is tracked.
 
 ## Runtime helper
 ```python

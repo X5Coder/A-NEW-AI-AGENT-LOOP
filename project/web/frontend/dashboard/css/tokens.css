@@ -1,0 +1,106 @@
+/* ============================================================
+   TOKENS — X5Agent console, Manus-like DARK ONLY theme
+   Flat dark neutrals + bright blue accent + light primary.
+   Red is danger-only. No grain. No light theme.
+   ============================================================ */
+:root {
+  --dur-fast: 150ms;
+  --dur: 200ms;
+  --dur-slow: 300ms;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  /* Manus-like radius: soft cards, pill actions, 22px composer */
+  --r-xs: 8px;
+  --r-sm: 10px;
+  --r-md: 16px;
+  --r-lg: 22px;
+  --r-full: 999px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+
+  --sidebar-w: 284px;
+  --sidebar-rail-w: 56px;
+  --toolbar-h: 56px;
+
+  /* ---------- Manus dark surfaces (page darker than cards = depth) ---------- */
+  --background-nav: #121212;
+  --background-gray-main: #1a1a1a;
+  --background-menu-white: #212121;
+  --background-card-gray: #262626;
+
+  --border-main: rgba(255, 255, 255, 0.09);
+  --border-light: rgba(255, 255, 255, 0.06);
+  --border-dark: rgba(255, 255, 255, 0.14);
+
+  /* ---------- Manus dark text ---------- */
+  --text-primary: #ededed;
+  --text-secondary: #a3a3a3;
+  --text-tertiary: #737373;
+  --text-disable: #525252;
+  --text-blue: #5aa9ff;
+  --text-onblack: #171717;
+
+  --icon-primary: #d4d4d4;
+  --icon-secondary: #a3a3a3;
+  --icon-tertiary: #6f6f6f;
+  --logo-color: #ededed;
+
+  --fill-tsp-white-light: rgba(255, 255, 255, 0.06);
+  --fill-tsp-white-main: rgba(255, 255, 255, 0.09);
+  --fill-tsp-white-dark: rgba(255, 255, 255, 0.13);
+  --fill-tsp-gray-main: #2a2a2a;
+
+  --Button-black: #f5f5f4;
+
+  /* ---------- accent: bright blue for dark ---------- */
+  --blue: #3b9eff;
+  --blue-hi: #6db6ff;
+  --blue-lo: #1f7fe0;
+  --blue-deep: #1663b5;
+
+  /* ---------- legacy aliases (map to dark surfaces) ---------- */
+  --board: var(--background-gray-main);
+  --board-hi: #1e1e1e;
+  --board-lo: #101010;
+  --paper: var(--background-menu-white);
+  --paper-hi: #262626;
+  --paper-lo: #1a1a1a;
+
+  --ink: var(--text-primary);
+  --ink-2: var(--text-secondary);
+  --ink-3: var(--text-tertiary);
+  --ink-4: var(--text-disable);
+  --ink-5: #3a3a38;
+
+  --black: #171717;
+
+  /* ---------- brand = blue (identity), red = danger only ---------- */
+  --brand: #3b9eff;
+  --brand-hi: #6db6ff;
+  --brand-lo: #1f7fe0;
+  --brand-deep: #1663b5;
+
+  --red: #f04438;
+  --red-hi: #f97066;
+  --red-lo: #d92d20;
+  --red-deep: #912018;
+
+  --green: #34c77b;
+  --green-bright: #4ade80;
+
+  --amber: #f5a524;
+
+  --sh-1: 0 0 0 1px rgba(0, 0, 0, 0.22), 0 1px 2px rgba(0, 0, 0, 0.5);
+  --sh-2: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 1px 2px rgba(0, 0, 0, 0.45), 0 4px 12px rgba(0, 0, 0, 0.4);
+  --sh-3: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --sh-4: 0 16px 48px rgba(0, 0, 0, 0.55);
+
+  --grain: none;
+}

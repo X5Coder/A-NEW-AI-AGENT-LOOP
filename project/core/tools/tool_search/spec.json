@@ -1,7 +1,16 @@
 {
   "name": "tool_search",
-  "description": "Search available tools by capability or intent and return their full specifications for use.",
+  "description": "A semantic discovery engine that searches the plugin catalog by functional intent to register external tools (such as file I/O, vision, media, and memory) into the runtime. Use whenever a required capability is not available in your active toolset. Use this to dynamically expand system abilities on demand while keeping prompt context minimal.",
   "inputs": {
-    "query": {"type": "string", "required": true, "description": "Capability or action you need."}
+    "query": {
+      "type": "string",
+      "required": true,
+      "description": "Capability or action you need."
+    },
+    "top_k": {
+      "type": "integer",
+      "required": false,
+      "description": "How many closest tools to return. Default 3, raise when you need broader options."
+    }
   }
 }

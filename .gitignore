@@ -17,6 +17,14 @@ project/models/stt/*
 **/models/**/ *.onnx
 **/models/**/ *.pt
 
+# X5Agent runtime sandbox - never commit user data / workspace
+X5Agent/Data/
+X5Agent/Workspace/
+!X5Agent/.gitkeep
+
+# Secrets - never commit provider keys saved from the console UI
+project/storage/database/model_providers.json
+
 # Python
 __pycache__/
 *.pyc

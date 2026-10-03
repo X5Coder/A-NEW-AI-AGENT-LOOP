@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-CORRECTION_PROMPT_PATH = Path(__file__).resolve().parents[2] / "agent" / "prompts" / "stt_correction_system.md"
+CORRECTION_PROMPT_PATH = Path(__file__).resolve().parents[3] / "prompts" / "stt_correction_system.md"
 
 
 def _read_correction_prompt() -> str:

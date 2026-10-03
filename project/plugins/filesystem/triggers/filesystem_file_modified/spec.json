@@ -1,0 +1,8 @@
+{
+  "name": "filesystem_file_modified",
+  "description": "A filesystem event watcher plugin that monitors a directory and fires whenever existing files are updated to trigger an automated one-time skill with modified file details. Use when file edits, data refreshes, or configuration updates require instant automated reaction. Use this to keep downstream workflows continuously synchronized with file modifications without active polling.",
+  "inputs": {
+    "watch_path": {"type": "string", "required": true, "description": "Directory to watch for modified files"},
+    "pattern": {"type": "string", "required": false, "description": "File pattern to match, e.g. *.txt. Default *.*"}
+  }
+}

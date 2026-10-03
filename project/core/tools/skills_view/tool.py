@@ -68,7 +68,7 @@ def execute(skill_name: str) -> dict:
         except Exception:
             pass
     if not instructions:
-        for candidate in [target / "README.md", target / "instructions.md"]:
+        for candidate in [target / "SKILL.md", target / "README.md", target / "instructions.md"]:
             if candidate.exists():
                 try:
                     instructions = candidate.read_text(encoding="utf-8")[:5000]

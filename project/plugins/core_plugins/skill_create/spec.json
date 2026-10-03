@@ -1,0 +1,9 @@
+{
+  "name": "skill_create",
+  "description": "A procedural skill authoring tool that formats, validates, and saves reusable Markdown skill documents into the skills repository. Use whenever the user requests standardizing a recurring procedure, workflow, or custom domain recipe for future reuse. Use this to turn successful complex workflows into permanent, reusable skills.",
+  "inputs": {
+    "name": {"type": "string", "required": true, "description": "Skill name."},
+    "content": {"type": "string", "required": true, "description": "Skill instructions."},
+    "description": {"type": "string", "required": false, "description": "Brief skill description."}
+  }
+}

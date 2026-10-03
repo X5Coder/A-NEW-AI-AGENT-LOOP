@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Local model manifest - single source of truth for auto-download. Paths are relative to project/ root.",
+  "description": "Local model manifest - single source of truth for auto-download. Paths are relative to project/ root. Heavy weights live in project/models/<type>/<name> (auto-downloaded if missing).",
   "models": [
     {
       "id": "embedding",

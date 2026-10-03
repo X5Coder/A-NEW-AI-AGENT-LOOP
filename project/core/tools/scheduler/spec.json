@@ -1,6 +1,6 @@
 {
   "name": "scheduler",
-  "description": "Schedule and manage tasks for one-time or repeated execution, starting now or later, with optional recurrence, count, or end time.",
+  "description": "A background job automation tool that registers, updates, lists, and manages recurring or time-delayed tasks powered by isolated skill routines. Use whenever the user requests periodic operations (such as daily backups or hourly reports) or future time-based triggers. Use this to run asynchronous workflows reliably and autonomously outside the active conversation.",
   "inputs": {
     "action": {"type": "string", "enum": ["create", "list", "update", "delete", "pause", "resume"], "required": true, "description": "Scheduler action."},
     "job_id": {"type": "string", "required": false, "description": "Scheduled task ID; required for update, delete, pause, and resume."},

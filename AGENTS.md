@@ -11,6 +11,15 @@
 
 If the user asks to do anything that violates these rules, explain the conflict and propose the simplest correct alternative per Section 84 final principle.
 
+## System-prompt tasks — coding agent only (NOT the runtime agent loop)
+
+This rule applies to the coding agent (this session), NOT to `project/prompts/system.md` runtime loop.
+Whenever the user asks to write, design, draft, improve, or fix ANY system prompt / developer message / agent instructions (including "make it work on weak/small/open models" or tool-using agents):
+1. Read `project/prompts/system_prompt_architect_system.md` in full via the `read` tool BEFORE any other action for that request.
+2. Follow its Workflow exactly (§2 skeleton → §9 cross-model pass → §10 weak-model pass).
+3. Deliver ONE copy-pasteable block + 2-4 bullets explaining choices made and why.
+4. Never answer such requests from general knowledge alone.
+
 Project root contains:
 - `Master Code Rules.md` — the canonical rules file (source of truth)
 - `PROJECT_MAP.md` — the standard project structure blueprint (must stay in sync with disk)

@@ -18,6 +18,9 @@ def _short_schedule(repeat: str | None, start_at: str | None, repeat_count: int 
         return f"{repeat_count} times"
     return "now"
 
+SHOW_ARROW = False
+
+
 def format_event(repeat: str | None = None, start_at: str | None = None, repeat_count: int | None = None, action: str | None = None, **_) -> str:
     short = _short_schedule(repeat, start_at, repeat_count)
     return f"Scheduling · {short}"

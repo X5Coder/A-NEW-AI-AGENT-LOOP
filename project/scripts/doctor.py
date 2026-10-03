@@ -176,7 +176,7 @@ def check_model_load() -> bool:
 
 def main() -> int:
     print("=" * 70)
-    print("  Doctor - A New Agent Loop")
+    print("  Doctor - X5Agent")
     print("=" * 70)
     results = []
     results.append(("Python", check_python()))

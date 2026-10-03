@@ -33,19 +33,28 @@ def _validate_k(k: Any) -> int:
 
 
 def _load_history() -> list[dict]:
-    # Conversation history stored as storage/database/conversation.json if exists
-    # Fallback empty
+    # Conversation history: Data first (unified), legacy fallback. Bounded.
     project_root = Path(__file__).resolve().parents[3]
-    hist_path = project_root / "storage" / "database" / "conversation.json"
-    if not hist_path.exists():
-        return []
+    candidates = []
     try:
-        data = json.loads(hist_path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return data[:1000]  # bounded
-        return []
+        import sys as _sys
+        if str(project_root) not in _sys.path:
+            _sys.path.insert(0, str(project_root))
+        from core.paths import data_db_dir as _dd
+        candidates.append(_dd() / "conversation.json")
     except Exception:
-        return []
+        pass
+    candidates.append(project_root / "storage" / "database" / "conversation.json")
+    for hist_path in candidates:
+        if not hist_path.exists():
+            continue
+        try:
+            data = json.loads(hist_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data[:1000]  # bounded
+        except Exception:
+            continue
+    return []
 
 
 def execute(query: str, k: int | None = None) -> dict:

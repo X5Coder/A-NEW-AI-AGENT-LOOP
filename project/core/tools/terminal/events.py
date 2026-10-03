@@ -1,4 +1,8 @@
 """Event for terminal"""
+
+SHOW_ARROW = True
+
+
 def format_event(command: str = "", **_) -> str:
     cmd = command.strip() if isinstance(command, str) else ""
     # Truncate to safe UI length

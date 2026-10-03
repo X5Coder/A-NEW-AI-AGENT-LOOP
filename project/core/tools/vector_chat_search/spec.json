@@ -1,8 +1,19 @@
 {
   "name": "vector_chat_search",
-  "description": "Search the current conversation for semantically relevant past messages. Use when earlier context or details may be needed.",
+  "description": "A conversational memory search tool that queries vector embeddings of past chat messages using semantic similarity. Use whenever you need to recall earlier discussions, prior user choices, or established project facts outside the current message window. Use this to preserve long-term context continuity without re-asking the user for established details.",
   "inputs": {
-    "query": {"type": "string", "required": true, "description": "Information to search for."},
-    "k": {"type": "integer", "required": false, "default": 5, "minimum": 1, "maximum": 20, "description": "Number of results. Default 5."}
+    "query": {
+      "type": "string",
+      "required": true,
+      "description": "Information to search for."
+    },
+    "k": {
+      "type": "integer",
+      "required": false,
+      "default": 5,
+      "minimum": 1,
+      "maximum": 20,
+      "description": "Number of results. Default 5."
+    }
   }
 }

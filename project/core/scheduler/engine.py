@@ -10,16 +10,36 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
-STORAGE = Path(__file__).resolve().parents[2] / "storage" / "database" / "scheduler.json"
+def _storage_path() -> Path:
+    # Unified: writes ALWAYS to X5Agent/Data (zip backup). Fallback legacy only if resolver missing.
+    try:
+        import sys as _sys
+        _proj = Path(__file__).resolve().parents[2]
+        # core/scheduler/engine.py -> parents[2] is project/
+        _root = _proj if _proj.name == "project" else Path(__file__).resolve().parents[3]
+        if str(_root) not in _sys.path:
+            _sys.path.insert(0, str(_root))
+        from core.paths import data_db_file
+        return data_db_file("scheduler.json")
+    except Exception:
+        return Path(__file__).resolve().parents[2] / "storage" / "database" / "scheduler.json"
+
+
+STORAGE = _storage_path()
+_LEGACY = Path(__file__).resolve().parents[2] / "storage" / "database" / "scheduler.json"
 
 
 def _load_jobs() -> list[dict]:
-    if not STORAGE.exists():
-        return []
-    try:
-        return json.loads(STORAGE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    for cand in (STORAGE, _LEGACY):
+        if not cand.exists():
+            continue
+        try:
+            data = json.loads(cand.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            continue
+    return []
 
 
 def _save_jobs(jobs: list[dict]) -> None:
@@ -119,8 +139,8 @@ def _build_isolated_context(job: dict) -> tuple[str, str]:
     env = f"[Environment]\n- DateTime: {now.strftime('%Y-%m-%d %H:%M:%S %Z')} (ISO: {now.isoformat()})\n- OS: {platform.system()} {platform.release()}\n- CWD: {Path.cwd()}"
     try:
         import json
-        db = Path(__file__).resolve().parents[2] / "storage" / "database"
-        imp = json.loads((db / "important_memory.json").read_text(encoding="utf-8")) if (db / "important_memory.json").exists() else []
+        from core.paths import read_db_json as _rdb
+        imp = _rdb("important_memory.json", [])
         mem_block = "[Important Memory]\n" + "\n".join([f"  - {x.get('key')}: {x.get('content')[:120]}" for x in imp[-5:]]) if imp else "[Memories: empty]"
     except Exception:
         mem_block = ""

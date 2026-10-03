@@ -1,8 +1,19 @@
 {
   "name": "todo_list",
-  "description": "Create and manage a structured task plan. Use for complex or multi-step tasks that need organized execution.",
+  "description": "A task planning and state-tracking tool that records, updates, and tracks hierarchical execution milestones with live progress statuses. Use at the beginning of any multi-step or complex workflow and whenever milestone tasks complete. Use this to maintain clear execution state, prevent missed steps, and avoid premature termination.",
   "inputs": {
-    "task": {"type": "string", "required": true, "description": "Task to plan."},
-    "steps": {"type": "array", "required": false, "items": {"type": "string"}, "description": "Ordered execution steps."}
+    "task": {
+      "type": "string",
+      "required": true,
+      "description": "Task to plan."
+    },
+    "steps": {
+      "type": "array",
+      "required": false,
+      "items": {
+        "type": "string"
+      },
+      "description": "Ordered execution steps."
+    }
   }
 }

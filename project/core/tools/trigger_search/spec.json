@@ -1,0 +1,16 @@
+{
+  "name": "trigger_search",
+  "description": "A trigger discovery tool that searches available event types across installed plugins to retrieve their event schemas and configuration parameters. Use prior to setting up new reactive triggers or when checking which event types are supported. Use this to ensure valid trigger configurations and prevent registration of unsupported or duplicate watchers.",
+  "inputs": {
+    "query": {
+      "type": "string",
+      "required": true,
+      "description": "Capability or trigger you need, e.g. new file, new message."
+    },
+    "top_k": {
+      "type": "integer",
+      "required": false,
+      "description": "How many closest triggers to return. Default 3, raise when you need broader options."
+    }
+  }
+}

@@ -11,7 +11,21 @@ import time
 from pathlib import Path
 from typing import Any
 
-STORE_PATH = Path(__file__).resolve().parents[3] / "storage" / "vector" / "tool_embeddings.json"
+def _resolve_store_path() -> Path:
+    # Unified: embeddings live in X5Agent/Data/vector (inside zip backup).
+    try:
+        import sys as _sys
+        _proj = Path(__file__).resolve().parents[3]
+        if str(_proj) not in _sys.path:
+            _sys.path.insert(0, str(_proj))
+        from core.paths import data_vector_file
+        return data_vector_file("tool_embeddings.json")
+    except Exception:
+        return Path(__file__).resolve().parents[3] / "storage" / "vector" / "tool_embeddings.json"
+
+
+STORE_PATH = _resolve_store_path()
+_STORE_LEGACY = Path(__file__).resolve().parents[3] / "storage" / "vector" / "tool_embeddings.json"
 # Also keep hash file separately for quick check? Stored inside JSON.
 
 
@@ -50,6 +64,30 @@ def _collect_discoverable_specs() -> list[dict]:
                         tools.append(spec)
                     except Exception:
                         continue
+    # Browser discoverable tools (project/X5Browser, single versioned folder).
+    # Appended here so tool_search embeds them and the hash auto-rebuilds on change.
+    try:
+        import sys as _sys2
+        _root2 = _project_root()
+        if str(_root2) not in _sys2.path:
+            _sys2.path.insert(0, str(_root2))
+        from X5Browser.catalog import SPECS as _BROWSER_SPECS
+        _seen = {t.get("name") for t in tools}
+        for _spec in _BROWSER_SPECS:
+            try:
+                if not isinstance(_spec, dict) or _spec.get("core"):
+                    continue
+                if not isinstance(_spec.get("name"), str) or not isinstance(_spec.get("description"), str):
+                    continue
+                if _spec.get("name") in _seen:
+                    continue
+                tools.append({"name": _spec["name"], "description": _spec["description"],
+                              "inputs": _spec.get("inputs", {})})
+                _seen.add(_spec["name"])
+            except Exception:
+                continue
+    except Exception:
+        pass
     # Sort by name for deterministic hash
     tools.sort(key=lambda x: x.get("name", ""))
     return tools
@@ -64,15 +102,16 @@ def _compute_hash(tools: list[dict]) -> str:
 
 
 def _load_store() -> dict | None:
-    if not STORE_PATH.exists():
-        return None
-    try:
-        data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return None
-        return data
-    except Exception:
-        return None
+    for cand in (STORE_PATH, _STORE_LEGACY):
+        if not cand.exists():
+            continue
+        try:
+            data = json.loads(cand.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            continue
+    return None
 
 
 def _save_store(hash_val: str, tools_with_embeddings: list[dict]) -> None:

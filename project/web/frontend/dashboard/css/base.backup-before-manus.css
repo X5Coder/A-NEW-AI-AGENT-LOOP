@@ -1,0 +1,214 @@
+/* ============================================================
+   BASE — reset, body, grain, scrollbar, animations
+   ============================================================ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  background-color: var(--board);
+  background-image:
+    radial-gradient(ellipse 90% 70% at 30% 20%, rgba(255, 252, 235, 0.6) 0%, transparent 70%),
+    radial-gradient(ellipse 100% 100% at 80% 90%, rgba(120, 95, 55, 0.1) 0%, transparent 60%),
+    linear-gradient(170deg, var(--board-hi) 0%, var(--board) 55%, var(--board-lo) 100%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: var(--grain);
+  background-size: 240px 240px;
+  mix-blend-mode: multiply;
+  opacity: 0.3;
+  z-index: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+::selection {
+  background: var(--red);
+  color: var(--paper-hi);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: "Anton", Impact, sans-serif;
+  font-weight: 400;
+  margin: 0;
+  letter-spacing: 0.015em;
+  text-transform: uppercase;
+  color: var(--ink);
+  line-height: 0.98;
+}
+
+*::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+*::-webkit-scrollbar-track {
+  background: rgba(90, 68, 40, 0.08);
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(90, 68, 40, 0.35);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 0;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(90, 68, 40, 0.55);
+  background-clip: content-box;
+}
+
+/* ---------- keyframes ---------- */
+@keyframes a-fade-up {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes a-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translate3d(0, 8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translate3d(0, 0, 0);
+  }
+}
+@keyframes a-bar-grow {
+  from {
+    transform: scaleY(0.05);
+    opacity: 0.4;
+  }
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+@keyframes a-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes a-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(178, 58, 42, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@keyframes a-blink {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+@keyframes a-cursor-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes a-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes a-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes a-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+[data-anim] {
+  will-change: transform, opacity;
+}
+[data-anim].anim {
+  animation: a-fade-up var(--dur-slow) var(--ease) both;
+}
+[data-anim="scale"].anim {
+  animation: a-scale-in var(--dur-slow) var(--ease) both;
+}
+[data-anim="bar"].anim {
+  animation: a-bar-grow var(--dur-slow) var(--ease) both;
+}
+[data-anim="fade"].anim {
+  animation: a-fade var(--dur) var(--ease) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "video_analyze",
+  "description": "An asynchronous video inspection tool that extracts keyframes across a video timeline and performs vision analysis per frame. Use whenever a video file requires visual content analysis, object detection, or temporal scene summarization. Use this to inspect complex temporal visual data reliably without overloading system memory.",
+  "inputs": {
+    "video_path": {"type": "string", "required": false, "controllable": false, "description": "Path to the video file."},
+    "video_id": {"type": "string", "required": false, "controllable": false, "description": "ID of the stored video."},
+    "prompt": {"type": "string", "required": false, "description": "What to analyze per frame."},
+    "job_id": {"type": "string", "required": false, "controllable": false, "description": "Job ID to poll status. If provided, returns job status."}
+  }
+}

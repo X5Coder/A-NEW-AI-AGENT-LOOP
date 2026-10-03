@@ -1,8 +1,7 @@
 {
   "name": "wait",
-  "description": "Pause execution for a specified duration before continuing the loop. Use when you need to wait for an external process, rate limiting, or polling a long-running job.",
+  "description": "A deliberate execution pause tool that suspends the agent loop for a specified number of seconds before proceeding. Use when polling asynchronous background tasks (such as video rendering or builds) that require processing time between status checks. Use this to eliminate aggressive busy-waiting and allow external operations to finish.",
   "inputs": {
-    "duration": {"type": "integer", "required": true, "minimum": 1, "maximum": 300, "description": "Duration to wait in seconds (1-300)."},
-    "reason": {"type": "string", "required": false, "description": "Optional reason for waiting."}
+    "duration": {"type": "integer", "required": true, "minimum": 1, "maximum": 300, "description": "Duration to wait in seconds (1-300)."}
   }
 }

@@ -1,0 +1,8 @@
+{
+  "name": "filesystem_new_file",
+  "description": "A filesystem event watcher plugin that monitors a specified directory and fires upon new file creation to pass new file paths into an automated one-time skill. Use when incoming files (such as new images, logs, or reports) require instant automated processing upon arrival. Use this to react immediately to incoming file data without polling delays or manual checks.",
+  "inputs": {
+    "watch_path": {"type": "string", "required": true, "description": "Directory to watch for new files, e.g. storage/files/watch"},
+    "pattern": {"type": "string", "required": false, "description": "File pattern to match, e.g. *.txt, *.csv. Default *.*"}
+  }
+}
