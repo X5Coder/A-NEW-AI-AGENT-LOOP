@@ -3,13 +3,19 @@
 Owns: per-chat state machines, command routing (/browser /dashboard
 /cancel), media-to-text conversion (voice STT, image/file Workspace hints),
 agent execution through the shared site session (the Agent page renders the
-same run live; the channel gets ONLY the final reply after it finishes).
+same run live).
 
 Flow per chat: messages collect for 5s (every new message restarts the 5s)
--> one merged request (one message per line, in order) -> run. A message
-arriving mid-run gets a fixed numbered ack and is queued; all queued texts
-merge and run once the loop finishes. /cancel stops the loop AND drops every
-queued query. Inbound media converts at run time inside the worker. Never raises.
+-> one merged request (one message per line, in order) -> run. Progress is
+ONE live message, edited in place: latest reason text only + ..... (edits
+throttled, 14-min window, plain-line fallback). The final reply edits the
+live message last; ANY edit refusal sends it as a new message instead.
+A message arriving mid-run
+gets Queued (N) and runs merged after. A control handoff pauses the loop
+with link + reason in the live message; the word continue resumes it.
+/cancel stops the loop AND drops every queued query. The final reply has
+bounded retries so it is never lost. Inbound media converts at run time
+inside the worker. Never raises.
 """
 from __future__ import annotations
 
@@ -27,6 +33,13 @@ from gateway import channels as _send
 
 _CoalesceSeconds = 5.0
 _MaxParts = 20
+
+# Single live progress message: reason text only (no emoji) + trailing dots.
+_LiveDots = "....."
+_LiveEditCooldown = 3.0
+_LiveEditWindow = 14 * 60.0
+_PauseTimeout = 590.0
+_ContinueWord = "continue"
 
 _states: dict[tuple[str, str], dict] = {}
 _states_lock = threading.Lock()
@@ -57,14 +70,19 @@ def get_log() -> list[dict]:
         return []
 
 
-def _tell(channel: str, chat: str, text: str) -> bool:
-    """Send + remember (echo guard for self-chat). Never raises."""
+def _remember_sent(channel: str, chat: str, text: str) -> None:
+    """Remember one outbound text (echo guard for self-chat). Never raises."""
     try:
         _sent_echo.append((channel, chat, str(text or "").strip()[:200], time.time()))
         while len(_sent_echo) > 50:
             _sent_echo.pop(0)
     except Exception:
         pass
+
+
+def _tell(channel: str, chat: str, text: str) -> bool:
+    """Send + remember (echo guard for self-chat). Never raises."""
+    _remember_sent(channel, chat, text)
     return _send.send_text(channel, chat, text)
 
 
@@ -103,6 +121,15 @@ def _state_for(key: tuple[str, str]) -> dict:
                 "cancel": None,
                 "notified": False,
                 "queued_count": 0,
+                "live_id": "",
+                "live_text": "",
+                "live_last_edit": 0.0,
+                "live_started": 0.0,
+                "live_fallback": False,
+                "paused": None,
+                "pause_event": None,
+                "pause_resumed": False,
+                "cancel_noticed": False,
             }
             _states[key] = st
         return st
@@ -219,6 +246,241 @@ def _convert_part(part: dict) -> tuple[str, str]:
     return text or f"[file received: {name}]", hint
 
 
+def _send_reason(channel: str, chat: str, seen: dict, *args) -> None:
+    """One step line into the single live message (reason, no emoji).
+
+    Deduped, bounded, best-effort. Never raises."""
+    try:
+        reason = str(args[2] if len(args) > 2 else "") if len(args) > 2 else ""
+    except Exception:
+        reason = ""
+    reason = (reason or "").strip()
+    if not reason or reason == seen.get("last"):
+        return
+    seen["last"] = reason
+    _live_update(channel, chat, reason)
+
+
+def _live_push(channel: str, chat: str, text: str) -> None:
+    """Set the single live message to exact text (send once, then edit).
+
+    Falls back to plain lines when edits are unavailable. Sends are
+    remembered for the self-chat echo guard. Never raises."""
+    try:
+        text = str(text or "").strip()[:1200]
+        if not text:
+            return
+        st = _state_for((channel, chat))
+        with st["lock"]:
+            live_id = str(st.get("live_id") or "")
+            fallback = bool(st.get("live_fallback"))
+            st["live_text"] = text
+        if fallback:
+            _tell(channel, chat, text)
+            return
+        if not live_id:
+            key = _send.send_tracked(channel, chat, text)
+            with st["lock"]:
+                if key:
+                    st["live_id"] = key
+                    if not st.get("live_started"):
+                        st["live_started"] = time.monotonic()
+                else:
+                    st["live_fallback"] = True
+            if key:
+                _remember_sent(channel, chat, text)
+            else:
+                _tell(channel, chat, text)
+            return
+        if _send.edit_tracked(channel, chat, live_id, text):
+            _remember_sent(channel, chat, text)
+            return
+        with st["lock"]:
+            st["live_fallback"] = True
+        _tell(channel, chat, _strip_dots(text))
+    except Exception:
+        pass
+
+
+def _strip_dots(text: str) -> str:
+    """Remove one trailing ..... line (fallback sends stay clean)."""
+    try:
+        t = str(text or "")
+        tail = "\n" + _LiveDots
+        if t.endswith(tail):
+            t = t[: -len(tail)]
+        return t.strip() or t
+    except Exception:
+        return str(text or "")
+
+
+def _live_update(channel: str, chat: str, reason: str) -> None:
+    """Progress step: reason text + ..... in the single live message.
+
+    Edits are throttled (3s) and stop after 14 min (WhatsApp edit window),
+    falling back to plain lines. Never raises."""
+    try:
+        reason = str(reason or "").strip()[:300]
+        if not reason:
+            return
+        st = _state_for((channel, chat))
+        with st["lock"]:
+            fallback = bool(st.get("live_fallback"))
+            started = float(st.get("live_started") or 0.0)
+            last = float(st.get("live_last_edit") or 0.0)
+            live_id = str(st.get("live_id") or "")
+        now = time.monotonic()
+        if not fallback and started and now - started > _LiveEditWindow:
+            with st["lock"]:
+                st["live_fallback"] = True
+            fallback = True
+        if fallback:
+            _tell(channel, chat, f"▫️ {reason}")
+            return
+        if live_id and now - last < _LiveEditCooldown:
+            with st["lock"]:
+                st["live_text"] = reason
+            return
+        with st["lock"]:
+            st["live_last_edit"] = now
+        _live_push(channel, chat, reason + "\n" + _LiveDots)
+        with st["lock"]:
+            st["live_text"] = reason
+    except Exception:
+        pass
+
+
+def _live_deliver_final(channel: str, chat: str, text: str, reply_to: str = "") -> bool:
+    """Deliver the final reply through the live message when possible.
+
+    Permanent rule: edit the live message to the reply once; ANY refusal
+    sends the reply as a new message (bounded retries). Never raises."""
+    try:
+        text = str(text or "").strip()
+        if not text:
+            return False
+        st = _state_for((channel, chat))
+        with st["lock"]:
+            live_id = str(st.get("live_id") or "")
+            fallback = bool(st.get("live_fallback"))
+            st["live_id"] = ""
+        if live_id and not fallback:
+            head = text[:3500]
+            if _send.edit_tracked(channel, chat, live_id, head):
+                _remember_sent(channel, chat, head)
+                st2 = _state_for((channel, chat))
+                with st2["lock"]:
+                    st2["live_text"] = head
+                rest = text[3500:].strip()
+                if rest:
+                    return _send_final(channel, chat, rest, reply_to=reply_to)
+                return True
+        return _send_final(channel, chat, text[:8000], reply_to=reply_to)
+    except Exception:
+        return False
+
+
+def _live_finalize(channel: str, chat: str) -> None:
+    """One last edit removing the trailing ..... (run over). Best-effort."""
+    try:
+        st = _state_for((channel, chat))
+        with st["lock"]:
+            live_id = str(st.get("live_id") or "")
+            text = str(st.get("live_text") or "").strip()
+            fallback = bool(st.get("live_fallback"))
+            st["live_id"] = ""
+        if live_id and text and not fallback:
+            _send.edit_tracked(channel, chat, live_id, text[:1200])
+    except Exception:
+        pass
+
+
+def _wait_for_continue(channel: str, chat: str, cancel) -> bool:
+    """Block (sliced, cancel-aware) until the user sends continue.
+
+    True only on an explicit continue; False on cancel/timeout. Never raises."""
+    try:
+        st = _state_for((channel, chat))
+        ev = threading.Event()
+        with st["lock"]:
+            st["pause_event"] = ev
+        deadline = time.monotonic() + _PauseTimeout
+        while time.monotonic() < deadline:
+            try:
+                if cancel is not None and cancel.is_set():
+                    return False
+            except Exception:
+                pass
+            try:
+                if ev.wait(2):
+                    break
+            except Exception:
+                break
+        with st["lock"]:
+            resumed = bool(st.get("pause_resumed"))
+            st["pause_event"] = None
+        return resumed
+    except Exception:
+        return False
+
+
+def _resume_from_pause(key: tuple[str, str], paused) -> None:
+    """User sent continue: answer the server hold (shared runs) + wake the waiter."""
+    try:
+        st = _state_for(key)
+        with st["lock"]:
+            st["pause_resumed"] = True
+            ev = st.get("pause_event")
+            qid = str((paused or {}).get("qid") or "")
+            st["paused"] = None
+        if qid:
+            try:
+                import json as _json
+                import urllib.request as _urlreq
+
+                _urlreq.urlopen(
+                    _urlreq.Request(
+                        _dashboard_url + "api/chat_answer",
+                        data=_json.dumps({"id": qid, "answer": _ContinueWord}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    ),
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        try:
+            if ev is not None:
+                ev.set()
+        except Exception:
+            pass
+        log_event("live_resume", f"{key[0]}:{key[1]} continue -> loop resumes")
+    except Exception:
+        pass
+
+
+def _unblock_server_pause(paused) -> None:
+    """Best-effort release of a server-side live hold (cancel path)."""
+    try:
+        qid = str((paused or {}).get("qid") or "")
+        if not qid:
+            return
+        import json as _json
+        import urllib.request as _urlreq
+
+        _urlreq.urlopen(
+            _urlreq.Request(
+                _dashboard_url + "api/chat_answer",
+                data=_json.dumps({"id": qid, "decision": "stop"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ),
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def _typing_loop(channel: str, chat: str, done) -> None:
     """Refresh the typing indicator until the run ends. Best-effort."""
     try:
@@ -247,6 +509,31 @@ def _wa_options() -> dict:
         }
     except Exception:
         return {"read": False, "typing": True, "reply": False}
+
+
+def _send_final(channel: str, chat: str, text: str, reply_to: str = "") -> bool:
+    """Deliver the final reply with bounded retries (3 attempts, ~2s apart).
+
+    A transient bridge/LID hiccup must not eat the reply the user waited for.
+    Never raises; True only if a send succeeded."""
+    for attempt in range(3):
+        if attempt:
+            try:
+                time.sleep(2)
+            except Exception:
+                break
+        try:
+            if reply_to:
+                ok = _send.send_text(channel, chat, text, reply_to=reply_to)
+                if ok:
+                    _remember_sent(channel, chat, text)
+            else:
+                ok = _tell(channel, chat, text)
+            if ok:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _run_parts(channel: str, chat: str, parts: list, cancel) -> None:
@@ -310,7 +597,7 @@ def _run_parts_inner(channel: str, chat: str, parts: list, cancel, opts: dict | 
     if extra > 0:
         body += f"\n(+{extra} more omitted)"
     if not body:
-        _send.send_text(channel, chat, "Couldn't read that — try again.")
+        _tell(channel, chat, "Couldn't read that — try again.")
         return
     seen: dict = {}
     # ALWAYS mirror through the shared site session first (the Agent page
@@ -332,32 +619,90 @@ def _run_parts_inner(channel: str, chat: str, parts: list, cancel, opts: dict | 
                 reply_to = ""
         final = result.get("final_answer") if isinstance(result, dict) else None
         if isinstance(final, str) and final.strip():
-            ok = _send.send_text(channel, chat, final.strip()[:8000], reply_to=reply_to)
+            # The reply must arrive: last edit of the live message first,
+            # new message(s) on ANY refusal, then log if all failed.
+            ok = _live_deliver_final(channel, chat, final.strip(), reply_to=reply_to)
         elif isinstance(result, dict) and result.get("cancelled"):
-            ok = _send.send_text(channel, chat, "⏹ Stopped.")
+            try:
+                _st = _state_for((channel, chat))
+                with _st["lock"]:
+                    noticed = bool(_st.get("cancel_noticed"))
+                    _st["cancel_noticed"] = False
+            except Exception:
+                noticed = False
+            ok = True if noticed else _tell(channel, chat, "⏹ اتوقف التنفيذ.")
         elif isinstance(result, dict) and result.get("direct_error"):
-            ok = _send.send_text(channel, chat, f"Agent failed: {str(result.get('direct_error'))[:200]}")
+            ok = _tell(channel, chat, f"Agent failed: {str(result.get('direct_error'))[:200]}")
         elif isinstance(result, dict) and result.get("error"):
-            ok = _send.send_text(channel, chat, f"Agent failed: {str(result.get('error'))[:200]}")
+            ok = _tell(channel, chat, f"Agent failed: {str(result.get('error'))[:200]}")
         else:
-            ok = _send.send_text(channel, chat, "Done.")
+            ok = _tell(channel, chat, "Done.")
         if not ok:
             log_event("send_failed", f"{channel}:{chat} final reply not delivered")
     except Exception:
         pass
 
 
+def _direct_question(channel: str, chat: str, cancel):
+    """on_question handler for local gateway runs.
+
+    Live control handoffs pause the loop until the user sends continue;
+    ask stays unanswered and approvals auto-continue (today's behavior)."""
+
+    def _on_q(kind, payload):
+        try:
+            k = str(kind or "")
+            if k == "live":
+                out = payload if isinstance(payload, dict) else {}
+                url = str(out.get("url") or "")[:2000]
+                reason = str(out.get("reason") or "")[:300]
+                st = _state_for((channel, chat))
+                with st["lock"]:
+                    st["paused"] = {"qid": ""}
+                    st["pause_resumed"] = False
+                    st["live_last_edit"] = time.monotonic()
+                lines = []
+                if reason.strip():
+                    lines.append(reason.strip())
+                if url:
+                    lines.append(url)
+                lines.append("لما تخلص ابعت كلمة continue")
+                _live_push(channel, chat, "\n".join(lines)[:1200])
+                log_event("live_pause", f"{channel}:{chat} waiting for continue")
+                resumed = _wait_for_continue(channel, chat, cancel)
+                with st["lock"]:
+                    st["paused"] = None
+                return {"answer": _ContinueWord} if resumed else None
+            if k == "approval":
+                return {"decision": "continue"}
+            return None
+        except Exception:
+            return None
+
+    return _on_q
+
+
 def _run_direct(body: str, channel: str, chat: str, seen: dict, cancel) -> dict:
-    """Local agent run (last-resort fallback). Silent: the channel gets
-    ONLY the final reply (never progress texts)."""
+    """Local agent run (last-resort fallback). Steps go to the single live
+    message; the final reply is sent by the caller."""
+    def _narrate_ev(text: str) -> None:
+        try:
+            r = str(text or "").strip()[:300]
+            if not r or r == seen.get("last"):
+                return
+            seen["last"] = r
+            _live_update(channel, chat, r)
+        except Exception:
+            pass
+
     try:
         from core.agent.loop.engine import run_loop
 
         return run_loop(
             body,
-            on_tool_start=None,
-            on_event=None,
-            on_question=None,
+            on_tool_start=lambda *a: _send_reason(channel, chat, seen, *a),
+            on_event=lambda t, o=None, k=None, m=None, r=None, s=None: _narrate_ev(t),
+            on_question=_direct_question(channel, chat, cancel),
             restricted=False,
             cancel_flag=cancel,
         )
@@ -366,18 +711,57 @@ def _run_direct(body: str, channel: str, chat: str, seen: dict, cancel) -> dict:
 
 
 def _stream_dashboard_run(body: str, channel: str, chat: str, seen: dict, cancel) -> dict | None:
-    """Run ONCE through the main site session; channel gets ONLY the final.
+    """Run ONCE through the main site session; steps + final go to the channel.
 
     The dashboard Agent page renders the message + steps live from the same
     frames (shared context, single execution, real SSE typing animation).
-    Progress/live frames are never forwarded as channel texts — the reply
-    is sent after the run finishes. Returns the done payload, None when the
-    shared run stayed busy past the bounded wait (caller falls back local),
-    or {"transport_error": ...} when unreachable (caller falls back local).
-    Never raises.
+    Step progress (reason first, then the tool's event label) is forwarded
+    as channel texts; the reply is sent after the run finishes. Returns the
+    done payload, None when the shared run stayed busy past the bounded wait
+    (caller falls back local), or {"transport_error": ...} when unreachable
+    (caller falls back local). Never raises.
     """
     import json as _json
     import urllib.request as _urlreq
+
+    def _narrate(reason: str) -> None:
+        try:
+            r = str(reason or "").strip()[:300]
+            if not r or r == seen.get("last"):
+                return
+            seen["last"] = r
+            _live_update(channel, chat, r)
+        except Exception:
+            pass
+
+    def _pause_for_live(fr: dict) -> bool:
+        """Control handoff in a shared run: link+reason+continue line, then
+        block till continue/cancel/timeout. True = keep reading the stream."""
+        try:
+            qid = str(fr.get("id") or "")
+            url = str(fr.get("url") or "")[:2000]
+            reason = str(fr.get("reason") or fr.get("text") or "").strip()[:300]
+            st = _state_for((channel, chat))
+            with st["lock"]:
+                st["paused"] = {"qid": qid}
+                st["pause_resumed"] = False
+                st["live_last_edit"] = time.monotonic()
+            lines = []
+            if reason:
+                lines.append(reason)
+            if url:
+                lines.append(url)
+            lines.append("لما تخلص ابعت كلمة continue")
+            _live_push(channel, chat, "\n".join(lines)[:1200])
+            log_event("live_pause", f"{channel}:{chat} waiting for continue")
+            resumed = _wait_for_continue(channel, chat, cancel)
+            with st["lock"]:
+                st["paused"] = None
+            if not resumed and _cancelled():
+                return False
+            return True
+        except Exception:
+            return True
 
     def _forward_cancel() -> None:
         try:
@@ -463,7 +847,32 @@ def _stream_dashboard_run(body: str, channel: str, chat: str, seen: dict, cancel
             if not isinstance(fr, dict):
                 continue
             t = fr.get("type")
-            if t == "done":
+            if t == "event_start":
+                _narrate(fr.get("reason") or fr.get("event") or "")
+            elif t == "event":
+                # Completion after the reason: same dedup key, so an
+                # identical label does not echo twice.
+                _narrate(fr.get("event") or "")
+            elif t == "question":
+                # Only live control handoffs reach gateway streams (the server
+                # auto-resolves ask/approval for channels). Pause till continue.
+                if str(fr.get("kind") or "") != "live":
+                    continue
+                if not _pause_for_live(fr):
+                    _forward_cancel()
+                    try:
+                        res.close()
+                    except Exception:
+                        pass
+                    return {"cancelled": True}
+                if _cancelled():
+                    _forward_cancel()
+                    try:
+                        res.close()
+                    except Exception:
+                        pass
+                    return {"cancelled": True}
+            elif t == "done":
                 # Normalize to the run_loop result shape (final_answer, ...).
                 return {"final_answer": fr.get("reply"),
                         "steps": fr.get("steps", 0),
@@ -475,8 +884,7 @@ def _stream_dashboard_run(body: str, channel: str, chat: str, seen: dict, cancel
                 return {"error": fr.get("error") or "run failed"}
             elif t == "cancelled":
                 return {"cancelled": True}
-            # event/event_start/token/live/live_end/ping ignored here on purpose:
-            # the channel gets ONLY the final reply (animation lives on the site).
+            # token/live_end/ping ignored (steps + final carry the run).
         return {"transport_error": "stream ended without result"}
     except Exception as e:
         return {"transport_error": f"stream failed: {str(e)[:120]}"}
@@ -502,7 +910,25 @@ def _worker(key: tuple[str, str]) -> None:
             st["cancel"] = cancel
             st["notified"] = False
             st["queued_count"] = 0
-        _run_parts(channel, chat, parts, cancel)
+            st["live_id"] = ""
+            st["live_text"] = ""
+            st["live_last_edit"] = 0.0
+            st["live_started"] = 0.0
+            st["live_fallback"] = False
+            st["paused"] = None
+            st["pause_event"] = None
+            st["pause_resumed"] = False
+            st["cancel_noticed"] = False
+        try:
+            _run_parts(channel, chat, parts, cancel)
+        except Exception as e:
+            # Never vanish silently after run_start: tell the user it broke.
+            log_event("run_crashed", f"{channel}:{chat} {str(e)[:120]}")
+            _tell(channel, chat, "⚠️ حصل خطأ أثناء التنفيذ — جرب تاني.")
+        try:
+            _live_finalize(channel, chat)
+        except Exception:
+            pass
 
 
 def _fire(key: tuple[str, str]) -> None:
@@ -536,11 +962,22 @@ def _handle_command(msg: dict) -> bool:
             st["parts"] = []
             st["queued_count"] = 0
             st["notified"] = False
+            # A control handoff may be waiting for continue: release it too.
+            paused = st.get("paused")
+            pause_ev = st.get("pause_event")
+            st["paused"] = None
+            st["pause_event"] = None
         try:
             if timer is not None:
                 timer.cancel()
         except Exception:
             pass
+        try:
+            if pause_ev is not None:
+                pause_ev.set()
+        except Exception:
+            pass
+        _unblock_server_pause(paused)
         if running and cancel is not None:
             try:
                 cancel.set()
@@ -561,11 +998,17 @@ def _handle_command(msg: dict) -> bool:
             )
         except Exception:
             pass
-        if running or pending:
-            _send.send_text(channel, chat, "⏹ اتلغى كل حاجة — اللوب الحالي وكل الرسائل المستنية.")
-            log_event("cancel", f"{channel}:{chat} running={running} dropped={pending}")
+        if running:
+            # Immediate notice; the run's end skips its own via the flag.
+            _tell(channel, chat, "⏹ اتوقف التنفيذ.")
+            with st["lock"]:
+                st["cancel_noticed"] = True
+            log_event("cancel", f"{channel}:{chat} running=True dropped={pending}")
+        elif pending:
+            _tell(channel, chat, "⏹ اتلغى كل حاجة — اللوب الحالي وكل الرسائل المستنية.")
+            log_event("cancel", f"{channel}:{chat} running=False dropped={pending}")
         else:
-            _send.send_text(channel, chat, "مفيش حاجة شغالة.")
+            _tell(channel, chat, "مفيش حاجة شغالة.")
         return True
     if cmd == "/browser":
         try:
@@ -611,6 +1054,16 @@ def handle_incoming(msg: dict) -> None:
         key = (msg["channel"], msg["chat"])
         st = _state_for(key)
         with st["lock"]:
+            paused = st.get("paused")
+        if paused is not None:
+            # Control handoff: the loop waits for the word continue.
+            # Anything else gets a reminder and is dropped (never queued).
+            if msg.get("kind") == "text" and str(msg.get("text") or "").strip().lower() == _ContinueWord:
+                _resume_from_pause(key, paused)
+            else:
+                _tell(key[0], key[1], "اللوب واقف على التحكم — ابعت continue عشان أكمل.")
+            return
+        with st["lock"]:
             st["parts"].append(msg)
             if len(st["parts"]) > 60:
                 st["parts"] = st["parts"][-60:]
@@ -622,14 +1075,7 @@ def handle_incoming(msg: dict) -> None:
                 except Exception:
                     st["queued_count"] = 1
                 n = st["queued_count"]
-                try:
-                    _send.send_text(
-                        key[0],
-                        key[1],
-                        f"📩 استلمت رسالتك ({n}) — هدمجها مع اللي بعدها وأنفذ الكل بعد ما أخلص الرد الحالي.",
-                    )
-                except Exception:
-                    pass
+                _tell(key[0], key[1], f"Queued ({n})")
                 return
             try:
                 if st["timer"] is not None:

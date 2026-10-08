@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -59,46 +60,76 @@ def check_push_secret(value: object) -> bool:
 
 
 # Watchdog: the engine can freeze with a live process (answers nothing,
-# not even /health). Consecutive proxy failures mean a wedged loop, so
-# the proc is dropped; drain/send paths reboot inline via _ensure_live
-# (zero background polling anywhere).
-_wedge_strikes = 0
+# not even /health). TRANSPORT failures (timeout/refused/dead proc — never
+# an app-level Baileys 500 like rate-limit) inside a 60s window mean a wedged
+# loop, so the proc is dropped; drain/send paths reboot inline via
+# _ensure_live (zero background polling anywhere). Old hits expire so one
+# stale failure can never team up with a fresh one to kill a healthy engine.
+_wedge_hits: list[float] = []
 _WEDGE_KILL_AFTER = 2
+_WEDGE_WINDOW = 60.0
+_last_heal = 0.0
+_HEAL_COOLDOWN = 30.0
 
 
 def _ensure_live() -> bool:
     """Drop a wedged proc and boot a clean engine, then retry once.
 
     Called inline on operation failure (drain/send), so stalls heal at
-    use-time with zero background polling. Bounded: one respawn attempt.
-    Must be called with _lock held (_spawn takes no lock).
+    use-time with zero background polling. Bounded: one respawn attempt +
+    one heal per 30s (no respawn storms) + 10s connect wait. Healing counts
+    only when the socket reports connected. Must be called with _lock held
+    (_spawn takes no lock).
     """
+    global _last_heal
     try:
+        now = time.monotonic()
+        if now - _last_heal < _HEAL_COOLDOWN:
+            return False
+        _last_heal = now
         stop()
         if not _spawn():
             return False
-        ok, _ = _proxy("POST", "/connect", {"phone": ""})
-        if ok:
+        ok, st = _proxy("POST", "/connect", {"phone": ""})
+        if not ok:
+            return False
+        if isinstance(st, dict) and st.get("state") == "connected":
             _note_proxy_result(True)
-        return bool(ok)
+            return True
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            time.sleep(1)
+            ok2, st2 = _proxy("GET", "/status")
+            if ok2 and isinstance(st2, dict) and st2.get("state") == "connected":
+                _note_proxy_result(True)
+                return True
+        return False
     except Exception:
         return False
 
 
-def _note_proxy_result(ok: bool) -> bool:
+def _note_proxy_result(ok: bool, out: dict | None = None) -> bool:
     """Reset on success; drop a wedged engine after bounded failures.
 
-    Returns True when the caller should reboot + retry once (proc was
-    just condemned). Never raises.
+    Only transport failures count (an app-level 500 must never condemn a
+    healthy engine). Returns True when the caller should reboot + retry once
+    (proc was just condemned). Never raises.
     """
-    global _wedge_strikes
+    global _wedge_hits
     if ok:
-        _wedge_strikes = 0
+        _wedge_hits = []
         return False
-    _wedge_strikes += 1
-    if _wedge_strikes < _WEDGE_KILL_AFTER:
+    try:
+        transport = not isinstance(out, dict) or bool(out.get("_transport"))
+    except Exception:
+        transport = True
+    if not transport:
         return False
-    _wedge_strikes = 0
+    now = time.monotonic()
+    _wedge_hits = [t for t in _wedge_hits if now - t < _WEDGE_WINDOW] + [now]
+    if len(_wedge_hits) < _WEDGE_KILL_AFTER:
+        return False
+    _wedge_hits = []
     try:
         stop()
     except Exception:
@@ -343,8 +374,11 @@ def stop() -> None:
 
 
 def _proxy(method: str, path: str, payload: dict | None = None) -> tuple[bool, dict]:
+    """Loopback call. App-level Baileys failures come back as (False, body)
+    WITHOUT the _transport flag; timeouts/refusals/dead-proc carry it, so the
+    wedge watchdog never condemns a healthy engine over a 500."""
     if _proc is None or _proc.poll() is not None or not _port:
-        return False, {"error": "bridge not running"}
+        return False, {"error": "bridge not running", "_transport": True}
     try:
         data = json.dumps(payload or {}).encode("utf-8") if method == "POST" else None
         req = urllib.request.Request(
@@ -356,8 +390,16 @@ def _proxy(method: str, path: str, payload: dict | None = None) -> tuple[bool, d
         with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT) as res:
             out = json.loads(res.read().decode("utf-8", "replace"))
             return True, out if isinstance(out, dict) else {}
+    except urllib.error.HTTPError as e:
+        try:
+            out = json.loads(e.read().decode("utf-8", "replace"))
+            if isinstance(out, dict):
+                return False, out
+        except Exception:
+            pass
+        return False, {"error": f"bridge error: HTTP {getattr(e, 'code', '?')}", "_transport": True}
     except Exception as e:
-        return False, {"error": f"bridge error: {str(e)[:120]}"}
+        return False, {"error": f"bridge error: {str(e)[:120]}", "_transport": True}
 
 
 def _qr_data_url(qr_text: str) -> str:
@@ -412,7 +454,7 @@ def status() -> dict:
         if _proc is None or _proc.poll() is not None or not _port:
             return _idle()
         ok, st = _proxy("GET", "/status")
-        _note_proxy_result(ok)
+        _note_proxy_result(ok, st)
         if not ok:
             return _idle({"error": str(st.get("error") or "")})
         return _public_link_state(st)
@@ -498,9 +540,9 @@ def inbox(take: int = 50) -> list:
                 return []
             path = f"/inbox?take={max(1, min(100, int(take)))}"
             ok, out = _proxy("GET", path)
-            if not ok and _note_proxy_result(ok) and _ensure_live():
+            if not ok and _note_proxy_result(ok, out) and _ensure_live():
                 ok, out = _proxy("GET", path)
-                _note_proxy_result(ok)
+                _note_proxy_result(ok, out)
         if not ok:
             return []
         msgs = out.get("messages")
@@ -568,16 +610,79 @@ def send_text(to: str, text: str, reply_to: str = "") -> tuple[bool, str]:
         return False, "to + text required"
     with _lock:
         if _proc is None or _proc.poll() is not None or not _port:
-            return False, "not linked"
+            # A watchdog-dropped (wedged) engine must heal on use: one bounded
+            # respawn + session resume. Without this every later send fails
+            # fast with "not linked" forever and the reply never arrives.
+            if not _ensure_live():
+                return False, "not linked"
+            if _proc is None or _proc.poll() is not None or not _port:
+                return False, "not linked"
         reply_to = str(reply_to or "")[:128]
         payload = {"to": recipient, "text": text, "replyTo": reply_to}
         ok, out = _proxy("POST", "/send", payload)
-        if not ok and _note_proxy_result(ok) and _ensure_live():
+        if not ok and _note_proxy_result(ok, out) and _ensure_live():
             ok, out = _proxy("POST", "/send", payload)
-            _note_proxy_result(ok)
+            _note_proxy_result(ok, out)
     if ok:
         return True, ""
     return False, str(out.get("error") or "send failed")
+
+
+def send_tracked(to: str, text: str) -> tuple[bool, str, str]:
+    """Send + capture the sent message id for later /edit calls.
+
+    Returns (ok, msg_id, error). msg_id is "" when the bridge did not
+    report one (edits then fall back to plain messages). Never raises."""
+    try:
+        recipient = _lid_route(to)
+        text = str(text or "").strip()[:4000]
+        if not recipient:
+            return False, "", "no LID route for recipient"
+        if not text:
+            return False, "", "to + text required"
+        with _lock:
+            if _proc is None or _proc.poll() is not None or not _port:
+                if not _ensure_live():
+                    return False, "", "not linked"
+                if _proc is None or _proc.poll() is not None or not _port:
+                    return False, "", "not linked"
+            ok, out = _proxy("POST", "/send", {"to": recipient, "text": text})
+            if not ok and _note_proxy_result(ok, out) and _ensure_live():
+                ok, out = _proxy("POST", "/send", {"to": recipient, "text": text})
+                _note_proxy_result(ok, out)
+        if ok:
+            return True, str(out.get("id") or ""), ""
+        return False, "", str(out.get("error") or "send failed")
+    except Exception as e:
+        return False, "", str(e)[:120]
+
+
+def edit_text(to: str, msg_id: str, text: str) -> tuple[bool, str]:
+    """Edit our own sent message (WhatsApp 15-min window).
+
+    Returns (ok, error). Never raises."""
+    try:
+        recipient = _lid_route(to)
+        text = str(text or "").strip()[:4000]
+        msg_id = str(msg_id or "")
+        if not recipient:
+            return False, "no LID route for recipient"
+        if not text or not msg_id:
+            return False, "to + id + text required"
+        with _lock:
+            if _proc is None or _proc.poll() is not None or not _port:
+                if not _ensure_live():
+                    return False, "not linked"
+                if _proc is None or _proc.poll() is not None or not _port:
+                    return False, "not linked"
+            ok, out = _proxy("POST", "/edit", {"to": recipient, "text": text, "editId": msg_id})
+            if not ok:
+                _note_proxy_result(ok, out)
+        if ok:
+            return True, ""
+        return False, str(out.get("error") or "edit failed")
+    except Exception as e:
+        return False, str(e)[:120]
 
 
 def mark_read(message_id: str) -> bool:

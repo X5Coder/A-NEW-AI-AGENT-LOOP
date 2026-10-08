@@ -3737,8 +3737,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         Gateway runs (source=whatsapp|telegram|gateway) share this exact
         pipeline: one execution, same session context, live on the Agent page
-        with real SSE animation (steps + typed reply). They run unrestricted
-        with no question pauses (identical to a direct run); a busy session
+        with real SSE animation (steps + typed reply). They run unrestricted;
+        ask stays unanswered and approvals auto-continue, but live control
+        handoffs pause for a channel "continue" answer. A busy session
         answers 409 so the channel waits briefly, then falls back locally.
         """
         import queue as _queue
@@ -3870,6 +3871,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     _PENDING_QUESTIONS.pop(qid, None)
                     _LIVE_PAUSE.pop(qid, None)
 
+        def _on_gateway_question(kind: str, qpayload: dict):
+            # Gateway runs pause ONLY for live control handoffs (the channel
+            # answers them with "continue"). Ask stays unanswered and
+            # approvals auto-continue — today's behavior, never a stall.
+            try:
+                if kind == "live":
+                    return _on_question(kind, qpayload)
+                if kind == "approval":
+                    return {"decision": "continue"}
+            except Exception:
+                pass
+            return None
+
         def _on_live(ev: dict) -> None:
             # live_preview start / agent_control / close_browser / restart:
             # the library owns the links, so just push the fresh state.
@@ -3913,7 +3927,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     on_tool_start=lambda label, k=None, r=None, s=None: _stage("event_start", label, (k, r, s)),
                     on_token=lambda step, d: _stage("token", step, d),
                     restricted=restricted,
-                    on_question=None if gw else _on_question,
+                    on_question=_on_gateway_question if gw else _on_question,
                     on_live_event=_on_live,
                     cancel_flag=cancel_event,
                 )

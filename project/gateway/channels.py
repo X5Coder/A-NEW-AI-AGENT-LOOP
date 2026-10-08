@@ -67,6 +67,83 @@ def send_whatsapp(to: str, text: str, reply_to: str = "") -> bool:
         return False
 
 
+def send_tracked(channel: str, chat: str, text: str) -> str:
+    """Send one short text and return its edit key ("" when failed).
+
+    WhatsApp key = bridge message id, Telegram key = message_id. Used for
+    the single live-edited progress message. Never raises."""
+    try:
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        if channel == "telegram":
+            from gateway.store import get_telegram_token
+
+            token = get_telegram_token()
+            if not token:
+                return ""
+            body = json.dumps({"chat_id": chat, "text": text[:4000]}).encode("utf-8")
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as res:
+                out = json.loads(res.read().decode("utf-8", "replace"))
+            if isinstance(out, dict) and out.get("ok"):
+                mid = (out.get("result") or {}).get("message_id") if isinstance(out.get("result"), dict) else None
+                return str(mid) if mid else ""
+            return ""
+        if channel == "whatsapp":
+            from gateway.whatsapp import adapter as _wa
+
+            ok, mid, _ = _wa.send_tracked(chat, text)
+            return mid if ok and mid else ""
+        return ""
+    except Exception:
+        return ""
+
+
+def edit_tracked(channel: str, chat: str, key: str, text: str) -> bool:
+    """Edit a previously tracked message (WhatsApp 15-min window).
+
+    Never raises."""
+    try:
+        text = str(text or "").strip()
+        key = str(key or "")
+        if not text or not key:
+            return False
+        if channel == "telegram":
+            from gateway.store import get_telegram_token
+
+            token = get_telegram_token()
+            if not token:
+                return False
+            try:
+                mid = int(key)
+            except Exception:
+                return False
+            body = json.dumps({"chat_id": chat, "message_id": mid, "text": text[:4000]}).encode("utf-8")
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/editMessageText",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as res:
+                out = json.loads(res.read().decode("utf-8", "replace"))
+            return bool(isinstance(out, dict) and out.get("ok"))
+        if channel == "whatsapp":
+            from gateway.whatsapp import adapter as _wa
+
+            ok, _ = _wa.edit_text(chat, key, text)
+            return bool(ok)
+        return False
+    except Exception:
+        return False
+
+
 def send_text(channel: str, chat: str, text: str, reply_to: str = "") -> bool:
     """Best-effort send. Returns True only if every chunk delivered."""
     try:

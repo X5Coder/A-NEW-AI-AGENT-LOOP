@@ -254,17 +254,17 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │               └── settings.js         # password validation + logout (local-only)
 ├── gateway/                            # messaging channels (server-authoritative config in Data/database/gateway.json)
 │   ├── store.py                        # validated WA/TG settings (token masked on read, never logged)
-│   ├── channels.py                     # outbound text senders per channel (chunked, best-effort)
-│   ├── dispatch.py                     # unified commands (/browser /dashboard /cancel) + 5s coalescing (each msg restarts 5s, merged one-per-line) + queued runs with numbered fixed acks + final-only channel sends (live SSE animation on the site only) + full /cancel (loop + all queued dropped) + WA send options (read/typing/reply) + same-account LID auto-allow + runs execute once via the main chat_stream pipeline (mirrored live, bounded busy-wait, local fallback when unreachable)
+│   ├── channels.py                     # outbound text senders per channel (chunked, best-effort) + tracked send/edit for the live message (WA bridge id / TG message_id)
+│   ├── dispatch.py                     # unified commands (/browser /dashboard /cancel) + 5s coalescing (each msg restarts 5s, merged one-per-line) + queued runs with numbered Queued (N) acks + ONE live-edited message (reason+....., throttled, plain-line fallback; final reply edits it last, new message on ANY refusal) + control pause till continue + final reply with 3-attempt retry (crash guard never silent) + full /cancel (loop + all queued dropped) + WA send options (read/typing/reply) + same-account LID auto-allow + runs execute once via the main chat_stream pipeline (mirrored live, bounded busy-wait, local fallback when unreachable)
 │   ├── service.py                      # auto-start: TG poller thread + WA push wiring (no WA threads, zero polling)
 │   ├── telegram/
 │   │   ├── adapter.py                  # Bot API: getMe + per-chat sendMessage test (stdlib only)
 │   │   ├── poller.py                   # long-poll getUpdates -> normalize (text/voice/photo/doc) -> dispatch
 │   │   └── __init__.py
 │   ├── whatsapp/
-│   │   ├── adapter.py                  # owns Baileys bridge lifecycle (spawn/use/stop, loopback only) + per-boot push secret/URL + pidfile orphans + wedge watchdog + LID-first sends + segno QR data-URLs + inbox/send
+│   │   ├── adapter.py                  # owns Baileys bridge lifecycle (spawn/use/stop, loopback only) + per-boot push secret/URL + pidfile orphans + wedge watchdog (transport failures in a 60s window only, 500s never condemn) + LID-first sends (send heals a dropped engine inline, one bounded respawn + 30s cooldown, connected-state verified) + segno QR data-URLs + inbox/send
 │   │   ├── listener.py                 # bridge wakeup drain: /inbox -> normalize (DM only, LID/phone identity + own-LID capture) -> dispatch (push-driven, zero polling)
-│   │   ├── bridge/                     # node service: package.json (baileys 6.x) + bridge.js (/health|status|connect|pair|disconnect|inbox|send + media)
+│   │   ├── bridge/                     # node service: package.json (baileys 6.x) + bridge.js (/health|status|connect|pair|disconnect|inbox|send(id)|edit + media)
 │   │   └── __init__.py
 │   └── discord/                          # reserved
 ├── storage/                      # LEGACY read-only fallback (authoritative home is X5Agent/Data, migrated once at startup)

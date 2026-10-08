@@ -11,7 +11,8 @@
  *   POST /connect { phone? }        -> boot socket (pairing code requested only via /pair)
  *   POST /pair    { phone }         -> request 8-char link code for the agent number
  *   GET  /inbox?take=N              -> drain collected inbound messages (max 100)
- *   POST /send   { to, text }       -> send a text message (linked only)
+ *   POST /send   { to, text }       -> send a text message (linked only), returns { ok, id }
+ *   POST /edit   { to, text, editId } -> edit our own sent message by id (15-min window)
  *   POST /read   { messageId }       -> mark one received message as read
  *   POST /typing { to, action }     -> composing|paused presence (typing indicator)
  *   POST /resolve { numbers }       -> resolve allowed phone numbers to LIDs
@@ -227,10 +228,14 @@ async function bootSocket() {
     const { state: authState, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     let version = undefined;
     try {
-      const v = await fetchLatestBaileysVersion();
+      // Bounded: a stalled fetch must never hang the boot (bundled fallback).
+      const v = await Promise.race([
+        fetchLatestBaileysVersion(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("version timeout")), 8000)),
+      ]);
       version = v.version;
     } catch (_) {
-      // Offline or blocked: Baileys falls back to its bundled version.
+      // Offline/slow/blocked: Baileys falls back to its bundled version.
     }
     const s = makeWASocket({
       auth: authState,
@@ -399,10 +404,27 @@ const server = http.createServer(async (req, res) => {
       try {
         const replyTo = String(body.replyTo || "");
         const quoted = /^[A-Za-z0-9_-]{1,128}$/.test(replyTo) ? recentMessages.get(replyTo) : null;
-        await sock.sendMessage(jid, { text }, quoted ? { quoted } : undefined);
-        return send(res, 200, { ok: true });
+        const sent = await sock.sendMessage(jid, { text }, quoted ? { quoted } : undefined);
+        return send(res, 200, { ok: true, id: String((sent && sent.key && sent.key.id) || "") });
       } catch (e) {
         return send(res, 500, { error: String((e && e.message) || e || "send failed").slice(0, 200) });
+      }
+    }
+
+    if (req.method === "POST" && req.url === "/edit") {
+      const body = await readBody(req);
+      if (body === null) return send(res, 400, { error: "bad json" });
+      const jid = recipientJid(body.to);
+      const text = String(body.text || "").slice(0, 8000);
+      const editId = String(body.editId || "");
+      if (!jid || !text) return send(res, 400, { error: "to + text required" });
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(editId)) return send(res, 400, { error: "editId required" });
+      if (!sock) return send(res, 400, { error: "not linked" });
+      try {
+        await sock.sendMessage(jid, { text, edit: { remoteJid: jid, fromMe: true, id: editId } });
+        return send(res, 200, { ok: true });
+      } catch (e) {
+        return send(res, 500, { error: String((e && e.message) || e || "edit failed").slice(0, 200) });
       }
     }
 
