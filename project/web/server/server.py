@@ -565,6 +565,10 @@ def _write_env_key(env_name: str, value: str) -> None:
     if not value:
         return
     try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return
+    try:
         _os.environ[env_name] = value
     except Exception:
         pass
@@ -1190,7 +1194,7 @@ def _build_stream_frame(kind: str, val: Any, out: Any) -> dict | None:
             frame["step"] = _s
         if isinstance(_m, dict) and _m:
             frame["media"] = {k: v for k, v in _m.items()
-                              if k in ("shot", "stream") and isinstance(v, (str, dict))}
+                              if k in ("shot", "stream", "audio") and isinstance(v, (str, dict))}
         return frame
     except Exception:
         return None
@@ -1264,10 +1268,28 @@ def _events_snapshot() -> dict:
                     "balance": _get_balance_data(), "models": _get_models_data()}
     except Exception:
         pass
+    try:
+        sched = _get_scheduler_data()
+    except Exception:
+        sched = {"jobs": [], "executing": []}
+    gw: dict = {"state": "idle"}
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from gateway.whatsapp import adapter as _wa
+
+        live = _wa.status()
+        gw = {"state": live.get("state", "idle"), "linked": live.get("linked", ""),
+              "phone": live.get("phone", ""), "qr": bool(live.get("qr")),
+              "pairing": bool(live.get("pairing")), "error": live.get("error", "")}
+    except Exception:
+        pass
     return {"browser": {"running": running, "stream": stream},
             "chat": {"active": chat_active, "input": chat_input},
             "workspace": {"version": _WS_PUSH.get("version", 0)},
-            "dashboard": dash}
+            "dashboard": dash,
+            "scheduler": sched,
+            "gateway": gw}
 
 
 def _events_emit_browser(force: bool = False) -> None:
@@ -1295,7 +1317,10 @@ def _events_emit_browser(force: bool = False) -> None:
 
 
 def _workspace_version() -> int:
-    """Top-level-only mtime fingerprint (bounded, read-only)."""
+    """Top-level-only mtime fingerprint (bounded, read-only).
+
+    Folds the virtual browser-downloads folder in too, so a finished
+    download bumps the version and the UI reloads on its own (monitor)."""
     try:
         from core.paths import workspace_root as _ws
         root = _ws().resolve()
@@ -1316,6 +1341,24 @@ def _workspace_version() -> int:
                 continue
             if stamp > peak:
                 peak = stamp
+        try:
+            from core.tools.workspace.tool import library_downloads_dir as _lib_dl
+            _lib = _lib_dl()
+            if _lib is not None and not (root / "downloads").exists():
+                _n = 0
+                for _lp in _lib.iterdir():
+                    _n += 1
+                    if _n > 500:
+                        break
+                    try:
+                        _s = _lp.stat().st_mtime_ns
+                    except Exception:
+                        continue
+                    if _s > peak:
+                        peak = _s
+                count += _n
+        except Exception:
+            pass
         return (peak % 10_000_000_000) + count
     except Exception:
         return 0
@@ -1350,13 +1393,137 @@ def _events_emit_dashboard(force: bool = False) -> None:
         pass
 
 
-def _events_emit_chat() -> None:
-    """Broadcast run status + completion (replaces chat_active/catchup polls)."""
+def _events_emit_chat(gateway: bool = False) -> None:
+    """Broadcast run status + completion (replaces chat_active/catchup polls).
+
+    gateway=True marks channel-driven runs so open Agent tabs render the
+    visitor bubble + live steps without a refresh, then reload once.
+    """
     try:
         with _RUN_LOCK:
             active = "event" in _ACTIVE_RUN
             preview = str(_ACTIVE_RUN.get("input") or "")[:200]
-        _events_broadcast("chat", {"active": bool(active), "input": preview})
+        payload = {"active": bool(active), "input": preview}
+        if gateway:
+            payload["gateway"] = True
+        _events_broadcast("chat", payload)
+    except Exception:
+        pass
+
+
+# ---- scheduler push (side panel): read-only snapshot + change-only broadcast ----
+# Owner: this server module. scheduler.json stays owned by core/scheduler tool +
+# engine; here we only read it and fan out a small summary so the left-edge tab
+# appears the moment a job exists (no client polling anywhere).
+_SCHED_PUSH: dict = {"fp": None}
+_SCHED_RUNNING: set = set()
+_SCHED_LOCK = threading.Lock()
+
+
+def _read_scheduler_jobs() -> list:
+    """Read scheduler jobs (Data first, legacy fallback). Never raises."""
+    try:
+        jobs = _data_json("scheduler.json", None)
+        if isinstance(jobs, list):
+            return jobs
+    except Exception:
+        pass
+    try:
+        legacy = PROJECT_ROOT / "storage" / "database" / "scheduler.json"
+        data = _safe_json_load(legacy, [])
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return []
+
+
+def _summarize_job(job: dict) -> dict:
+    """Small bounded summary per job (list view). Full skill text only on detail."""
+    try:
+        hist = job.get("run_history") if isinstance(job.get("run_history"), list) else []
+        hist_out = []
+        for h in hist[-10:]:
+            if not isinstance(h, dict):
+                continue
+            hist_out.append({
+                "at": str(h.get("at") or "")[:40],
+                "success": bool(h.get("success")),
+                "output": str(h.get("output") or "")[:2000],
+                "assistant_msg": str(h.get("assistant_msg") or "")[:16],
+            })
+        return {
+            "job_id": str(job.get("job_id") or "")[:64],
+            "task": str(job.get("task") or "")[:200],
+            "status": str(job.get("status") or "active")[:20],
+            "repeat": str(job.get("repeat") or "")[:120] if job.get("repeat") else "",
+            "start_at": str(job.get("start_at") or "")[:120],
+            "timezone": str(job.get("timezone") or "")[:64],
+            "next_run": str(job.get("next_run") or "")[:40] if job.get("next_run") else None,
+            "last_run": str(job.get("last_run") or "")[:40] if job.get("last_run") else None,
+            "run_count": int(job.get("run_count") or 0),
+            "repeat_count": job.get("repeat_count") if isinstance(job.get("repeat_count"), int) else None,
+            "skill_ref": str(job.get("skill_ref") or "")[:120],
+            "skill_preview": str(job.get("skill_content_preview") or "")[:500],
+            "run_history": hist_out,
+        }
+    except Exception:
+        return {}
+
+
+def _get_scheduler_data() -> dict:
+    """Full scheduler snapshot for the side panel (bounded, read-only)."""
+    jobs = _read_scheduler_jobs()
+    try:
+        with _SCHED_LOCK:
+            running = sorted(_SCHED_RUNNING)
+    except Exception:
+        running = []
+    out = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        s = _summarize_job(job)
+        if not s.get("job_id"):
+            continue
+        s["executing"] = s["job_id"] in running
+        out.append(s)
+        if len(out) >= 100:
+            break
+    return {"jobs": out, "executing": running}
+
+
+def _load_job_skill_text(skill_ref: str) -> str:
+    """Full skill text ("تعليمات المهمة"), jailed + bounded. Empty on any failure."""
+    try:
+        ref = str(skill_ref or "")
+        if not ref or len(ref) > 120:
+            return ""
+        base = (PROJECT_ROOT / "skills" / "scheduled_skills").resolve()
+        cand = (base / ref / "skill.json").resolve()
+        try:
+            cand.relative_to(base)
+        except ValueError:
+            return ""
+        if not cand.is_file() or cand.stat().st_size > 65536:
+            return ""
+        j = json.loads(cand.read_text(encoding="utf-8"))
+        if isinstance(j, dict):
+            return str(j.get("instructions") or j.get("content") or "")[:12000]
+    except Exception:
+        pass
+    return ""
+
+
+def _events_emit_scheduler(force: bool = False) -> None:
+    """Broadcast the scheduler snapshot when it changed (or when forced)."""
+    try:
+        data = _get_scheduler_data()
+        fp = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        if not force and _SCHED_PUSH.get("fp") == fp:
+            return
+        _SCHED_PUSH["fp"] = fp
+        _events_broadcast("scheduler", data)
     except Exception:
         pass
 
@@ -1384,6 +1551,7 @@ def _events_watchers() -> None:
             try:
                 _events_emit_dashboard()
                 _events_emit_workspace()
+                _events_emit_scheduler()
             except Exception:
                 pass
             _time.sleep(15.0)
@@ -1392,12 +1560,91 @@ def _events_watchers() -> None:
     threading.Thread(target=_slow_loop, name="x5-events-slow", daemon=True).start()
 
 
+_SCHED_LOOP_STARTED = False
+
+
+def _start_scheduler_loop() -> None:
+    """Start the scheduler engine ticker once (60s cadence, daemon thread).
+
+    Tracks the live executing window via engine callbacks so the panel can
+    show "يتم التنفيذ" + push every state change (start/run/finish).
+    Never raises, never blocks startup.
+    """
+    global _SCHED_LOOP_STARTED
+    try:
+        with _SCHED_LOCK:
+            if _SCHED_LOOP_STARTED:
+                return
+            _SCHED_LOOP_STARTED = True
+    except Exception:
+        return
+
+    def _on_start(job_id: str) -> None:
+        try:
+            with _SCHED_LOCK:
+                _SCHED_RUNNING.add(str(job_id))
+        except Exception:
+            pass
+        try:
+            _events_emit_scheduler(force=True)
+        except Exception:
+            pass
+
+    def _on_done(job_id: str, _success: bool) -> None:
+        try:
+            with _SCHED_LOCK:
+                _SCHED_RUNNING.discard(str(job_id))
+        except Exception:
+            pass
+        try:
+            _events_emit_scheduler(force=True)
+        except Exception:
+            pass
+
+    def _loop() -> None:
+        import time as _time
+        while True:
+            try:
+                if str(PROJECT_ROOT) not in sys.path:
+                    sys.path.insert(0, str(PROJECT_ROOT))
+                from core.scheduler.engine import check_and_execute_due_jobs
+                from core.lm.usage import get_daily as _unused  # noqa: F401 (keep lm warm)
+                _model, _key = _resolve_chat_model()
+                executed = check_and_execute_due_jobs(
+                    api_key=_key, model=_model, verbose=False,
+                    on_start=_on_start, on_done=_on_done)
+                if executed:
+                    try:
+                        _events_emit_scheduler(force=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                _time.sleep(60.0)
+            except Exception:
+                break
+
+    try:
+        threading.Thread(target=_loop, name="x5-scheduler", daemon=True).start()
+    except Exception:
+        pass
+
+
 def _shots_root() -> Path:
     try:
         from core.paths import data_subdir
         return data_subdir("files", "browser")
     except Exception:
         return PROJECT_ROOT.parents[0] / "X5Agent" / "Data" / "files" / "browser"
+
+
+def _audio_root() -> Path:
+    try:
+        from core.paths import data_subdir
+        return data_subdir("files", "audio")
+    except Exception:
+        return PROJECT_ROOT.parents[0] / "X5Agent" / "Data" / "files" / "audio"
 
 
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
@@ -1457,17 +1704,38 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/browser":
             self._handle_browser_api()
             return
+        if parsed.path == "/api/scheduler":
+            self._handle_scheduler_get()
+            return
         if parsed.path == "/api/events":
             self._handle_events_api()
             return
         if parsed.path == "/api/shot":
             self._handle_shot_get(parse_qs(parsed.query).get("path", [""])[0])
             return
+        if parsed.path == "/api/audio":
+            self._handle_audio_get(parse_qs(parsed.query).get("path", [""])[0])
+            return
         if parsed.path == "/api/workspace":
             self._handle_workspace_api(parse_qs(parsed.query).get("path", [""])[0])
             return
         if parsed.path == "/api/workspace/download":
             self._handle_workspace_download_get(parse_qs(parsed.query).get("path", [""])[0])
+            return
+        if parsed.path == "/api/gateway/config":
+            self._handle_gateway_config_get()
+            return
+        if parsed.path == "/api/gateway/whatsapp/status":
+            self._handle_gateway_wa_status_get()
+            return
+        if parsed.path == "/api/gateway/log":
+            try:
+                if str(PROJECT_ROOT) not in sys.path:
+                    sys.path.insert(0, str(PROJECT_ROOT))
+                from gateway import dispatch as _gd
+                self._send_json({"events": _gd.get_log()})
+            except Exception:
+                self._send_json({"error": "gateway failed"}, status=500)
             return
         # SPA fallback: real routes (/agent, /models ...) serve the console shell
         # so refresh and deep-links work. Only extensionless non-API paths rewrite.
@@ -1521,8 +1789,38 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/browser":
             self._handle_browser_api()
             return
+        if parsed.path == "/api/scheduler":
+            self._handle_scheduler_post()
+            return
         if parsed.path == "/api/workspace":
             self._handle_workspace_post()
+            return
+        if parsed.path == "/api/gateway/config":
+            self._handle_gateway_config_post()
+            return
+        if parsed.path == "/api/gateway/whatsapp/connect":
+            self._handle_gateway_wa_post("connect")
+            return
+        if parsed.path == "/api/gateway/whatsapp/pair":
+            self._handle_gateway_wa_post("pair")
+            return
+        if parsed.path == "/api/gateway/whatsapp/disconnect":
+            self._handle_gateway_wa_post("disconnect")
+            return
+        if parsed.path == "/api/gateway/whatsapp/reset":
+            self._handle_gateway_wa_post("reset")
+            return
+        if parsed.path == "/api/gateway/whatsapp/reset":
+            self._handle_gateway_wa_post("reset")
+            return
+        if parsed.path == "/api/gateway/whatsapp/reset":
+            self._handle_gateway_wa_post("reset")
+            return
+        if parsed.path == "/api/gateway/whatsapp/push":
+            self._handle_gateway_wa_push()
+            return
+        if parsed.path == "/api/gateway/telegram/test":
+            self._handle_gateway_tg_test_post()
             return
         self.send_error(404, "Not found")
 
@@ -1638,6 +1936,203 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"ok": True, "closed": True})
         except Exception as e:
             self._send_json({"error": "browser failed", "detail": str(e)[:200]}, status=500)
+
+    def _handle_scheduler_get(self):
+        """GET /api/scheduler — list summaries, or ?job_id=X for one job detail.
+
+        Detail adds the full skill text ("تعليمات المهمة", bounded 12k) read
+        raw from skills/scheduled_skills/<ref>/skill.json.
+        """
+        try:
+            try:
+                qs = parse_qs(urlparse(self.path).query or "")
+                wanted = (qs.get("job_id") or [""])[0]
+            except Exception:
+                wanted = ""
+            data = _get_scheduler_data()
+            if not (isinstance(wanted, str) and wanted.strip()):
+                self._send_json(data)
+                return
+            wid = wanted.strip()[:64]
+            job = next((j for j in data.get("jobs", []) if j.get("job_id") == wid), None)
+            if job is None:
+                self._send_json({"error": "job not found"}, status=404)
+                return
+            full = _load_job_skill_text(str(job.get("skill_ref") or ""))
+            job["full_instructions"] = full
+            # The job's own branch session (never the main chat), bounded.
+            try:
+                if str(PROJECT_ROOT) not in sys.path:
+                    sys.path.insert(0, str(PROJECT_ROOT))
+                from core.scheduler.session import load_session as _sess_load
+                sess = _sess_load(wid)[-50:]
+                job["session"] = [{
+                    "id": str(m.get("id") or "")[:16],
+                    "role": "assistant" if m.get("role") == "assistant" else "user",
+                    "content": str(m.get("content") or "")[:2000],
+                    "ts": str(m.get("ts") or "")[:40],
+                } for m in sess if isinstance(m, dict)]
+            except Exception:
+                job["session"] = []
+            self._send_json({"job": job})
+        except Exception as e:
+            self._send_json({"error": "scheduler failed", "detail": str(e)[:200]}, status=500)
+
+    def _handle_scheduler_post(self):
+        """POST /api/scheduler — {action:update_skill|delete|chat, job_id, ...}.
+
+        update_skill edits only the skill text ("تعليمات المهمة"). delete
+        removes the job + its skill + its branch session (via the scheduler
+        tool, the single owner). chat continues the job's own session branch
+        (never the main chat). Job timing stays owned by the agent tool.
+        """
+        try:
+            # Sized for chat-with-attachments data URLs (same family as /api/chat).
+            payload = self._read_json_body(40 * 1024 * 1024)
+        except _ChatError as e:
+            self._send_json({"error": str(e)}, status=e.status)
+            return
+        try:
+            action = str(payload.get("action") or "").strip()
+            if action not in ("update_skill", "delete", "chat"):
+                self._send_json({"error": "action update_skill|delete|chat required"}, status=400)
+                return
+            if action == "delete":
+                jid = payload.get("job_id")
+                if not isinstance(jid, str) or not jid.strip() or len(jid.strip()) > 64:
+                    self._send_json({"error": "job_id required"}, status=400)
+                    return
+                if str(PROJECT_ROOT) not in sys.path:
+                    sys.path.insert(0, str(PROJECT_ROOT))
+                from core.tools.scheduler.tool import execute as _sched_execute
+                try:
+                    out = _sched_execute("delete", job_id=jid.strip())
+                except FileNotFoundError:
+                    self._send_json({"error": "job not found"}, status=404)
+                    return
+                except (ValueError, TypeError) as e:
+                    self._send_json({"error": str(e)[:200]}, status=400)
+                    return
+                _events_emit_scheduler(force=True)
+                self._send_json({"ok": True, "job_id": jid.strip(),
+                                 "skill_deleted": bool(out.get("skill_deleted"))})
+                return
+            if action == "chat":
+                self._handle_scheduler_chat(payload)
+                return
+            jid = payload.get("job_id")
+            instructions = payload.get("instructions")
+            if not isinstance(jid, str) or not jid.strip() or len(jid.strip()) > 64:
+                self._send_json({"error": "job_id required"}, status=400)
+                return
+            if not isinstance(instructions, str) or not instructions.strip() or len(instructions) > 12000:
+                self._send_json({"error": "instructions required (max 12000)"}, status=400)
+                return
+            jobs = _read_scheduler_jobs()
+            job = next((j for j in jobs if isinstance(j, dict) and j.get("job_id") == jid.strip()), None)
+            if job is None:
+                self._send_json({"error": "job not found"}, status=404)
+                return
+            ref = str(job.get("skill_ref") or "")
+            if not ref:
+                self._send_json({"error": "job has no skill"}, status=404)
+                return
+            base = (PROJECT_ROOT / "skills" / "scheduled_skills").resolve()
+            target = (base / ref).resolve()
+            try:
+                target.relative_to(base)
+            except ValueError:
+                self._send_json({"error": "forbidden"}, status=403)
+                return
+            sj = target / "skill.json"
+            if not sj.is_file():
+                self._send_json({"error": "skill not found"}, status=404)
+                return
+            try:
+                data = json.loads(sj.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception:
+                data = {}
+            text = instructions.strip()
+            data["instructions"] = text
+            data["content"] = text
+            data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            sj.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            try:
+                (target / "README.md").write_text(f"# {ref}\n\n{text}\n", encoding="utf-8")
+            except Exception:
+                pass
+            _events_emit_scheduler(force=True)
+            self._send_json({"ok": True, "job_id": jid.strip(), "skill_ref": ref})
+        except Exception as e:
+            self._send_json({"error": "skill save failed", "detail": str(e)[:200]}, status=500)
+
+    def _handle_scheduler_chat(self, payload: dict):
+        """Continue a job's own session branch (never the main chat).
+
+        Expects {job_id, message, attachments?, mode?}. Runs the real agent
+        loop with session_key=job_id so history + persist stay inside the
+        branch session file.
+        """
+        saved_paths: list = []
+        try:
+            jid = payload.get("job_id")
+            if not isinstance(jid, str) or not jid.strip() or len(jid.strip()) > 64:
+                self._send_json({"error": "job_id required"}, status=400)
+                return
+            jid = jid.strip()
+            jobs = _read_scheduler_jobs()
+            job = next((j for j in jobs if isinstance(j, dict) and j.get("job_id") == jid), None)
+            if job is None:
+                self._send_json({"error": "job not found"}, status=404)
+                return
+            text = payload.get("message")
+            if not isinstance(text, str) or not text.strip() or len(text.strip()) > 4000:
+                self._send_json({"error": "message required (max 4000)"}, status=400)
+                return
+            mode = payload.get("mode", "restricted")
+            restricted = mode != "free"
+            skill = _load_job_skill_text(str(job.get("skill_ref") or ""))
+            combined = (f"[متابعة مهمة مجدولة: {str(job.get('task') or jid)}]\n"
+                        f"[تعليمات المهمة]\n{skill[:2000]}\n\n"
+                        f"[رسالة المستخدم]\n{text.strip()}")[:4000]
+            try:
+                loop_input, saved_paths = self._build_loop_input(
+                    {"message": combined, "attachments": payload.get("attachments") or []})
+            except _ChatError as e:
+                self._send_json({"error": str(e)}, status=e.status)
+                return
+            ready, _, _ = _chat_readiness()
+            if not ready:
+                self._cleanup_paths(saved_paths)
+                self._send_json({"error": NO_MODEL_ERROR, "needs_model": True}, status=503)
+                return
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.agent.loop.engine import run_loop
+            from core.scheduler.session import history_block as _sess_hist
+            bundle = job.get("task_bundle") if isinstance(job.get("task_bundle"), dict) else {}
+            todo_snap = bundle.get("todo_snapshot")
+            chat_model, chat_key = _resolve_chat_model()
+            result = run_loop(loop_input, max_steps=80, verbose=False,
+                             model=chat_model, api_key=chat_key,
+                             isolated=True, todo_snapshot=todo_snap,
+                             session_key=jid,
+                             session_history=_sess_hist(jid, limit=12) or None,
+                             restricted=restricted)
+            self._send_json({
+                "ok": True,
+                "reply": str(result.get("final_answer") or ""),
+                "steps": result.get("steps", 0),
+                "elapsed": result.get("elapsed_sec", 0),
+            })
+        except (ValueError, RuntimeError) as e:
+            self._send_json({"error": "LLM request failed", "detail": str(e)[:200]}, status=502)
+        except Exception as e:
+            self._send_json({"error": "scheduler chat failed", "detail": str(e)[:200]}, status=500)
+        finally:
+            self._cleanup_paths(saved_paths)
 
     def do_OPTIONS(self):
         # CORS for local dev
@@ -1780,6 +2275,44 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _handle_audio_get(self, raw_path: str):
+        """Serve one TTS voice record. Name must resolve inside Data/files/audio."""
+        try:
+            if not isinstance(raw_path, str) or not raw_path.strip() or len(raw_path) > 100:
+                self.send_error(400, "Bad path")
+                return
+            name = Path(raw_path.strip()).name
+            if not name.lower().endswith(".wav") or not name or name.startswith("."):
+                self.send_error(400, "Bad path")
+                return
+            root = _audio_root().resolve()
+            cand = (root / name).resolve()
+            try:
+                cand.relative_to(root)
+            except ValueError:
+                self.send_error(403, "Forbidden")
+                return
+            if not cand.is_file():
+                self.send_error(404, "Not found")
+                return
+            if cand.stat().st_size > 8 * 1024 * 1024:
+                self.send_error(413, "Too large")
+                return
+            body = cand.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            try:
+                self.send_error(500, "Audio failed")
+            except Exception:
+                pass
+
     def _workspace_fs(self, raw_path: str) -> Path:
         """Resolve a user path strictly inside X5Agent/Workspace. Raises _ChatError."""
         if not isinstance(raw_path, str) or len(raw_path) > 500:
@@ -1834,13 +2367,40 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         return {"entries": entries, "truncated": len(children) > 200}
 
     def _handle_workspace_api(self, raw_path: str):
-        """GET /api/workspace?path= — one folder level (jailed)."""
+        """GET /api/workspace?path= — one folder level (jailed).
+
+        The virtual downloads/ tree (browser downloads, read-only) merges
+        here: root appends it as an external folder, deeper paths list it."""
         try:
             try:
                 if str(PROJECT_ROOT) not in sys.path:
                     sys.path.insert(0, str(PROJECT_ROOT))
                 from core.documents.store import purge_missing
                 purge_missing()
+            except Exception:
+                pass
+            norm = (raw_path or "").strip().replace("\\", "/")
+            try:
+                if str(PROJECT_ROOT) not in sys.path:
+                    sys.path.insert(0, str(PROJECT_ROOT))
+                from core.tools.workspace.tool import (
+                    split_downloads_rel as _split_dl,
+                    downloads_virtual_active as _dl_active,
+                    list_downloads_virtual as _list_dl,
+                )
+                from core.paths import workspace_root as _wsv
+                _wsroot = _wsv().resolve()
+                _parts = _split_dl(norm)
+                if _parts is not None and _dl_active(_wsroot):
+                    data = _list_dl(_parts)
+                    data["path"] = "downloads" if not _parts else "downloads/" + "/".join(_parts)
+                    self._send_json(data)
+                    return
+            except _ChatError:
+                raise
+            except (ValueError, FileNotFoundError) as e:
+                self._send_json({"error": str(e)[:200]}, status=404)
+                return
             except Exception:
                 pass
             target = self._workspace_fs(raw_path or "")
@@ -1854,6 +2414,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 data["path"] = "" if rel == "." else rel
             except Exception:
                 data["path"] = ""
+            if data.get("path") == "" and not data.get("truncated"):
+                # Root only: merge the virtual downloads folder (same rule as
+                # the workspace tool — hidden on real-name collision).
+                try:
+                    from core.tools.workspace.tool import downloads_virtual_info as _dl_info
+                    from core.paths import workspace_root as _wsr
+                    info = _dl_info(_wsr().resolve())
+                    if info is not None:
+                        entries = data.get("entries") or []
+                        idx = next((i for i, e in enumerate(entries)
+                                    if e.get("type") != "folder"), len(entries))
+                        entries.insert(idx, info)
+                except Exception:
+                    pass
             self._send_json(data)
         except _ChatError as e:
             self._send_json({"error": str(e)}, status=e.status)
@@ -1872,9 +2446,26 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         try:
             action = str(payload.get("action") or "").strip()
             folder = self._workspace_fs(str(payload.get("path") or ""))
+            try:
+                from core.tools.workspace.tool import (
+                    split_downloads_rel as _split_dl2,
+                    downloads_virtual_active as _dl_active2,
+                )
+                from core.paths import workspace_root as _wsp
+                if (_split_dl2(str(payload.get("path") or "").strip().replace("\\", "/"))
+                        is not None and _dl_active2(_wsp().resolve())):
+                    self._send_json({"error": "read-only: browser downloads"}, status=403)
+                    return
+            except _ChatError:
+                raise
+            except Exception:
+                pass
             if action == "mkdir":
                 name = str(payload.get("name") or "").strip()
-                if not name or len(name) > 100 or "/" in name or "\\" in name or ".." in name:
+                # Single name only: separators are rejected and only the exact
+                # dot-names are blocked (".." inside a name, e.g. my..folder,
+                # is a legal filename and cannot traverse without a separator).
+                if not name or len(name) > 100 or "/" in name or "\\" in name or name in (".", ".."):
                     self._send_json({"error": "invalid folder name"}, status=400)
                     return
                 dest = (folder / name).resolve()
@@ -1928,7 +2519,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 return
             if action == "delete":
                 name = str(payload.get("name") or "").strip().replace("\\", "/")
-                if not name or len(name) > 200 or "/" in name or ".." in name:
+                # Single name only (same rule as mkdir): only the exact
+                # dot-names are blocked. Limit 255 covers upload-stored names
+                # ("<8-hex>_" prefix + up to 200 chars = max 209).
+                if not name or len(name) > 255 or "/" in name or name in (".", ".."):
                     self._send_json({"error": "invalid file name"}, status=400)
                     return
                 dest = (folder / name).resolve()
@@ -1940,16 +2534,28 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 except ValueError:
                     self._send_json({"error": "forbidden"}, status=403)
                     return
-                if not dest.is_file():
+                # The top-level downloads folder is essential: never delete it.
+                if rel == "downloads":
+                    self._send_json({"error": "protected folder"}, status=403)
+                    return
+                if not dest.is_file() and not dest.is_dir():
                     self._send_json({"error": "file not found"}, status=404)
                     return
-                dest.unlink()
+                was_dir = dest.is_dir()
+                if was_dir:
+                    import shutil
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
                 removed = False
                 try:
                     if str(PROJECT_ROOT) not in sys.path:
                         sys.path.insert(0, str(PROJECT_ROOT))
-                    from core.documents.store import delete_file_embeddings
+                    from core.documents.store import delete_file_embeddings, purge_missing
                     removed = bool(delete_file_embeddings(rel))
+                    # Folder delete: drop embeddings of everything that lived inside.
+                    if was_dir:
+                        purge_missing()
                 except Exception:
                     pass
                 _events_emit_workspace(force=True)
@@ -1961,27 +2567,289 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             self._send_json({"error": "workspace failed"}, status=500)
 
-    def _handle_workspace_download_get(self, raw_path: str):
-        """Serve one Workspace file by name only (no preview — download)."""
+    def _gw_store(self):
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from gateway import store as _gwstore
+        return _gwstore
+
+    def _handle_gateway_config_get(self):
+        """Masked gateway config + verified WhatsApp live state (never spawns)."""
         try:
-            target = self._workspace_fs(raw_path or "")
+            store = self._gw_store()
+            from gateway.whatsapp import adapter as _wa
+            try:
+                # Resume a saved link on page load: boots the engine only
+                # when session files exist, so the badge is truthful.
+                _wa.warm()
+            except Exception:
+                pass
+            live = _wa.status()
+            try:
+                saved = str(store.read_config()["whatsapp"]["agent_number"] or "")
+                ok, linked = _wa.verify_against(saved)
+                if not ok:
+                    live = {"state": "mismatch", "linked": linked}
+            except Exception:
+                pass
+            self._send_json(store.public_config(live))
+        except Exception:
+            self._send_json({"error": "gateway failed"}, status=500)
+
+    def _handle_gateway_config_post(self):
+        """Save channel settings. Token accepted only inside settings.token."""
+        try:
+            payload = self._read_json_body(10000)
+            channel = str(payload.get("channel") or "").strip()
+            settings = payload.get("settings")
+            if not isinstance(settings, dict):
+                settings = {}
+            store = self._gw_store()
+            if channel == "whatsapp":
+                try:
+                    old_number = str(store.read_config()["whatsapp"]["agent_number"] or "")
+                except Exception:
+                    old_number = ""
+                ok, out = store.save_whatsapp(
+                    settings.get("agent_number", ""),
+                    settings.get("mode", "self"),
+                    settings.get("allowed", []),
+                    settings,
+                )
+                # New agent number invalidates any previous link session.
+                if ok:
+                    try:
+                        from gateway.whatsapp import adapter as _wa
+
+                        new_number = str((out or {}).get("agent_number") or "")
+                        if old_number and new_number and old_number != new_number:
+                            _wa.disconnect()
+                        else:
+                            mappings = _wa.resolve_lids([new_number, *((out or {}).get("allowed") or [])])
+                            for mapping in mappings:
+                                store.remember_lid_mapping(mapping.get("phone"), mapping.get("lid"))
+                    except Exception:
+                        pass
+            elif channel == "telegram":
+                ok, out = store.save_telegram(
+                    settings.get("token", ""),
+                    settings.get("username", ""),
+                    settings.get("chat_ids", []),
+                )
+            elif channel == "disconnect":
+                target = str(settings.get("target") or "").strip()
+                if target == "whatsapp":
+                    from gateway.whatsapp import adapter as _wa
+                    _wa.disconnect()
+                ok = store.clear_channel(target)
+                out = {"cleared": target} if ok else "unknown channel"
+            else:
+                self._send_json({"error": "channel whatsapp|telegram|disconnect required"}, status=400)
+                return
+            if ok:
+                if channel == "whatsapp" and isinstance(out, dict):
+                    # LID mappings are an internal transport detail; users
+                    # manage only phone numbers in the dashboard.
+                    out = {key: value for key, value in out.items() if key != "lid_map"}
+                self._send_json({"ok": True, "settings": out})
+            else:
+                self._send_json({"error": str(out)}, status=400)
+        except _ChatError as e:
+            self._send_json({"error": str(e)}, status=e.status)
+        except Exception:
+            self._send_json({"error": "gateway failed"}, status=500)
+
+    def _wa_live_state(self) -> dict:
+        """Canonical WhatsApp link state: verified, engine flags included.
+
+        Never spawns the engine. Enforces linked-number == saved
+        agent-number: a proven mismatch wipes the session and reports
+        state=mismatch (never a fake link).
+        """
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from gateway.whatsapp import adapter as _wa
+            from gateway import store as _store
+            saved = str(_store.read_config()["whatsapp"]["agent_number"] or "")
+            ok, linked = _wa.verify_against(saved)
+            out = _wa.status()
+            if not ok:
+                out = {
+                    "state": "mismatch",
+                    "phone": "",
+                    "linked": linked,
+                    "qr": False,
+                    "qr_data_url": "",
+                    "qr_at": 0,
+                    "pairing": "",
+                    "pairing_at": 0,
+                    "error": f"Linked +{linked} is not the agent number +{saved} — session wiped. Link with the agent phone.",
+                }
+            out["engine"] = _wa.engine_status()
+            return out
+        except Exception:
+            return {"state": "idle", "error": "gateway failed"}
+
+    def _gw_broadcast(self) -> None:
+        """Fan the canonical link state to every dashboard tab (SSE)."""
+        try:
+            _events_broadcast("gateway", self._wa_live_state())
+        except Exception:
+            pass
+
+    def _handle_gateway_wa_push(self):
+        """Bridge event intake: wakeup (drain inbox) or status (fan-out).
+
+        Secret-gated per-boot token, loopback-only. This replaces all
+        WhatsApp polling: nothing runs until the bridge knocks.
+        """
+        try:
+            if (self.client_address or [""])[0] not in ("127.0.0.1", "::1"):
+                self._send_json({"error": "loopback only"}, status=403)
+                return
+            payload = self._read_json_body(10000)
+            if not isinstance(payload, dict):
+                payload = {}
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from gateway.whatsapp import adapter as _wa
+            if not _wa.check_push_secret(payload.get("secret")):
+                self._send_json({"error": "forbidden"}, status=403)
+                return
+            drained = 0
+            if str(payload.get("kind") or "") == "wakeup":
+                try:
+                    from gateway.whatsapp import listener as _lis
+                    drained = _lis.drain_once()
+                except Exception:
+                    pass
+            self._gw_broadcast()
+            self._send_json({"ok": True, "drained": drained})
+        except _ChatError as e:
+            self._send_json({"error": str(e)}, status=e.status)
+        except Exception:
+            self._send_json({"error": "gateway failed"}, status=500)
+
+    def _handle_gateway_wa_status_get(self):
+        """WhatsApp link state + engine capability (never spawns engine).
+
+        Enforces linked-number == saved agent-number: a proven mismatch
+        wipes the session and reports state=mismatch (never a fake link).
+        """
+        try:
+            self._send_json(self._wa_live_state())
+        except Exception:
+            self._send_json({"error": "gateway failed"}, status=500)
+
+    def _handle_gateway_wa_post(self, action: str):
+        """connect | pair | reset unfinished linking | disconnect."""
+        try:
+            payload = self._read_json_body(10000)
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from gateway.whatsapp import adapter as _wa
+            store = self._gw_store()
+            if action == "connect":
+                self._send_json(_wa.connect())
+            elif action == "pair":
+                number = str(store.read_config()["whatsapp"]["agent_number"] or "")
+                if len(number) < 7:
+                    self._send_json({"error": "save the agent number first"}, status=400)
+                    return
+                self._send_json(_wa.pair(number))
+            elif action == "disconnect":
+                _wa.disconnect()
+                store.clear_channel("whatsapp")
+                self._send_json({"ok": True, "state": "idle"})
+            elif action == "reset":
+                self._send_json(_wa.reset_link_attempt())
+            else:
+                self._send_json({"error": "action connect|pair|reset|disconnect required"}, status=400)
+        except _ChatError as e:
+            self._send_json({"error": str(e)}, status=e.status)
+        except Exception:
+            self._send_json({"error": "gateway failed"}, status=500)
+
+    def _handle_gateway_tg_test_post(self):
+        """Real Telegram test: getMe + test message to every saved chat ID."""
+        try:
+            self._read_json_body(10000)
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from gateway import store as _store
+            from gateway.telegram import adapter as _tg
+            cfg = _store.read_config()
+            token = _store.get_telegram_token()
+            if not token:
+                self._send_json({"error": "save the bot token first"}, status=400)
+                return
+            self._send_json(_tg.test_connection(token, cfg["telegram"]["chat_ids"]))
+        except _ChatError as e:
+            self._send_json({"error": str(e)}, status=e.status)
+        except Exception:
+            self._send_json({"error": "gateway failed"}, status=500)
+
+    def _handle_workspace_download_get(self, raw_path: str):
+        """Serve one Workspace file by name only (no preview — download).
+
+        No size cap by requirement: files stream in 1MB chunks straight from
+        disk and are never buffered in memory (GB browser downloads included).
+        Virtual downloads/downloads/... paths stream from the library folder.
+        A client that disconnects mid-stream ends it quietly server-side.
+        """
+        try:
+            norm = (raw_path or "").strip().replace("\\", "/")
+            ext_target = None
+            try:
+                if str(PROJECT_ROOT) not in sys.path:
+                    sys.path.insert(0, str(PROJECT_ROOT))
+                from core.tools.workspace.tool import (
+                    split_downloads_rel as _split_dl3,
+                    downloads_virtual_active as _dl_active3,
+                    resolve_downloads_file as _resolve_dl,
+                )
+                from core.paths import workspace_root as _wsd
+                _parts = _split_dl3(norm)
+                if _parts is not None and _dl_active3(_wsd().resolve()):
+                    ext_target = _resolve_dl(_parts)
+            except _ChatError:
+                raise
+            except (ValueError, FileNotFoundError):
+                try:
+                    self.send_error(404, "Not found")
+                except Exception:
+                    pass
+                return
+            except Exception:
+                pass
+            target = ext_target if ext_target is not None else self._workspace_fs(raw_path or "")
             if not target.is_file():
                 self.send_error(404, "Not found")
                 return
-            if target.stat().st_size > 25 * 1024 * 1024:
-                self.send_error(413, "Too large")
+            try:
+                size = target.stat().st_size
+            except Exception:
+                try:
+                    self.send_error(404, "Not found")
+                except Exception:
+                    pass
                 return
             import mimetypes as _mt
+            import shutil as _shutil
             mime = _mt.guess_type(target.name)[0] or "application/octet-stream"
-            body = target.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(size))
             self.send_header("Content-Disposition", f'attachment; filename="{target.name}"')
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                with open(target, "rb") as _fh:
+                    _shutil.copyfileobj(_fh, self.wfile, length=1024 * 1024)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
         except _ChatError:
             try:
                 self.send_error(403, "Forbidden")
@@ -2153,23 +3021,29 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         saved = target_dir / f"{_uuid.uuid4().hex[:12]}.{ext}"
         saved.write_bytes(blob)
 
-        if kind == "document":
-            # Every uploaded file lives in Workspace too (the model device).
-            # The Workspace copy is what document_search indexes (file_id).
+        def _mirror_workspace(blob_bytes: bytes) -> str | None:
+            # Best-effort mirror: every chat upload lives in Workspace too so it
+            # shows with other files + jailed model tools can read it.
+            # Returns Workspace-relative file_id or None. Never raises.
             try:
                 from core.paths import workspace_root as _ws
                 ws = _ws()
                 ws.mkdir(parents=True, exist_ok=True)
-                ws_copy = (ws / f"{_uuid.uuid4().hex[:8]}_{safe_display}").resolve()
+                ws_resolved = ws.resolve()
+                candidate = (ws / f"{_uuid.uuid4().hex[:8]}_{safe_display}").resolve()
                 try:
-                    ws_copy.relative_to(ws.resolve())
-                    if not ws_copy.exists():
-                        ws_copy.write_bytes(blob)
-                    file_id = str(ws_copy.relative_to(ws.resolve())).replace("\\", "/")
-                except Exception:
-                    file_id = safe_display
+                    candidate.relative_to(ws_resolved)
+                except ValueError:
+                    return None
+                if not candidate.exists():
+                    candidate.write_bytes(blob_bytes)
+                return str(candidate.relative_to(ws_resolved)).replace("\\", "/")
             except Exception:
-                file_id = safe_display
+                return None
+
+        if kind == "document":
+            # The Workspace copy is what document_search indexes (file_id).
+            file_id = _mirror_workspace(blob) or safe_display
             ref = f"- document: name=\"{safe_display}\" file_id=\"{file_id}\""
             return kind, saved, ref, file_id
 
@@ -2178,10 +3052,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             from core.memory.image_memory.service import store_image
 
             entry = store_image(name=safe_display, path=str(saved), is_persistent=False, is_temp=True)
-            ref = f"- image: name=\"{safe_display}\" image_id=\"{entry['image_id']}\""
+            ws_file = _mirror_workspace(blob)
+            if ws_file:
+                ref = f"- image: name=\"{safe_display}\" image_id=\"{entry['image_id']}\" file_id=\"{ws_file}\""
+            else:
+                ref = f"- image: name=\"{safe_display}\" image_id=\"{entry['image_id']}\""
             return kind, saved, ref, entry["image_id"]
         elif kind == "video":
-            ref = f"- video: name=\"{safe_display}\" video_path=\"{saved}\""
+            ws_file = _mirror_workspace(blob)
+            if ws_file:
+                ref = f"- video: name=\"{safe_display}\" video_path=\"{saved}\" file_id=\"{ws_file}\""
+            else:
+                ref = f"- video: name=\"{safe_display}\" video_path=\"{saved}\""
             return kind, saved, ref, None
         else:
             try:
@@ -2190,7 +3072,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 raise ValueError("text file must be UTF-8")
             if not text_content.strip():
                 raise ValueError("text file is empty")
-            ref = f"- text: name=\"{safe_display}\" chars=\"{len(text_content)}\""
+            ws_file = _mirror_workspace(blob)
+            if ws_file:
+                ref = f"- text: name=\"{safe_display}\" chars=\"{len(text_content)}\" file_id=\"{ws_file}\""
+            else:
+                ref = f"- text: name=\"{safe_display}\" chars=\"{len(text_content)}\""
             return kind, saved, ref, text_content
 
     def _extract_loop_events(self, result) -> list:
@@ -2242,7 +3128,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     media = _event_media(entry.get("tool"), res if isinstance(res, dict) else {})
                     shot = media.get("shot") if isinstance(media, dict) else None
                     if isinstance(shot, str) and shot:
-                        item["media"] = {"shot": shot[:500]}
+                        item.setdefault("media", {})["shot"] = shot[:500]
+                    audio = media.get("audio") if isinstance(media, dict) else None
+                    if isinstance(audio, str) and audio:
+                        item.setdefault("media", {})["audio"] = audio[:100]
                 except Exception:
                     pass
                 events.append(item)
@@ -2404,6 +3293,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                                + prio)
         else:
             loop_input = msg
+        if attach_lines:
+            # Workspace mirror landed on disk — bump the version so the
+            # Workspace page shows the new file without waiting for the slow poll.
+            try:
+                _events_emit_workspace(force=True)
+            except Exception:
+                pass
         return loop_input, saved_paths
 
     def _handle_plugin_state_post(self):
@@ -2671,7 +3567,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": "provider save failed", "detail": str(e)[:200]}, status=500)
 
     def _handle_chat_answer_post(self):
-        """Deliver the user's answer to a paused loop question (ask or approval)."""
+        """Deliver the user's answer to a paused loop question (ask or approval).
+
+        The answer resumes the run: the loop's own completion event carries
+        it into the question step's arrow (Q + A) and work continues — it is
+        never posted as a user message and never restarts the loop.
+        """
         try:
             payload = self._read_json_body(10000)
         except _ChatError as e:
@@ -2817,6 +3718,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
             events = self._extract_loop_events(result)
             final = result.get("final_answer") or ""
+            audio_list = result.get("final_audio") or []
             self._send_json({
                 "reply": str(final),
                 "events": events,
@@ -2824,13 +3726,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 "model": result.get("model_used", ""),
                 "ids": result.get("message_ids"),
                 "images": result.get("final_images") or [],
+                "audio": audio_list,
                 "elapsed": result.get("elapsed_sec", 0),
             })
         except Exception as e:
             self._send_json({"error": "chat failed", "detail": str(e)}, status=500)
 
     def _handle_chat_stream(self):
-        """Same as /api/chat but streams tool-call events live (SSE) as the loop runs."""
+        """Same as /api/chat but streams tool-call events live (SSE) as the loop runs.
+
+        Gateway runs (source=whatsapp) share this exact pipeline: one
+        execution, same session context, live on the Agent page. They run
+        unrestricted with no question pauses (identical to a direct run);
+        a busy session answers 409 so the channel falls back locally.
+        """
         import queue as _queue
 
         try:
@@ -2839,6 +3748,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except _ChatError as e:
             self._send_json({"error": str(e)}, status=e.status)
             return
+
+        gw = str(payload.get("source") or "") == "whatsapp"
+        if gw:
+            try:
+                with _RUN_LOCK:
+                    busy = "event" in _ACTIVE_RUN
+            except Exception:
+                busy = False
+            if busy:
+                self._cleanup_paths(saved_paths)
+                self._send_json({"error": "another run is active, try again shortly"}, status=409)
+                return
 
         try:
             self.send_response(200)
@@ -2976,7 +3897,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             with _RUN_LOCK:
                 _ACTIVE_RUN["event"] = cancel_event
                 _ACTIVE_RUN["input"] = loop_input[:200]
-            _events_emit_chat()
+            _events_emit_chat(gateway=gw)
             try:
                 from core.agent.loop.engine import run_loop
 
@@ -2991,7 +3912,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     on_tool_start=lambda label, k=None, r=None, s=None: _stage("event_start", label, (k, r, s)),
                     on_token=lambda step, d: _stage("token", step, d),
                     restricted=restricted,
-                    on_question=_on_question,
+                    on_question=None if gw else _on_question,
                     on_live_event=_on_live,
                     cancel_flag=cancel_event,
                 )
@@ -3003,8 +3924,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                         _ACTIVE_RUN.pop("event", None)
                     _ACTIVE_RUN.pop("input", None)
                 _run_frames_clear()
-                _events_emit_chat()
-                _events_broadcast("chat_done", {})
+                _events_emit_chat(gateway=gw)
+                _events_broadcast("chat_done", {"gateway": True} if gw else {})
+                try:
+                    _events_emit_scheduler(force=True)
+                except Exception:
+                    pass
                 events_q.put(("stop", None, None))
 
         threading.Thread(target=_run, daemon=True).start()
@@ -3057,6 +3982,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                         "steps": res.get("steps", 0),
                         "ids": res.get("message_ids"),
                         "images": res.get("final_images") or [],
+                        "audio": res.get("final_audio") or [],
                         "elapsed": res.get("elapsed_sec", 0),
                     })
         except Exception:
@@ -3172,6 +4098,24 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> int:
     # Live links live in the library only (see X5Browser LiveLinks): a previous
     # process cannot leave one behind, so there is nothing to clear at boot.
 
+    # Gateway ingestion (Telegram poller + WhatsApp push wiring): daemon
+    # thread for Telegram only; WhatsApp arrives via bridge push events and
+    # agent runs automatically as channel messages arrive.
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from gateway.service import start as _gw_start
+
+        _gw_start(f"http://{host}:{port}/")
+    except Exception as e:
+        print(f"[WARN] Gateway ingestion failed to start: {e}", file=sys.stderr)
+
+    # Scheduler engine ticker (due jobs run in background, isolated mode).
+    try:
+        _start_scheduler_loop()
+    except Exception as e:
+        print(f"[WARN] Scheduler loop failed to start: {e}", file=sys.stderr)
+
     try:
         with ThreadedServer((host, port), DashboardHandler) as httpd:
             url = f"http://{host}:{port}/"
@@ -3188,6 +4132,13 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> int:
                 print("\n[INFO] Shutting down...")
                 httpd.shutdown()
                 return 0
+            finally:
+                try:
+                    from gateway.service import stop as _gw_stop
+
+                    _gw_stop()
+                except Exception:
+                    pass
     except OSError as e:
         print(f"[ERROR] Failed to bind {host}:{port} — {e}", file=sys.stderr)
         print("  Try: python -m web.server.server --port 5174", file=sys.stderr)

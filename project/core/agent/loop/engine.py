@@ -79,6 +79,14 @@ def _is_dangerous_browser_tool(name: str) -> bool:
         return False
 
 
+def _is_cancelled(cancel_flag) -> bool:
+    """Whether the run was cancelled (STOP / fresh answer). Never raises."""
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
 def _preview_event(name: str, args: Any) -> str:
     """Best-effort event label BEFORE execution (for instant UI). Never raises."""
     try:
@@ -209,41 +217,174 @@ def _should_show_arrow(name: str, result: dict | None = None) -> bool:
         return False
 
 
-def _summarize_output(result: dict, name: str | None = None) -> str | None:
-    """Short human-readable excerpt of a tool result for UI expansion (bounded).
+def _basename(path: Any) -> str:
+    """Filename only from a Workspace path (never leaks full paths). Never raises."""
+    try:
+        s = str(path or "").strip().replace("\\", "/")
+        if not s:
+            return ""
+        return s.rsplit("/", 1)[-1][:80]
+    except Exception:
+        return ""
 
-    Only tools with SHOW_ARROW=True return text here. Others return None so
-    the UI renders a plain step line with no arrow. Screenshot tools show
-    their image via media instead of text here. Failures always return their
-    error, so every failed call gets an expandable arrow with the cause.
+
+def _short_error(err: Any) -> str | None:
+    """One short human line for a failed tool call (bounded, never a dump).
+
+    First non-empty line only, machine prefix (`error: <code> - `) stripped,
+    so the arrow shows the cause instead of a protocol string. Never raises.
+    """
+    try:
+        if not isinstance(err, str) or not err.strip():
+            return None
+        import re as _re
+        line = ""
+        for raw in err.splitlines():
+            if raw.strip():
+                line = raw.strip()
+                break
+        if not line:
+            return None
+        line = _re.sub(r"^error\s*:\s*[\w-]+\s*[-–:]\s*", "", line).strip() or line
+        return line[:200]
+    except Exception:
+        return None
+
+
+def _summarize_output(result: dict, name: str | None = None, args: Any = None) -> str | None:
+    """Curated per-tool detail shown UNDER the reason inside a step arrow (bounded).
+
+    Policy (per request): the arrow shows the model's `reason` only; raw tool
+    output is never dumped. Only these tools add a short curated line below
+    the reason — everything else returns None (reason-only, or no arrow when
+    the model wrote no reason and no image arrived):
+    - todo_list: task + steps as step lines only
+    - write_file: file name + written size + short after-preview (before is
+      unrecoverable after overwrite, so only after is shown)
+    - read_file: file name(s) read (args-based, never content)
+    - search_files: query + match count + up to 3 names (never content)
+    - workspace: action + path/count only (never full listing)
+    - terminal: exit code + short stdout/stderr tail (bounded, never full log)
+    - document_search: file name + query (never chunk text)
+    - vector_chat_search: query only (never message text)
+    - navigate: URL only (args-based)
+    - question: Q + the user's answer (the answer is shown here, never as
+      a user bubble; unanswered → question only)
+    Failures return one short human line (machine prefix stripped), so every
+    failed call gets an expandable arrow with the cause instead of a dump.
+    Screenshot tools show their image via media instead of text here.
+    Never raises.
     """
     try:
         if not isinstance(result, dict):
             return None
         if not result.get("success"):
-            err = result.get("error")
-            if isinstance(err, str) and err.strip():
-                return err.strip()[:300]
-            return None
-        if isinstance(name, str) and name and not _should_show_arrow(name, result):
-            return None
-        out = result.get("output")
-        if not isinstance(out, dict):
-            return None
-        for key in ("answer", "text", "content", "stdout", "output"):
-            val = out.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()[:300]
-        # observation/text excerpts for readable browser tools (gated above)
-        for key in ("observation", "message"):
-            val = out.get(key)
-            if isinstance(val, str) and val.strip() and len(val.strip()) > 20:
-                return val.strip()[:300]
-        found = out.get("results")
-        if isinstance(found, list) and found:
-            names = [str(r.get("name")) for r in found[:5] if isinstance(r, dict) and r.get("name")]
+            return _short_error(result.get("error"))
+        out = result.get("output") if isinstance(result.get("output"), dict) else {}
+        safe_args = args if isinstance(args, dict) else {}
+        tool = str(name or "").strip()
+
+        if tool == "todo_list":
+            todo = out.get("todo") if isinstance(out.get("todo"), dict) else {}
+            task = str(todo.get("task") or safe_args.get("task") or "").strip()[:120]
+            steps = todo.get("steps") if isinstance(todo.get("steps"), list) else safe_args.get("steps")
+            lines: list[str] = []
+            if task:
+                lines.append(task)
+            if isinstance(steps, list):
+                for s in steps[:8]:
+                    if isinstance(s, str) and s.strip():
+                        lines.append("\u2022 " + s.strip()[:120])
+            return "\n".join(lines)[:500] or None
+
+        if tool == "read_file":
+            base = _basename(safe_args.get("path") or out.get("path"))
+            return base or None
+
+        if tool == "search_files":
+            q = str(safe_args.get("query") or safe_args.get("pattern") or safe_args.get("name") or "").strip()[:80]
+            matches = out.get("matches") if isinstance(out.get("matches"), list) else out.get("results") if isinstance(out.get("results"), list) else []
+            names: list[str] = []
+            if isinstance(matches, list):
+                for m in matches[:3]:
+                    if isinstance(m, dict):
+                        cand = m.get("path") or m.get("name") or m.get("file")
+                        base = _basename(cand)
+                        if base:
+                            names.append(base)
+                    elif isinstance(m, str) and m.strip():
+                        base = _basename(m)
+                        if base:
+                            names.append(base)
+            count = out.get("count") if isinstance(out.get("count"), int) else (len(matches) if isinstance(matches, list) else 0)
+            head = f"\u201c{q}\u201d: {count} files" if q else f"{count} files"
             if names:
-                return "Found: " + ", ".join(names)
+                head += " — " + ", ".join(names)
+            return head[:300]
+
+        if tool == "write_file":
+            base = _basename(safe_args.get("path") or out.get("path"))
+            preview = str(safe_args.get("content") or "").strip()
+            size = out.get("bytes_written") if isinstance(out.get("bytes_written"), int) else len(preview.encode("utf-8", "ignore"))
+            head = (base or "file") + (f" (+{size} bytes)" if isinstance(size, int) and size else "")
+            if not preview:
+                return head[:120]
+            tail = preview[:240].strip()
+            return (head + "\n" + tail)[:400]
+
+        if tool == "workspace":
+            action = str(safe_args.get("action") or "").strip()[:20]
+            target = _basename(safe_args.get("path") or safe_args.get("name") or "")
+            count = out.get("count") if isinstance(out.get("count"), int) else None
+            items = out.get("items") if isinstance(out.get("items"), list) else out.get("files") if isinstance(out.get("files"), list) else None
+            if isinstance(count, int):
+                detail = f"{action or 'list'}: {count} items" if action else f"{count} items"
+            elif isinstance(items, list):
+                detail = f"{action or 'list'}: {len(items)} items"
+            elif target:
+                detail = f"{action} {target}".strip() if action else target
+            else:
+                detail = action or None
+            return detail[:160] if detail else None
+
+        if tool == "terminal":
+            code = out.get("returncode")
+            tail = str(out.get("stdout") or out.get("stderr") or "").strip()
+            head = f"exit {code}" if isinstance(code, int) else "done"
+            if not tail:
+                return head[:40]
+            short = tail[-240:].strip() if len(tail) > 240 else tail
+            return (head + "\n" + short)[:300]
+
+        if tool == "document_search":
+            base = _basename(safe_args.get("file_id") or safe_args.get("path"))
+            q = str(safe_args.get("query") or "").strip()[:100]
+            if base and q:
+                return f"{base} — \u201c{q}\u201d"[:200]
+            return (base or (f"\u201c{q}\u201d" if q else None) or None)
+
+        if tool == "vector_chat_search":
+            q = str(safe_args.get("query") or safe_args.get("q") or "").strip()[:120]
+            return f"\u201c{q}\u201d"[:140] if q else None
+
+        if tool == "navigate":
+            dest = str(safe_args.get("to") or safe_args.get("url") or "").strip()[:160]
+            return dest or None
+
+        if tool == "question":
+            # The answer lives inside the step arrow (no user bubble is ever
+            # posted): question + the user's answer, bounded. Unanswered →
+            # question only, so the step still carries context.
+            q = str(safe_args.get("question") or out.get("question") or "").strip()
+            a = str(out.get("answer") or "").strip()
+            lines: list[str] = []
+            if q:
+                lines.append("Q: " + q[:200])
+            if a:
+                lines.append("A: " + a[:300])
+            return "\n".join(lines)[:520] or None
+
+        # Default: reason-only (no output dump). Images travel via media.
         return None
     except Exception:
         return None
@@ -300,6 +441,8 @@ def _event_media(name: str, result: dict) -> dict | None:
         media: dict = {}
         if out.get("has_screenshot") and isinstance(out.get("screenshot_path"), str):
             media["shot"] = str(out["screenshot_path"])[:500]
+        # TTS voice records are rendered once as a WhatsApp-style bubble on the
+        # assistant message (see _collect_final_audio), never inside the step.
         _stream_url = None
         _stream_vo = True
         if name in _LIVE_PAUSE_TOOLS or name in _LIVE_EVENT_TOOLS or name == "live_preview" or name == "show_preview":
@@ -393,12 +536,15 @@ def _persist_steps(tool_calls_log: list) -> list[dict]:
             except Exception:
                 pass
             try:
-                excerpt = _summarize_output(res, name)
+                excerpt = _summarize_output(res, name, entry.get("arguments"))
             except TypeError:
                 try:
-                    excerpt = _summarize_output(res)
-                except Exception:
-                    excerpt = None
+                    excerpt = _summarize_output(res, name)
+                except TypeError:
+                    try:
+                        excerpt = _summarize_output(res)
+                    except Exception:
+                        excerpt = None
             except Exception:
                 excerpt = None
             if excerpt:
@@ -416,9 +562,74 @@ def _persist_steps(tool_calls_log: list) -> list[dict]:
     return steps
 
 
+def _collect_final_audio(tool_calls_log: list) -> list[dict]:
+    """Voice records spoken via text_to_speech, for the standalone chat bubble.
+    Bounded, deduped by filename. It plays from the assistant message live and
+    after refresh (served by /api/audio). Never raises."""
+    audios: list[dict] = []
+    seen: set[str] = set()
+    try:
+        for entry in (tool_calls_log or [])[-6:]:
+            if not isinstance(entry, dict):
+                continue
+            res = entry.get("result") or {}
+            if not isinstance(res, dict) or not res.get("success"):
+                continue
+            out = res.get("output") or {}
+            if not isinstance(out, dict):
+                continue
+            name = out.get("audio_path")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            base = Path(name.strip()).name
+            if not base or base in seen:
+                continue
+            seen.add(base)
+            try:
+                dur = round(float(out.get("duration_sec", 0) or 0), 2)
+            except Exception:
+                dur = 0.0
+            audios.append({
+                "audio": base[:100],
+                "duration": dur,
+                "voice": str(out.get("voice", "") or "")[:16],
+                "lang": str(out.get("lang", "") or "")[:8],
+            })
+            if len(audios) >= 4:
+                break
+    except Exception:
+        pass
+    return audios
+
+
 def _persist_conversation(user_input: str, assistant_output: str, steps: list | None = None,
-                          images: list | None = None, elapsed: int | None = None) -> None:
+                          images: list | None = None, elapsed: int | None = None,
+                          audios: list | None = None, session_key: str | None = None):
     import uuid
+    if isinstance(session_key, str) and session_key.strip():
+        # Branch session (one per scheduled job): NEVER touches the main chat
+        # or its vector memory. On any failure skip persistence (fail clean).
+        try:
+            import sys as _sys
+            from pathlib import Path as _P
+            _proj = _P(__file__).resolve().parents[3]
+            if str(_proj) not in _sys.path:
+                _sys.path.insert(0, str(_proj))
+            from core.scheduler.session import append_session as _sess_append
+            extra = {}
+            if isinstance(steps, list) and steps:
+                extra["steps"] = steps[:12]
+            if isinstance(elapsed, int) and elapsed >= 0:
+                extra["elapsed"] = elapsed
+            u = _sess_append(session_key.strip(), "user", user_input[:2000])
+            a = _sess_append(session_key.strip(), "assistant", assistant_output[:5000], extra or None)
+            if u and a:
+                return u[0], a[0]
+            print(f"[loop] session persist failed for key={session_key.strip()[:16]} — skipped (main chat untouched)")
+            return None
+        except Exception as e:
+            print(f"[loop] session persist error: {e} — skipped (main chat untouched)")
+            return None
     path = _resolve_conversation_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data = []
@@ -442,6 +653,8 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
         assistant_msg["steps"] = steps[:12]
     if isinstance(images, list) and images:
         assistant_msg["images"] = images[:6]
+    if isinstance(audios, list) and audios:
+        assistant_msg["audio"] = audios[:4]
     data.append(assistant_msg)
     if len(data) > 1000:
         data = data[-1000:]
@@ -513,6 +726,8 @@ def run_loop(
     on_question=None,
     on_live_event=None,
     cancel_flag=None,
+    session_key: str | None = None,
+    session_history: str | None = None,
 ) -> dict[str, Any]:
     """
     Run agent loop for user_input.
@@ -526,14 +741,19 @@ def run_loop(
     on_live_event({"tool", "output", "success"}) fires for live_preview/agent_control/
     close_browser completions (best-effort).
     isolated=True for scheduled large tasks (skips chat history, uses todo_snapshot).
+    session_key: persist this run into the job's own branch session instead of
+      the main conversation (each scheduled task owns its session).
+    session_history: that branch's recent history, used as L6 when isolated.
     """
     if not isinstance(user_input, str) or not user_input.strip():
         raise ValueError("user_input must be non-empty string")
     if not isinstance(max_steps, int) or max_steps < 1 or max_steps > 500:
         raise ValueError("max_steps must be 1..500")
+    if session_key is not None and (not isinstance(session_key, str) or not session_key.strip()):
+        raise ValueError("session_key must be non-empty string")
     mdl = model.strip() if model and isinstance(model, str) and model.strip() else "deepseek/deepseek-v4.1-flash"
     # Build initial context (isolated for large scheduled tasks)
-    system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot)
+    system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot, session_history=session_history)
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_context},
@@ -556,13 +776,9 @@ def run_loop(
 
     for step in range(1, max_steps + 1):
         steps = step
-        if cancel_flag is not None:
-            try:
-                if cancel_flag.is_set():
-                    cancelled = True
-                    break
-            except Exception:
-                pass
+        if _is_cancelled(cancel_flag):
+            cancelled = True
+            break
         if verbose:
             print(f"\n--- Loop step {step}/{max_steps} ---")
         # Call provider with bounded retries (provider does 3 retries internally).
@@ -676,6 +892,14 @@ def run_loop(
                 result = execute_tool(name, args)
             else:
                 result = execute_tool(name, args)
+            # Fresh-answer cancel: the user answered a question as a NEW
+            # request — drop this result silently and stop the whole run
+            # (no events, no history append, no persist; the client starts a
+            # brand-new loop with the answer). Also covers STOP pressed while
+            # a question/approval/live pause was blocking in on_question.
+            if _is_cancelled(cancel_flag):
+                cancelled = True
+                break
             tool_calls_log.append({"step": step, "tool": name, "arguments": args,
                                    "result": result, "reason": call_reason})
             # Live handoff: human_control/take_control pause the loop so the user
@@ -757,25 +981,26 @@ def run_loop(
                     text = None
                     if isinstance(out, dict):
                         text = out.get("event")
-                    if not text and not result.get("success"):
-                        text = result.get("error")
+                    # Titles are always the friendly preview label — raw error
+                    # text never becomes a title (it lives, shortened, under
+                    # the reason instead). Same rule as _persist_steps.
                     if not text:
                         text = _preview_event(name, args)
                     if text:
                         try:
                             try:
-                                on_event(str(text)[:80], _summarize_output(result, name), call_key,
+                                on_event(str(text)[:80], _summarize_output(result, name, args), call_key,
                                          _event_media(name, result), call_reason, step)
                             except TypeError:
                                 try:
-                                    on_event(str(text)[:80], _summarize_output(result, name), call_key,
+                                    on_event(str(text)[:80], _summarize_output(result, name, args), call_key,
                                              _event_media(name, result), call_reason)
                                 except TypeError:
                                     try:
-                                        on_event(str(text)[:80], _summarize_output(result, name), call_key,
+                                        on_event(str(text)[:80], _summarize_output(result, name, args), call_key,
                                                  _event_media(name, result))
                                     except TypeError:
-                                        on_event(str(text)[:80], _summarize_output(result, name))
+                                        on_event(str(text)[:80], _summarize_output(result, name, args))
                         except Exception:
                             pass
                 except Exception:
@@ -791,6 +1016,10 @@ def run_loop(
                 "tool_call_id": tc["id"],
                 "content": output_str,
             })
+
+        # A mid-step cancel (fresh answer / STOP during a pause) stops now.
+        if cancelled:
+            break
 
         # Loop continues - next iteration will see tool outputs
         # Optional: update todo context? Already in messages, but we also could rebuild todo block as system note?
@@ -814,6 +1043,7 @@ def run_loop(
 
     # Persist conversation (skipped for cancelled runs — nothing to keep)
     final_images: list[dict] = []
+    final_audio: list[dict] = []
     try:
         elapsed_sec = max(0, int(round(time.time() - turn_t0)))
     except Exception:
@@ -824,16 +1054,21 @@ def run_loop(
         except Exception:
             final_images = []
         try:
-            persist_ids = _persist_conversation(user_input, final_answer, _persist_steps(tool_calls_log), final_images, elapsed_sec)
+            final_audio = _collect_final_audio(tool_calls_log)
+        except Exception:
+            final_audio = []
+        try:
+            persist_ids = _persist_conversation(user_input, final_answer, _persist_steps(tool_calls_log), final_images, elapsed_sec, final_audio, session_key=session_key)
         except Exception:
             pass
 
-        # Auto memory every 50 messages: extract facts about user/agent and organize (two requests each)
-        try:
-            from core.memory.auto_memory import maybe_trigger_auto_memory
-            maybe_trigger_auto_memory(api_key=api_key)
-        except Exception:
-            pass
+        # Auto memory every 50 messages — main chat only, never branch sessions.
+        if not session_key:
+            try:
+                from core.memory.auto_memory import maybe_trigger_auto_memory
+                maybe_trigger_auto_memory(api_key=api_key)
+            except Exception:
+                pass
 
     # Clear temp images per spec (temp request images auto-cleared after vision or loop end)
     _clear_temp_images_if_any()
@@ -848,5 +1083,6 @@ def run_loop(
         "cancelled": cancelled,
         "elapsed_sec": elapsed_sec,
         "final_images": final_images,
+        "final_audio": final_audio,
         "message_ids": {"user": persist_ids[0], "assistant": persist_ids[1]} if persist_ids else None,
     }

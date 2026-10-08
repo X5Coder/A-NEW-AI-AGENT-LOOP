@@ -1,6 +1,6 @@
 {
   "name": "question",
-  "description": "An interactive user consultation tool that pauses execution to present structured questions with optional choices and awaits user input. Use whenever critical requirements are missing, ambiguities arise, or an action is destructive and irreversible (such as deleting files or altering databases). Use this to prevent unrecoverable mistakes and align with user intent without guessing.",
+  "description": "Ask the user exactly one question through this tool — never ask in plain reply text. The loop pauses until answered, then continues with the answer (shown inside this step). Three kinds: choices (options with up to 4 short strings, shown as lettered rows; the user may also type their own), essay (omit options for a free-typed answer), true/false (options exactly [\"True\", \"False\"]). Keep the question to one sentence (max 2000 chars); each option max 200 chars and unique. Use whenever a critical requirement is missing, options are ambiguous, or an action is destructive and irreversible (deleting files, altering databases) — never guess when you can ask.",
   "inputs": {
     "question": {
       "type": "string",
@@ -14,7 +14,7 @@
         "type": "string"
       },
       "maxItems": 4,
-      "description": "Up to 4 choices. Omit for an open-ended answer."
+      "description": "Up to 4 unique choices (max 200 chars each), shown as lettered rows. Omit entirely for an open-ended (essay) answer; pass exactly [\"True\", \"False\"] for confirmations."
     }
   }
 }

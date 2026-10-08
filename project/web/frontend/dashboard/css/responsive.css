@@ -63,19 +63,41 @@
     padding: 0;
   }
 
+  /* Phone templates: fixed 2-col stats, stacked card heads, full-width switch. */
+  .card {
+    padding: var(--sp-4);
+    border-radius: 14px;
+  }
   .stats-grid {
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--sp-3);
   }
   .stat {
     padding: var(--sp-4);
+    min-width: 0;
+  }
+  .stat-head {
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-3);
+  }
+  .stat-label {
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .stat-value {
-    font-size: 26px;
+    font-size: 24px;
+    overflow-wrap: anywhere;
   }
   .stat-value.small {
-    font-size: 15px;
-    line-height: 1.3;
+    font-size: 14px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .stat-meta {
+    font-size: 11px;
     overflow-wrap: anywhere;
   }
   .stat:nth-child(n) {
@@ -83,15 +105,49 @@
   }
 
   .charts-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--sp-3);
   }
-  .chart-track {
-    height: 150px;
-    gap: 6px;
+  .chart-card {
+    min-width: 0;
   }
-  .chart-x {
-    gap: 6px;
+  .flow {
+    padding: 10px 10px 6px;
+  }
+  .flow-svg {
+    height: 168px;
+  }
+  .flow-x {
+    gap: 2px;
+  }
+  .flow-x span {
+    font-size: 10px;
+  }
+  /* Card head stacks vertically: title on top, switch+badge row below, never squeezed. */
+  .card-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-3);
+  }
+  .card-head-side {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-head-side .range-switch {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .card-head-side .badge {
+    flex: 0 0 auto;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .range-switch button {
+    height: 32px;
+    padding: 0 6px;
+    font-size: 11.5px;
   }
 
   .grid-cards {
@@ -238,7 +294,12 @@
     padding: var(--sp-4);
   }
 
-  .attach-menu {
-    min-width: 180px;
+  .attach-menu,
+  .mode-menu {
+    /* Fluid on phones: hug content but never pass the viewport. Fixed
+       desktop widths (248/264px) overflow a 320px screen. */
+    min-width: 0;
+    width: max-content;
+    max-width: min(320px, calc(100vw - 24px));
   }
 }

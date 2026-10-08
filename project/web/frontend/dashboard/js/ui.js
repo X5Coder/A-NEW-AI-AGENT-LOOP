@@ -204,7 +204,7 @@ export function toast(message) {
 export function attachChartTooltip(container) {
   const tip = document.getElementById("chartTip");
   if (!container || !tip) return;
-  container.querySelectorAll(".bar").forEach((bar) => {
+  container.querySelectorAll(".bar, .flow-hit").forEach((bar) => {
     const show = () => {
       const rect = bar.getBoundingClientRect();
       const label = document.createElement("span");

@@ -195,10 +195,51 @@ def _workspace_block() -> str:
                 lines.append(f"  file: {p.name} ({size} bytes)")
         except Exception:
             continue
+    # Virtual browser-downloads folder (read-only view, same rule as the
+    # workspace tool: hidden when a real folder with the same name exists).
+    try:
+        if not (ws / "downloads").exists():
+            from x5browser.config import LIBRARY_DOWNLOADS_DIR as _lib_dl
+            _lib = Path(str(_lib_dl))
+            if _lib.is_dir():
+                _n = 0
+                try:
+                    for _ in _lib.iterdir():
+                        _n += 1
+                        if _n >= 1001:
+                            break
+                except Exception:
+                    _n = 0
+                _dl_line = (f"  folder: downloads/ ({_n} items — browser downloads, "
+                            f"read-only, list it to enter)")
+                _fi = next((i for i, _l in enumerate(lines)
+                            if _l.startswith("  file:")), len(lines))
+                lines.insert(_fi, _dl_line)
+    except Exception:
+        pass
     more = "" if len(children) <= 100 else f"\n  ... +{len(children) - 100} more (list Workspace to browse)"
     return ("[Workspace - your work device, top level only - L4]\n"
             "  Every file, upload, or project lives here. One new folder per project/task.\n"
             + "\n".join(lines) + more)
+
+
+def _embedding_memory_block() -> str:
+    # Conditional L5 line: hidden when no chunks stored, otherwise one fixed
+    # English sentence with the stored-chunk count only (no content dumped).
+    try:
+        import sys as _sys
+        _proj = Path(__file__).resolve().parents[3]
+        if str(_proj) not in _sys.path:
+            _sys.path.insert(0, str(_proj))
+        from plugins.core_plugins.embedding_memory.tool import count_stored
+        n = count_stored()
+    except Exception:
+        n = 0
+    if not isinstance(n, int) or n <= 0:
+        return ""
+    return ("[Embedding Memory - L5]\n"
+            f"Embedding memory (embedding_memory tool) holds {n} stored "
+            "chunks you may search or store via that tool.")
 
 
 def _memories_block() -> str:
@@ -230,6 +271,10 @@ def _memories_block() -> str:
     if isinstance(imp, list) and imp:
         lines = [f"  - {x.get('id')}: [{x.get('key') or 'note'}] {x.get('content','')[:150]}" for x in imp[-20:]]
         parts.append("[Important Memory - L5]\n" + "\n".join(lines))
+    # embedding_memory: single fixed English line with count, hidden when empty
+    emb_block = _embedding_memory_block()
+    if emb_block:
+        parts.append(emb_block)
     if not parts:
         return ""
     return "\n\n".join(parts)
@@ -382,7 +427,7 @@ def _core_tools_block() -> list[dict]:
     return tools
 
 
-def build_context(user_input: str, include_todo: bool = True, isolated: bool = False, todo_snapshot: dict | None = None) -> tuple[str, str, list[dict]]:
+def build_context(user_input: str, include_todo: bool = True, isolated: bool = False, todo_snapshot: dict | None = None, session_history: str | None = None) -> tuple[str, str, list[dict]]:
     """
     8-layer context order (fixed):
       L1 core_identity.md + L2 general_mission.md + L3 policy.md -> system role
@@ -393,6 +438,8 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
       L8 current user input (ALWAYS last) -> user content
     Returns (system_prompt, user_context_content, core_tools_openai)
     isolated=True for scheduled large tasks: skips last-30 chat history and uses snapshot.
+    session_history: when isolated AND provided, this task's own branch history
+      is used as L6 instead (each scheduled job keeps its session, main chat untouched).
     """
     if not isinstance(user_input, str):
         raise TypeError("user_input must be string")
@@ -429,7 +476,10 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
     else:
         parts.append("[Memories L5: empty]")
     if isolated:
-        parts.append("[Chat L6: excluded for isolated scheduled execution - large task reliability]")
+        if isinstance(session_history, str) and session_history.strip():
+            parts.append(session_history.strip()[:6000])
+        else:
+            parts.append("[Chat L6: excluded for isolated scheduled execution - large task reliability]")
     else:
         if chat:
             parts.append(chat)

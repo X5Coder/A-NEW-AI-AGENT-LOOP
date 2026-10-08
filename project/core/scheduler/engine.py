@@ -157,29 +157,50 @@ def _build_isolated_context(job: dict) -> tuple[str, str]:
 import threading
 _JOB_LOCK = threading.Lock()
 
-def _execute_single_job(job: dict, now: datetime, api_key: str | None, model: str | None, verbose: bool) -> tuple[dict, dict]:
+# Bounded run-output kept per history entry (preview needs more than a
+# snippet, but the file must stay small: 10 entries x 2000 chars max).
+RUN_OUTPUT_LIMIT = 2000
+
+def _execute_single_job(job: dict, now: datetime, api_key: str | None, model: str | None, verbose: bool, on_start=None, on_done=None) -> tuple[dict, dict]:
     """Execute one job, returns (updated_job, result). Thread-safe for read."""
     job_id = job.get("job_id")
     task = job.get("task") or ""
+    assistant_msg_id: str | None = None
     bundle = job.get("task_bundle")
     context_mode = job.get("context_mode") or ("isolated" if job.get("is_large") else "light")
     if verbose:
         print(f"[scheduler] Executing due job {job_id} mode={context_mode} task='{task[:60]}...'")
+    if callable(on_start):
+        try:
+            on_start(str(job_id))
+        except Exception:
+            pass
     try:
         from core.agent.loop.engine import run_loop
+        try:
+            from core.scheduler.session import history_block as _sess_hist
+            sess_hist = _sess_hist(str(job_id), limit=12)
+        except Exception:
+            sess_hist = ""
+        sess_key = str(job_id) if isinstance(job_id, str) and job_id else None
         skill_ref = job.get("skill_ref")
         skill_content = _load_scheduled_skill_content(skill_ref) if skill_ref else None
         if skill_content:
             todo_snap = (bundle or {}).get("todo_snapshot")
-            result = run_loop(user_input=skill_content, max_steps=80, model=model, api_key=api_key, verbose=False, isolated=True, todo_snapshot=todo_snap)
+            result = run_loop(user_input=skill_content, max_steps=80, model=model, api_key=api_key, verbose=False, isolated=True, todo_snapshot=todo_snap, session_key=sess_key, session_history=sess_hist or None)
         elif context_mode == "isolated" and bundle:
             original = (bundle.get("original_user_input") or task).strip()
             todo_snap = bundle.get("todo_snapshot")
-            result = run_loop(user_input=original, max_steps=80, model=model, api_key=api_key, verbose=False, isolated=True, todo_snapshot=todo_snap)
+            result = run_loop(user_input=original, max_steps=80, model=model, api_key=api_key, verbose=False, isolated=True, todo_snapshot=todo_snap, session_key=sess_key, session_history=sess_hist or None)
         else:
-            result = run_loop(user_input=task, max_steps=30, model=model, api_key=api_key, verbose=False)
+            result = run_loop(user_input=task, max_steps=30, model=model, api_key=api_key, verbose=False, session_key=sess_key, session_history=sess_hist or None)
         success = True
-        output = result.get("final_answer", "")[:500]
+        output = result.get("final_answer", "")[:RUN_OUTPUT_LIMIT]
+        try:
+            _mids = result.get("message_ids") or {}
+            assistant_msg_id = str(_mids.get("assistant") or "")[:16] or None
+        except Exception:
+            assistant_msg_id = None
     except Exception as e:
         success = False
         output = f"Execution failed: {e}"
@@ -188,7 +209,15 @@ def _execute_single_job(job: dict, now: datetime, api_key: str | None, model: st
     updated = dict(job)
     updated["last_run"] = now.astimezone(timezone.utc).isoformat()
     updated["run_count"] = int(job.get("run_count", 0)) + 1
-    updated["run_history"] = job.get("run_history", [])[-9:] + [{"at": updated["last_run"], "success": success, "output": output[:300]}]
+    _entry: dict = {"at": updated["last_run"], "success": success, "output": output[:RUN_OUTPUT_LIMIT]}
+    if assistant_msg_id:
+        _entry["assistant_msg"] = assistant_msg_id
+    updated["run_history"] = job.get("run_history", [])[-9:] + [_entry]
+    if callable(on_done):
+        try:
+            on_done(str(job_id), bool(success))
+        except Exception:
+            pass
     if job.get("repeat"):
         nxt = _compute_next_after_repeat(job, now)
         updated["next_run"] = nxt
@@ -200,10 +229,12 @@ def _execute_single_job(job: dict, now: datetime, api_key: str | None, model: st
     return updated, {"job_id": job_id, "success": success, "output": output, "next_run": updated.get("next_run")}
 
 
-def check_and_execute_due_jobs(api_key: str | None = None, model: str | None = None, verbose: bool = True) -> list[dict]:
+def check_and_execute_due_jobs(api_key: str | None = None, model: str | None = None, verbose: bool = True, on_start=None, on_done=None) -> list[dict]:
     """
     Check scheduler.json, execute due jobs via agent loop.
     Supports concurrent execution: multiple due jobs run in parallel via ThreadPool.
+    Optional on_start(job_id) / on_done(job_id, success) callbacks report the
+    live executing window (used by the server to push "executing" state).
     Returns list of executed job results.
     """
     jobs = _load_jobs()
@@ -241,7 +272,7 @@ def check_and_execute_due_jobs(api_key: str | None = None, model: str | None = N
     # Use up to 5 concurrent workers (bounded)
     max_workers = min(5, len(due_indices))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_idx = {executor.submit(_execute_single_job, jobs[i], now, api_key, model, verbose): i for i in due_indices}
+        future_to_idx = {executor.submit(_execute_single_job, jobs[i], now, api_key, model, verbose, on_start, on_done): i for i in due_indices}
         for future in as_completed(future_to_idx):
             idx = future_to_idx[future]
             try:

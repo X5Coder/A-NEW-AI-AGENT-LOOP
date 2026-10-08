@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
   <meta name="theme-color" content="#1a1a1a" />
   <meta name="description" content="X5Agent — your private AI gateway console. Chat with your agent, run local tools, manage models and connect messaging channels, all on your own machine." />
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='black'/%3E%3Crect%20x='17'%20y='17'%20width='30'%20height='30'%20rx='7'%20fill='white'/%3E%3C/svg%3E" />
@@ -11,11 +11,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Cairo:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/css/tokens.css?v=12" />
+  <link rel="stylesheet" href="/css/tokens.css?v=13" />
   <link rel="stylesheet" href="/css/base.css?v=9" />
-  <link rel="stylesheet" href="/css/layout.css?v=10" />
-  <link rel="stylesheet" href="/css/components.css?v=43" />
-  <link rel="stylesheet" href="/css/responsive.css?v=18" />
+  <link rel="stylesheet" href="/css/layout.css?v=11" />
+  <link rel="stylesheet" href="/css/components.css?v=88" />
+  <link rel="stylesheet" href="/css/responsive.css?v=20" />
 </head>
 <body>
   <div class="app">
@@ -34,7 +34,7 @@
       </div>
 
       <nav class="nav" id="nav">
-        <button class="nav-item active" data-nav="dashboard" type="button">
+        <button class="nav-item" data-nav="dashboard" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
             <rect width="7" height="9" x="3" y="3" rx="1.5" /><rect width="7" height="5" x="14" y="3" rx="1.5" />
             <rect width="7" height="9" x="14" y="12" rx="1.5" /><rect width="7" height="5" x="3" y="16" rx="1.5" />
@@ -42,7 +42,7 @@
           <span>Dashboard</span>
         </button>
 
-        <button class="nav-item" data-nav="agent" type="button">
+        <button class="nav-item active" data-nav="agent" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 8V5" /><circle cx="12" cy="4" r="1" />
             <rect width="16" height="11" x="4" y="8" rx="2.5" />
@@ -126,8 +126,8 @@
           </svg>
         </button>
         <div class="toolbar-titles">
-          <h1 id="pageTitle">Dashboard</h1>
-          <p id="pageSub">Overview of your agent activity</p>
+          <h1 id="pageTitle">Agent</h1>
+          <p id="pageSub">Chat with your AI assistant</p>
         </div>
         <div class="toolbar-spacer"></div>
         <span class="toolbar-status" id="toolbarStatus" title="Application status">
@@ -136,10 +136,10 @@
         </span>
       </header>
 
-      <main class="content" id="content">
+      <main class="content no-scroll" id="content">
 
         <!-- ============ DASHBOARD (real data) ============ -->
-        <section class="page active" data-page="dashboard">
+        <section class="page" data-page="dashboard">
           <div class="stats-grid">
             <div class="card stat" data-anim>
               <div class="stat-head">
@@ -217,25 +217,11 @@
               <div class="chart" id="chartRequests"></div>
             </div>
 
-            <div class="card chart-card" data-anim>
-              <div class="card-head">
-                <div><h3>Est. Cost</h3><p id="costRangeLabel">Last 7 days</p></div>
-                <div class="card-head-side">
-                  <div class="range-switch" data-chart-range>
-                    <button type="button" data-range="7d" class="active">7D</button>
-                    <button type="button" data-range="30d">30D</button>
-                    <button type="button" data-range="months">Months</button>
-                  </div>
-                  <span class="badge" id="costBadge">— total</span>
-                </div>
-              </div>
-              <div class="chart" id="chartCost"></div>
-            </div>
           </div>
         </section>
 
-        <!-- ============ AGENT ============ -->
-        <section class="page" data-page="agent">
+        <!-- ============ AGENT (default landing page) ============ -->
+        <section class="page active" data-page="agent">
           <div class="chat">
             <div class="chat-scroll" id="chatScroll">
               <div class="chat-inner" id="chatInner">
@@ -323,6 +309,78 @@
           </div>
         </section>
 
+        <!-- ============ SCHEDULED RUN (full agent-like section per run, hash-routed) ============ -->
+        <section class="page" data-page="schedrun">
+          <div class="chat">
+            <div class="schedrun-bar" id="schedRunBar">
+              <button class="icon-btn" id="schedRunBack" type="button" aria-label="Back to agent">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+              </button>
+              <div class="schedrun-titles">
+                <h2 id="schedRunTitle" dir="auto">Scheduled run</h2>
+              </div>
+            </div>
+            <div class="chat-scroll" id="schedRunScroll">
+              <div class="chat-inner" id="schedRunLog"></div>
+            </div>
+            <div class="composer-wrap">
+              <form class="composer" id="schedRunForm" autocomplete="off">
+                <div class="composer-attachments" id="schedRunAttachments"></div>
+                <div class="attach-wrap">
+                  <button type="button" class="composer-btn attach-btn" id="schedRunAttachBtn" aria-label="Attach image, video or document">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14" /><path d="M12 5v14" /></svg>
+                  </button>
+                  <div class="attach-menu" id="schedRunAttachMenu">
+                    <button type="button" data-attach="image">
+                      <span class="opt-tile">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+                      </span>
+                      <span class="opt-text"><b>Image</b><i>Upload a picture</i></span>
+                    </button>
+                    <button type="button" data-attach="video">
+                      <span class="opt-tile">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" /></svg>
+                      </span>
+                      <span class="opt-text"><b>Video</b><i>Upload a clip</i></span>
+                    </button>
+                    <button type="button" data-attach="document">
+                      <span class="opt-tile">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
+                      </span>
+                      <span class="opt-text"><b>Document</b><i>PDF, Word, Excel…</i></span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="attach-wrap">
+                  <button type="button" class="composer-btn mode-pill" id="schedRunModeBtn" aria-label="Agent permission mode" title="Agent permission mode">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+                    <span class="mode-label" id="schedRunModeLabel">Restricted</span>
+                  </button>
+                  <div class="attach-menu mode-menu" id="schedRunModeMenu"></div>
+                </div>
+
+                <textarea id="schedRunInput" rows="1" dir="auto" placeholder="راسل لاستكمال المهمة…"></textarea>
+
+                <div class="composer-send-group">
+                  <button type="button" class="composer-btn mic" id="schedRunMicBtn" aria-label="Voice input">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></svg>
+                  </button>
+
+                  <span class="send-group-divider" aria-hidden="true"></span>
+
+                  <button type="submit" class="send-btn" id="schedRunSend" aria-label="Send message">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="6 11 12 5 18 11" /></svg>
+                  </button>
+                </div>
+              </form>
+            </div>
+            <input type="file" id="schedRunFileImage" accept="image/*" hidden />
+            <input type="file" id="schedRunFileVideo" accept="video/*" hidden />
+            <input type="file" id="schedRunFileDocument" accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.txt,.md,.html,.json,.xml" hidden />
+          </div>
+        </section>
+
         <!-- ============ WORKSPACE (agent device) ============ -->
         <section class="page" data-page="workspace">
           <div class="ws-head" data-anim>
@@ -355,17 +413,6 @@
               <svg class="row-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
             </button>
 
-            <button class="row-card" data-anim data-gateway="telegram" type="button">
-              <div class="tile tg">
-                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.26-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" /></svg>
-              </div>
-              <div class="row-body">
-                <div class="row-title">Telegram <span class="badge muted" id="tgBadge">Not connected</span></div>
-                <div class="row-sub">Connect your agent to a Telegram bot</div>
-                <p class="row-desc">Link a bot token so your agent can respond to messages inside Telegram chats and groups.</p>
-              </div>
-              <svg class="row-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
-            </button>
           </div>
         </section>
 
@@ -428,15 +475,15 @@
 
   <script>
     /* Early bootstrap (runs during parsing, before first paint):
-       restores sidebar state + deep-linked page so refresh never flashes. */
+       collapsed rail + Agent landing by default so refresh never flashes. */
     (function () {
       try {
-        if (localStorage.getItem("x5_sidebar") === "collapsed") document.body.classList.add("sidebar-collapsed");
+        if (localStorage.getItem("x5_sidebar") !== "expanded") document.body.classList.add("sidebar-collapsed");
         var seg = (location.pathname || "/").replace(/\/+$/, "").split("/").pop() || "";
         var pages = ["dashboard", "agent", "workspace", "gateway", "plugins", "skills", "models", "settings"];
-        var page = seg === "" || seg === "index.html" ? "dashboard" : seg;
-        if (pages.indexOf(page) < 0) page = "dashboard";
-        if (page !== "dashboard") {
+        var page = seg === "" || seg === "index.html" ? "agent" : seg;
+        if (pages.indexOf(page) < 0) page = "agent";
+        if (page !== "agent") {
           document.querySelectorAll(".nav-item").forEach(function (b) {
             b.classList.toggle("active", b.dataset.nav === page);
           });
@@ -444,9 +491,10 @@
             p.classList.toggle("active", p.dataset.page === page);
           });
           var titles = {
+            dashboard: ["Dashboard", "Overview of your agent activity"],
             agent: ["Agent", "Chat with your AI assistant"],
             workspace: ["Workspace", "Your agent's files and folders"],
-            gateway: ["Gateway", "Connect messaging channels"],
+            gateway: ["WhatsApp gateway", "Connect and manage your WhatsApp agent"],
             plugins: ["Plugins", "Extend your agent capabilities"],
             skills: ["Skills", "Reusable instructions for your agent"],
             models: ["Models", "Manage model providers"],
@@ -460,6 +508,9 @@
           }
           var c = document.getElementById("content");
           if (c) c.classList.toggle("no-scroll", page === "agent");
+        } else {
+          var c2 = document.getElementById("content");
+          if (c2) c2.classList.add("no-scroll");
         }
       } catch (e) {}
     })();
@@ -477,6 +528,6 @@
   <div class="chart-tip" id="chartTip"></div>
   <div class="toast-wrap" id="toastWrap"></div>
 
-  <script type="module" src="/js/app.js?v=41"></script>
+  <script type="module" src="/js/app.js?v=59"></script>
 </body>
 </html>

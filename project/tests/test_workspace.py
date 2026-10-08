@@ -82,3 +82,60 @@ try:
     print("ALL WORKSPACE TESTS PASSED")
 finally:
     cleanup()
+
+
+def test_downloads_virtual_merge():
+    """Virtual browser-downloads folder: merged view, read-only, no real clash."""
+    import tempfile
+    import shutil as _sh
+    import core.tools.workspace.tool as _wstool
+    lib = Path(tempfile.mkdtemp(prefix="lib-dl-"))
+    (lib / "movie.mp4").write_bytes(b"0" * 64)
+    (lib / "sub").mkdir()
+    (lib / "sub" / "disk.iso").write_bytes(b"1" * 32)
+    real_fn = _wstool.library_downloads_dir
+    _wstool.library_downloads_dir = lambda: lib
+    try:
+        from core.paths import workspace_root as _ws
+        # 1. root merges the virtual folder flagged external
+        top = execute("list")
+        dl = [e for e in top["entries"] if e["name"] == "downloads"]
+        assert len(dl) == 1 and dl[0]["type"] == "folder" and dl[0].get("external") is True, top
+        # 2. inside: files + folders flagged external
+        inside = execute("list", path="downloads")
+        by_name = {e["name"]: e for e in inside["entries"]}
+        assert by_name["movie.mp4"].get("external") is True, inside
+        assert by_name["sub"]["type"] == "folder" and by_name["sub"].get("external") is True, inside
+        # 3. nested level works too
+        deep = execute("list", path="downloads/sub")
+        assert deep["entries"][0]["name"] == "disk.iso", deep
+        # 4. mutations blocked with a clear error
+        for bad in [lambda: execute("delete_file", path="downloads", name="movie.mp4"),
+                    lambda: execute("create_folder", path="downloads", name="x")]:
+            try:
+                bad()
+                raise AssertionError("virtual write not blocked")
+            except ValueError:
+                pass
+        # 5. crafted paths blocked
+        try:
+            execute("list", path="downloads/../..")
+            raise AssertionError("traversal not blocked")
+        except (ValueError, FileNotFoundError):
+            pass
+        # 6. a real Workspace/downloads folder wins; virtual hides
+        real = _ws() / "downloads"
+        real.mkdir(parents=True, exist_ok=True)
+        try:
+            (real / "mine.txt").write_text("real", encoding="utf-8")
+            top2 = execute("list")
+            dl2 = [e for e in top2["entries"] if e["name"] == "downloads"]
+            assert len(dl2) == 1 and dl2[0].get("external") is not True, top2
+            real_inside = execute("list", path="downloads")
+            assert [e["name"] for e in real_inside["entries"]] == ["mine.txt"], real_inside
+        finally:
+            _sh.rmtree(str(real), ignore_errors=True)
+        print("downloads virtual merge OK")
+    finally:
+        _wstool.library_downloads_dir = real_fn
+        _sh.rmtree(str(lib), ignore_errors=True)

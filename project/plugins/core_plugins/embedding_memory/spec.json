@@ -1,0 +1,26 @@
+{
+  "name": "embedding_memory",
+  "description": "A semantic text memory that stores one text as a local embedding chunk and retrieves the most similar chunks for a query sentence. Provide text to store, or query to retrieve stored chunks only. Bounded (500 entries), persistent across restarts.",
+  "inputs": {
+    "reason": {
+      "type": "string",
+      "required": false,
+      "description": "Why you call this tool (max 15 words, English)."
+    },
+    "text": {
+      "type": "string",
+      "required": false,
+      "description": "Text to store as one embedding chunk (max 2000 chars). Provide this to store."
+    },
+    "query": {
+      "type": "string",
+      "required": false,
+      "description": "Sentence that retrieves stored embedding chunks only. Provide this to search."
+    },
+    "top_k": {
+      "type": "integer",
+      "required": false,
+      "description": "How many chunks to return (1-10, default 5). For search only."
+    }
+  }
+}

@@ -304,7 +304,7 @@ function renderSkills(skills) {
   }
   skills.forEach((s) => {
     const card = document.createElement("button");
-    card.className = "mini-card glass-panel";
+    card.className = "mini-card";
     card.type = "button";
     card.setAttribute("data-anim", "");
     card.innerHTML = `

@@ -79,15 +79,37 @@ def main() -> int:
     except Exception as e:
         print(f"[WARN] tool embeddings failed: {e}", file=sys.stderr)
 
-    # 4. Start agent loop (placeholder - will be replaced by core/agent/loop)
+    # 4. Start agent loop (interactive terminal chat for VPS).
     print("\n" + "=" * 70)
-    print("  ✅ Everything ready - Agent Loop would start here")
-    print("  (core/agent/loop not yet implemented - placeholder)")
+    print("  ✅ Everything ready - starting agent loop (Ctrl+C or empty line quits)")
     print("=" * 70)
-    print("  Next: implement core/agent/loop to use the 4 models")
-    # Example:
-    # from core.agent.loop import run
-    # return run()
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from core.agent.loop.engine import run_loop
+    except Exception as e:
+        print(f"[FATAL] agent loop not available: {e}", file=sys.stderr)
+        return 1
+    import os as _os
+
+    api_key = _os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        print("[WARN] OPENROUTER_API_KEY not set - cloud chat calls will fail.", file=sys.stderr)
+    while True:
+        try:
+            user_input = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nBye.")
+            break
+        if not user_input:
+            break
+        try:
+            result = run_loop(user_input=user_input, api_key=api_key or None)
+            print(f"\nAgent: {result.get('final_answer', '')}")
+        except KeyboardInterrupt:
+            print("\nStopped.")
+            break
+        except Exception as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
 
     return 0
 

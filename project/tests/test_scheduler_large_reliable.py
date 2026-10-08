@@ -2,7 +2,7 @@ import sys, json, os
 from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
-os.environ["OPENROUTER_API_KEY"] = "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"
+os.environ.setdefault("OPENROUTER_API_KEY", "test-dummy-key")
 
 # Unified test paths: fixtures live in X5Agent/Data (same single source of truth as runtime)
 _REPO = Path(__file__).resolve().parents[2]
@@ -111,13 +111,15 @@ with mock.patch("core.agent.loop.engine.run_loop") as mock_loop2:
     print(" ✅ light mode correct")
 
 print("\n=== TEST 6: real loop with isolated large task (optional, needs API) ===")
-# Quick real run with isolated large task but small steps to avoid cost
-# We will run a real isolated loop for a simple large-style task but with max_steps 4
-from core.agent.loop.engine import run_loop
-# Use a simple large-like input but isolated
-res = run_loop(user_input="هذه مهمة مجدولة كبيرة: حلل ملف sales.csv - الخطوات: 1- اقرأ الملف 2- لخص", max_steps=4, api_key=os.environ["OPENROUTER_API_KEY"], verbose=False, isolated=True, todo_snapshot=t["todo"])
-print(f" real isolated loop steps {res['steps']} answer {res['final_answer'][:100]}")
-print(" ✅ real isolated loop works")
+# Skipped without a real API key: dummy keys must never trigger network calls.
+if os.environ.get("OPENROUTER_API_KEY", "test-dummy-key") in ("", "test-dummy-key", "dummy"):
+    print(" ⏭️ skipped (no real OPENROUTER_API_KEY in env)")
+else:
+    from core.agent.loop.engine import run_loop
+    # Use a simple large-like input but isolated
+    res = run_loop(user_input="هذه مهمة مجدولة كبيرة: حلل ملف sales.csv - الخطوات: 1- اقرأ الملف 2- لخص", max_steps=4, api_key=os.environ["OPENROUTER_API_KEY"], verbose=False, isolated=True, todo_snapshot=t["todo"])
+    print(f" real isolated loop steps {res['steps']} answer {res['final_answer'][:100]}")
+    print(" ✅ real isolated loop works")
 
 # cleanup
 import shutil

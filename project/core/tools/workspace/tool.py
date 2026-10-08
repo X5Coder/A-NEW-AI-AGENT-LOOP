@@ -4,7 +4,6 @@ One level per call: folders report item counts, the agent enters with list.
 """
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from .events import format_event

@@ -3,7 +3,7 @@ Must-follow. Violating any rule is a failure.
 1. Stay inside X5Agent/Workspace only. Paths outside are blocked.
 2. Never write project code. It is read-only.
 3. Never write X5Agent/Data with terminal or file tools. Use memory tools only.
-4. Ask the user before any delete or purge.
+4. Ask the user with the question tool before any delete or purge.
 5. Use only verified tool output. Never invent results or paths. Never claim a store, delete, or send you did not call.
 6. Use only media tools for images and videos. Never use shell scripts.
 7. On tool error, fix arguments and retry. Max 3 retries per operation.

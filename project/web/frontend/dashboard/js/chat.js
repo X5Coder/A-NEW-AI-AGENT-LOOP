@@ -33,6 +33,10 @@ let activeThinking = null;
 let lastUserText = "";
 let lastUserEl = null;
 let activeRun = null;
+// Run generation: every stream turn owns a token so a superseded turn
+// (STOP / fresh answer / newer message) exits quietly — no error text,
+// no blocking fallback, no state clobbering.
+let runGen = 0;
 
 function scrollToBottom(smooth = true) {
   if (!chatScroll) return;
@@ -57,14 +61,512 @@ function humanizeEvent(text) {
   return t;
 }
 
+function isRtlStrong(ch) {
+  // Numeric code-point ranges (no literal glyphs): Hebrew, Arabic blocks,
+  // Arabic Supplement/Extended-A, Presentation Forms A/B.
+  const c = String(ch || "").codePointAt(0) || 0;
+  return (c >= 0x0590 && c <= 0x05ff) || (c >= 0x0600 && c <= 0x06ff) ||
+    (c >= 0x0750 && c <= 0x077f) || (c >= 0x08a0 && c <= 0x08ff) ||
+    (c >= 0xfb50 && c <= 0xfdff) || (c >= 0xfe70 && c <= 0xfeff);
+}
+
+function isLtrStrong(ch) {
+  // Basic Latin + Latin/Greek/Cyrillic Extended (numeric ranges only).
+  const c = String(ch || "").codePointAt(0) || 0;
+  if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) return true;
+  return (c >= 0x00c0 && c <= 0x024f) || (c >= 0x0370 && c <= 0x03ff) ||
+    (c >= 0x0400 && c <= 0x04ff) || (c >= 0x1e00 && c <= 0x1eff);
+}
+
+function autoDir(content) {
+  // Explicit direction for one rich block (first-strong-char rule), so list
+  // markers and table cells sit on the right side from the very first typed
+  // frame — an empty dir=auto node would default to LTR (bullet on the
+  // left, cell text jumping sides). Tags/entities are skipped so markup
+  // never fakes the direction.
+  try {
+    const text = String(content || "")
+      .replace(/<[^>]*>/g, "")
+      .replace(/&[A-Za-z0-9#]+;/g, "");
+    for (const ch of text) {
+      if (isRtlStrong(ch)) return "rtl";
+      if (isLtrStrong(ch)) return "ltr";
+    }
+  } catch (_) {}
+  return "auto";
+}
+
+const CODE_LANG_NAMES = {
+  js: "JavaScript", javascript: "JavaScript", ts: "TypeScript", typescript: "TypeScript",
+  py: "Python", python: "Python", html: "HTML", xml: "XML", css: "CSS", json: "JSON",
+  yaml: "YAML", yml: "YAML", sh: "Shell", bash: "Shell", shell: "Shell", sql: "SQL",
+  java: "Java", c: "C", cpp: "C++", "c++": "C++", cs: "C#", "c#": "C#", go: "Go",
+  rust: "Rust", php: "PHP", rb: "Ruby", ruby: "Ruby", swift: "Swift", kotlin: "Kotlin",
+  md: "Markdown", markdown: "Markdown", txt: "Text", text: "Text",
+};
+
+function codeLangOf(tag) {
+  // Display name for a fence tag (bounded). Unknown tags show as-is.
+  try {
+    const raw = String(tag || "").trim().slice(0, 16);
+    const t = raw.toLowerCase();
+    if (CODE_LANG_NAMES[t]) return { key: t, label: CODE_LANG_NAMES[t] };
+    if (!t) return { key: "", label: "code" };
+    return { key: t, label: raw };
+  } catch (_) {
+    return { key: "", label: "code" };
+  }
+}
+
+function codeFamily(key) {
+  // One small grammar per family; everything else shares the C-like one.
+  if (!key) return "code";
+  if (key === "py" || key === "python" || key === "rb" || key === "ruby") return "python";
+  if (key === "html" || key === "xml") return "markup";
+  if (key === "css") return "css";
+  if (key === "sh" || key === "bash" || key === "shell") return "shell";
+  if (key === "json" || key === "yaml" || key === "yml") return "data";
+  if (key === "md" || key === "markdown" || key === "txt" || key === "text") return "plain";
+  return "code";
+}
+
+const KW_CODE = new Set("break case catch class const continue debugger default delete do else export extends false finally for function if import in instanceof new null return super switch this throw true try typeof var void while with yield async await static get set of from as let enum implements interface package private protected public".split(" "));
+const KW_PY = new Set("False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield".split(" "));
+const KW_SHELL = new Set("if then else elif fi for while until do done case esac function select time in".split(" "));
+
+function runCodeTokens(s, re, classify) {
+  // Walk one grammar over the source, escaping every piece. Never throws.
+  const out = [];
+  let last = 0;
+  let m = null;
+  try {
+    re.lastIndex = 0;
+    while ((m = re.exec(s)) !== null) {
+      if (m.index > last) out.push(escapeHtml(s.slice(last, m.index)));
+      let cls = "";
+      try {
+        cls = classify(m, s, re.lastIndex) || "";
+      } catch (_) {
+        cls = "";
+      }
+      out.push(cls ? `<span class="${cls}">${escapeHtml(m[0])}</span>` : escapeHtml(m[0]));
+      last = re.lastIndex;
+      if (!m[0].length) re.lastIndex += 1;
+    }
+  } catch (_) {}
+  try {
+    if (last < s.length) out.push(escapeHtml(s.slice(last)));
+  } catch (_) {}
+  return out.join("");
+}
+
+function highlightCode(src, family) {
+  // Tiny dependency-free highlighter (comments/strings/numbers/keywords +
+  // function names). Bounded: oversized blocks stay plain text. Never throws.
+  try {
+    const s = String(src ?? "");
+    if (!s || s.length > 20000 || family === "plain") return escapeHtml(s);
+    const isFnCall = (rest) => /^\s*\(/.test(rest);
+    if (family === "python") {
+      const re = /("""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$))|('(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")|(#[^\n]*)|(\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|([A-Za-z_]\w*)/g;
+      return runCodeTokens(s, re, (m, full, idx) => {
+        if (m[1] || m[2]) return "tok-str";
+        if (m[3]) return "tok-com";
+        if (m[4]) return "tok-num";
+        if (m[5]) return KW_PY.has(m[5]) ? "tok-kw" : (isFnCall(full.slice(idx)) ? "tok-fn" : "");
+        return "";
+      });
+    }
+    if (family === "shell") {
+      const re = /(#[^\n]*)|('(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`)|(--?[A-Za-z][\w-]*)|(\b\d+(?:\.\d+)?\b)|(\$[\w#?$!*]+)|([A-Za-z_]\w*)/g;
+      return runCodeTokens(s, re, (m) => {
+        if (m[1]) return "tok-com";
+        if (m[2] || m[5]) return "tok-str";
+        if (m[3]) return "tok-attr";
+        if (m[4]) return "tok-num";
+        if (m[6]) return KW_SHELL.has(m[6]) ? "tok-kw" : "";
+        return "";
+      });
+    }
+    if (family === "markup") {
+      const re = /(<!--[\s\S]*?(?:-->|$))|(<\/?[A-Za-z][\w:.-]*|\/?>)|([A-Za-z_:][\w:.-]*(?=\s*=\s*["']))|('(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")/g;
+      return runCodeTokens(s, re, (m) => {
+        if (m[1]) return "tok-com";
+        if (m[2]) return "tok-tag";
+        if (m[3]) return "tok-attr";
+        if (m[4]) return "tok-str";
+        return "";
+      });
+    }
+    if (family === "css") {
+      const re = /(\/\*[\s\S]*?(?:\*\/|$))|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|(@[\w-]+)|(#[0-9a-fA-F]{3,8}\b)|(\b\d+(?:\.\d+)?(?:px|em|rem|%|s|ms|vh|vw|ch|fr|deg)?\b)|([A-Za-z-]+(?=\s*:))/g;
+      return runCodeTokens(s, re, (m) => {
+        if (m[1]) return "tok-com";
+        if (m[2]) return "tok-str";
+        if (m[3]) return "tok-kw";
+        if (m[4] || m[5]) return "tok-num";
+        if (m[6]) return "tok-attr";
+        return "";
+      });
+    }
+    if (family === "data") {
+      const re = /("(?:[^"\\\n]|\\.)*"(?=\s*:))|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|(\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|(\btrue\b|\bfalse\b|\bnull\b)/g;
+      return runCodeTokens(s, re, (m) => {
+        if (m[1]) return "tok-attr";
+        if (m[2]) return "tok-str";
+        if (m[3]) return "tok-num";
+        if (m[4]) return "tok-kw";
+        return "";
+      });
+    }
+    const re = /(\/\*[\s\S]*?(?:\*\/|$))|(\/\/[^\n]*)|(`(?:[^`\\]|\\.)*`?|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")|(\b0[xX][0-9a-fA-F]+\b|\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+    return runCodeTokens(s, re, (m, full, idx) => {
+      if (m[1] || m[2]) return "tok-com";
+      if (m[3]) return "tok-str";
+      if (m[4]) return "tok-num";
+      if (m[5]) return KW_CODE.has(m[5]) ? "tok-kw" : (isFnCall(full.slice(idx)) ? "tok-fn" : "");
+      return "";
+    });
+  } catch (_) {
+    try {
+      return escapeHtml(String(src ?? ""));
+    } catch (_) {
+      return "";
+    }
+  }
+}
+
+const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>';
+
+  // WhatsApp-style voice record bubble (agent TTS output)
+const MV_PLAY_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.53.85l10.2-6.5a1 1 0 0 0 0-1.7L9.53 4.65A1 1 0 0 0 8 5.5z"/></svg>';
+const MV_PAUSE_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6.2" y="5" width="4" height="14" rx="1.4"/><rect x="13.8" y="5" width="4" height="14" rx="1.4"/></svg>';
+const MV_BARS = 34;
+let mvPlaying = null;
+
+function mvStopOther(current) {
+  // One voice record plays at a time - starting a new one pauses the rest.
+  try {
+    if (mvPlaying && mvPlaying !== current) mvPlaying.pause();
+  } catch (_) {}
+  try {
+    document.querySelectorAll(".msg-voice").forEach((b) => {
+      if (b !== current && typeof b._mvSetPlaying === "function") b._mvSetPlaying(false);
+    });
+  } catch (_) {}
+}
+
+function mvHashBars(seed, n) {
+  // Deterministic bar heights per record so the shape is stable live and
+  // after refresh (no real waveform fetch needed). Never throws.
+  const out = [];
+  try {
+    let h = 2166136261;
+    const s = String(seed || "v");
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    for (let i = 0; i < n; i++) {
+      h ^= h << 13;
+      h = Math.imul(h, 0x5bd1e995);
+      h ^= h >>> 15;
+      const v = (h >>> 0) / 4294967295;
+      // Tall middle, tapered ends (voice-note look), min height visible.
+      const taper = Math.sin((Math.PI * (i + 0.5)) / n) * 0.65 + 0.35;
+      out.push(Math.max(0.14, Math.min(1, (0.25 + v * 0.75) * taper)));
+    }
+  } catch (_) {
+    for (let i = 0; i < n; i++) out.push(0.4);
+  }
+  return out;
+}
+
+function mvFormat(sec) {
+  try {
+    const s = Math.max(0, Math.round(Number(sec) || 0));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  } catch (_) {
+    return "0:00";
+  }
+}
+
+function mvUrl(name) {
+  return "/api/audio?path=" + encodeURIComponent(name);
+}
+
+function mvSetPlayingVisual(box, btn, playing) {
+  try {
+    box.classList.toggle("playing", !!playing);
+    btn.innerHTML = playing ? MV_PAUSE_SVG : MV_PLAY_SVG;
+    btn.setAttribute("aria-label", playing ? "Pause voice message" : "Play voice message");
+    btn.setAttribute("aria-pressed", playing ? "true" : "false");
+  } catch (_) {}
+}
+
+function createVoiceBubble(name, durationSec) {
+  // Standalone record bubble: round play button + wave bars that fill as it
+  // plays + duration label. Click/drag on the wave seeks. Never throws.
+  const box = document.createElement("div");
+  box.className = "msg-voice";
+  box.setAttribute("dir", "ltr");
+  try {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mv-play";
+    btn.setAttribute("aria-label", "Play voice message");
+    btn.setAttribute("aria-pressed", "false");
+    btn.innerHTML = MV_PLAY_SVG;
+
+    const wave = document.createElement("div");
+    wave.className = "mv-wave";
+    wave.setAttribute("role", "slider");
+    wave.setAttribute("aria-label", "Voice message progress");
+    wave.setAttribute("aria-valuemin", "0");
+    wave.setAttribute("aria-valuemax", "100");
+    wave.setAttribute("aria-valuenow", "0");
+    wave.tabIndex = 0;
+    const heights = mvHashBars(name, MV_BARS);
+    const bars = heights.map((hgt) => {
+      const b = document.createElement("span");
+      b.className = "mv-bar";
+      b.style.transform = `scaleY(${hgt.toFixed(3)})`;
+      wave.appendChild(b);
+      return b;
+    });
+
+    const time = document.createElement("span");
+    time.className = "mv-time";
+    time.textContent = mvFormat(durationSec);
+
+    const audioEl = document.createElement("audio");
+    audioEl.preload = "metadata";
+    audioEl.src = mvUrl(name);
+    box.appendChild(audioEl);
+    if (!audioEl.isConnected) {
+      try {
+        audioEl.load();
+      } catch (_) {}
+    }
+
+    const setPlaying = (playing) => mvSetPlayingVisual(box, btn, playing);
+    box._mvSetPlaying = setPlaying;
+
+    const paint = (frac) => {
+      try {
+        const cut = Math.max(0, Math.min(1, Number(frac) || 0));
+        const lit = Math.floor(cut * bars.length);
+        bars.forEach((b, i) => b.classList.toggle("on", i < lit));
+        wave.setAttribute("aria-valuenow", String(Math.round(cut * 100)));
+      } catch (_) {}
+    };
+
+    const total = () => {
+      try {
+        const d = Number(audioEl.duration);
+        if (Number.isFinite(d) && d > 0) return d;
+      } catch (_) {}
+      const f = Number(durationSec);
+      return Number.isFinite(f) && f > 0 ? f : 0;
+    };
+
+    const tick = () => {
+      try {
+        const d = total();
+        time.textContent = audioEl.paused && audioEl.currentTime <= 0
+          ? mvFormat(d)
+          : `${mvFormat(audioEl.currentTime)} / ${mvFormat(d)}`;
+        paint(d > 0 ? audioEl.currentTime / d : 0);
+      } catch (_) {}
+    };
+
+    const seekToFrac = (clientX) => {
+      try {
+        const r = wave.getBoundingClientRect();
+        if (!r || r.width <= 0) return;
+        const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+        const d = total();
+        if (d > 0) audioEl.currentTime = frac * d;
+        paint(frac);
+      } catch (_) {}
+    };
+
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      try {
+        if (audioEl.paused) {
+          mvStopOther(box);
+          audioEl.play().catch(() => setPlaying(false));
+        } else audioEl.pause();
+      } catch (_) {}
+    });
+    audioEl.addEventListener("play", () => {
+      mvPlaying = audioEl;
+      setPlaying(true);
+      tick();
+    });
+    audioEl.addEventListener("pause", () => {
+      if (mvPlaying === audioEl) mvPlaying = null;
+      setPlaying(false);
+      tick();
+    });
+    audioEl.addEventListener("timeupdate", tick);
+    audioEl.addEventListener("loadedmetadata", tick);
+    audioEl.addEventListener("ended", () => {
+      try {
+        audioEl.currentTime = 0;
+      } catch (_) {}
+      setPlaying(false);
+      tick();
+    });
+    audioEl.addEventListener("error", () => {
+      box.classList.add("broken");
+      btn.disabled = true;
+      time.textContent = "failed";
+    }, { once: true });
+
+    let dragging = false;
+    wave.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      try {
+        wave.setPointerCapture(e.pointerId);
+      } catch (_) {}
+      seekToFrac(e.clientX);
+    });
+    wave.addEventListener("pointermove", (e) => {
+      if (dragging) seekToFrac(e.clientX);
+    });
+    wave.addEventListener("pointerup", () => { dragging = false; });
+    wave.addEventListener("pointercancel", () => { dragging = false; });
+    wave.addEventListener("keydown", (e) => {
+      try {
+        const d = total();
+        if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+          e.preventDefault();
+          const step = e.key === "ArrowRight" ? 2 : -2;
+          if (d > 0) audioEl.currentTime = Math.max(0, Math.min(d, audioEl.currentTime + step));
+          tick();
+        } else if (e.key === " " || e.key === "Enter") {
+          e.preventDefault();
+          btn.click();
+        }
+      } catch (_) {}
+    });
+
+    box.appendChild(btn);
+    box.appendChild(wave);
+    box.appendChild(time);
+    box.appendChild(audioEl);
+  } catch (_) {}
+  return box;
+}
+
+function appendFinalVoice(el, audioList) {
+  // Voice records spoken via text_to_speech, shown as standalone bubbles
+  // under the reply (live and after refresh). Accepts the engine's
+  // [{audio, duration, voice, lang}] items (or bare filename strings).
+  const list = (Array.isArray(audioList) ? audioList : [])
+    .map((item) => {
+      if (typeof item === "string") return { audio: item, duration: 0 };
+      if (item && typeof item.audio === "string") {
+        return { audio: item.audio, duration: Number(item.duration) || 0 };
+      }
+      return null;
+    })
+    .filter((v) => v && v.audio)
+    .slice(0, 4);
+  if (!el || !list.length) return;
+  const content = el.querySelector(".msg-content");
+  if (!content || content.querySelector(":scope > .msg-final-voice")) return;
+  const wrap = document.createElement("div");
+  wrap.className = "msg-final-voice";
+  list.forEach((v) => wrap.appendChild(createVoiceBubble(v.audio, v.duration)));
+  content.appendChild(wrap);
+  scrollToBottom();
+}
+
+function codeblockShell(langTag, rawCode) {
+  // Professional code card: fixed header (language + copy) over expanded,
+  // highlighted, LTR code. Copy reads textContent (spans + entities resolve).
+  try {
+    const { key, label } = codeLangOf(langTag);
+    const code = highlightCode(rawCode, codeFamily(key));
+    return `<div class="codeblock" dir="ltr"><div class="code-head"><span class="code-lang">${escapeHtml(label)}</span><button type="button" class="code-copy" aria-label="Copy code">${COPY_SVG}<span>Copy</span></button></div><pre><code>${code}</code></pre></div>`;
+  } catch (_) {
+    try {
+      return `<pre dir="ltr"><code>${escapeHtml(String(rawCode ?? ""))}</code></pre>`;
+    } catch (_) {
+      return "";
+    }
+  }
+}
+
+async function copyCodeBlock(btn) {
+  // Copy one code card (clipboard API, textarea fallback for http).
+  try {
+    const block = btn && btn.closest ? btn.closest(".codeblock") : null;
+    const codeEl = block ? block.querySelector("pre code") : null;
+    const text = codeEl ? codeEl.textContent || "" : "";
+    if (!text) {
+      toast("Nothing to copy");
+      return;
+    }
+    let ok = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    } catch (_) {
+      ok = false;
+    }
+    if (!ok) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        ok = document.execCommand("copy");
+      } catch (_) {
+        ok = false;
+      }
+      ta.remove();
+    }
+    const label = btn.querySelector("span");
+    if (ok) {
+      if (label) label.textContent = "Copied";
+      btn.classList.add("copied");
+      toast("Copied");
+      setTimeout(() => {
+        try {
+          if (label) label.textContent = "Copy";
+          btn.classList.remove("copied");
+        } catch (_) {}
+      }, 1400);
+    } else {
+      toast("Copy failed");
+    }
+  } catch (_) {
+    try {
+      toast("Copy failed");
+    } catch (_) {}
+  }
+}
+
 function formatRich(text) {
   // Global-AI style formatting: code blocks, bold, italic, code, lists. dir=auto per block.
   const chunks = [];
-  let esc = escapeHtml(String(text ?? ""));
-  esc = esc.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, _lang, code) => {
-    chunks.push(`<pre dir="ltr"><code>${code.replace(/^\n+|\s+$/g, "")}</code></pre>`);
+  // Fences are extracted from the RAW text first (placeholders survive the
+  // later escaping); the code shell escapes + highlights internally.
+  let src = String(text ?? "");
+  src = src.replace(/```([^`\n]*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+    chunks.push(codeblockShell((lang || "").trim(), code.replace(/^\n+|\s+$/g, "")));
     return `%%X5CODE${chunks.length - 1}%%`;
   });
+  let esc = escapeHtml(src);
   esc = esc.replace(/`([^`\n]+?)`/g, "<code>$1</code>");
   esc = esc.replace(/\*\*([^*]+?)\*\*/g, "<b>$1</b>");
   esc = esc.replace(/(^|[^*\w])\*([^*\n]+?)\*/g, "$1<i>$2</i>");
@@ -100,25 +602,33 @@ function formatRich(text) {
       li += 2;
       while (li < lines.length && isPipeRow(lines[li])) {
         const cells = splitCells(lines[li]);
-        rowsHtml += `<tr>${cells.map((c) => `<td dir="auto">${c}</td>`).join("")}</tr>`;
+        // First body column is the row header (spec/label column): semantic
+        // th + distinct styling + its own divider, so it never looks merged.
+        rowsHtml += `<tr>${cells.map((c, idx) => (idx === 0 && cells.length > 1
+          ? `<th scope="row" dir="${autoDir(c)}">${c}</th>`
+          : `<td dir="${autoDir(c)}">${c}</td>`)).join("")}</tr>`;
         li++;
       }
       li--;
-      html += `<table dir="auto"><thead><tr>${head.map((c) => `<th dir="auto">${c}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table>`;
+      // Explicit table direction from the header language (never auto): an
+      // auto table can stay LTR while typing and strand an Arabic table
+      // backwards — explicit dir pins the spec column right in RTL Arabic,
+      // left in English, from the first frame.
+      html += `<table dir="${autoDir(head.join(" "))}"><thead><tr>${head.map((c) => `<th dir="${autoDir(c)}">${c}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table>`;
     } else if (ul) {
       if (list !== "ul") {
         flush();
         html += "<ul>";
         list = "ul";
       }
-      html += `<li dir="auto">${ul[1]}</li>`;
+      html += `<li dir="${autoDir(ul[1])}">${ul[1]}</li>`;
     } else if (ol) {
       if (list !== "ol") {
         flush();
         html += "<ol>";
         list = "ol";
       }
-      html += `<li dir="auto">${ol[1]}</li>`;
+      html += `<li dir="${autoDir(ol[1])}">${ol[1]}</li>`;
     } else {
       flush();
       if (codeRef && chunks[Number(codeRef[1])] !== undefined) {
@@ -239,7 +749,9 @@ function appendAssistantShell() {
 
 /* ---------- thinking-block: Working header + expandable steps ----------
    Working header (dot-square 5x5 + wave text + arrow) stays open while the
-   agent works; every step has its own arrow opening reason + output + image.
+   agent works; every step arrow shows the model reason only, plus one
+   curated detail line per tool (todo steps, file names, short code/terminal
+   preview) and/or image — raw tool output is never dumped.
    When done the wave stops (static white, 3x3 square) and the block
    collapses — the final reply lives below it. Header is English LTR;
    step content is dir=auto so Arabic reads RTL. ---------- */
@@ -415,6 +927,19 @@ function stepReasonText(step) {
   return r ? r.slice(0, 500) : "";
 }
 
+function stepKey(step) {
+  // One tool call = one step: keyed by the call id first, so a completion
+  // whose label differs from its preview (question Answered, tool errors)
+  // updates the SAME item instead of orphaning a forever-running row.
+  try {
+    const id = typeof step === "object" && step ? step.key || step.id || "" : "";
+    if (id) return String(id);
+  } catch (_) {}
+  const t = typeof step === "string" ? step : (step && (step.event || "")) || "";
+  return `::${t}`;
+}
+
+
 function ensureStepArrow(item) {
   // The arrow exists only while the step has expandable content
   // (reason text, output text, or an image). Never throws.
@@ -433,30 +958,14 @@ function ensureStepArrow(item) {
   } catch (_) {}
 }
 
-const CHECK_SVG =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>';
-
 function markStepRunning(item) {
-  // The step was just requested: orange dot until it completes.
+  // The step was just requested: orange dot until it completes, then the
+  // dot alone turns green — no check mark anywhere.
   try {
     if (!item) return;
     item._done = false;
     item.classList.remove("done");
     item.classList.add("running");
-  } catch (_) {}
-}
-
-function markStepCheck(item) {
-  // Completed step: a green check pops in next to the title (added once).
-  try {
-    if (!item || !item._head || item._head.querySelector(":scope > .step-check")) return;
-    const el = document.createElement("span");
-    el.className = "step-check";
-    el.setAttribute("aria-hidden", "true");
-    el.innerHTML = CHECK_SVG;
-    const title = item._head.querySelector(":scope > .step-title");
-    if (title) item._head.insertBefore(el, title);
-    else item._head.appendChild(el);
   } catch (_) {}
 }
 
@@ -468,6 +977,10 @@ function createStepItem(step) {
   const shot = typeof step === "object" && step
     ? (media && typeof media.shot === "string" && media.shot) || (typeof step.shot === "string" && step.shot) || ""
     : "";
+  // Voice records render once as a WhatsApp-style bubble on the assistant
+  // message (appendFinalVoice), never inside the step.
+  // Voice records render once as a WhatsApp-style bubble on the assistant
+  // message (appendFinalVoice), never inside the step.
 
   const item = document.createElement("div");
   item.className = "step-item";
@@ -530,8 +1043,9 @@ function createStepItem(step) {
 }
 
 function completeStepItem(item, { output = "", shot = "" } = {}) {
-  // Fills a started step with its result: output text and/or image, then
-  // marks it done (green bullet). Never duplicates nodes. Never throws.
+  // Fills a started step with its curated detail (under the reason) and/or
+  // image, then marks it done (green bullet). The detail is never raw tool
+  // output — the backend sends one short per-tool line only. Never throws.
   try {
     if (!item || !item._inner) return;
     const inner = item._inner;
@@ -542,8 +1056,7 @@ function completeStepItem(item, { output = "", shot = "" } = {}) {
       outEl.textContent = output.trim().slice(0, 500);
       inner.appendChild(outEl);
     }
-    if (typeof shot === "string" && shot && !inner.querySelector(":scope > .step-img")) {
-      const url = "/api/shot?path=" + encodeURIComponent(shot);
+    if (typeof shot === "string" && shot && !inner.querySelector(":scope > .step-img")) {      const url = "/api/shot?path=" + encodeURIComponent(shot);
       const wrap = document.createElement("div");
       wrap.className = "step-img";
       const img = document.createElement("img");
@@ -567,7 +1080,6 @@ function completeStepItem(item, { output = "", shot = "" } = {}) {
       item._done = true;
       item.classList.remove("running");
       item.classList.add("done");
-      markStepCheck(item);
     }
     // Late content (output/image at completion) earns the arrow then.
     ensureStepArrow(item);
@@ -605,17 +1117,31 @@ function typeRich(container, fullText) {
       tn.textContent = "";
     });
     container.innerHTML = "";
+    container.classList.add("typing-live");
     container.appendChild(live);
     let ji = 0;
     let ci = 0;
+    const markItemText = () => {
+      // A list item earns its marker the moment its first text arrives —
+      // empty items stay markerless while typing (no stray dots).
+      try {
+        const job = jobs[ji];
+        if (job && job.full.length && job.tn.parentElement) {
+          const li = job.tn.parentElement.closest("li");
+          if (li) li.classList.add("has-text");
+        }
+      } catch (_) {}
+    };
     const advance = () => {
       while (ji < jobs.length && ci >= jobs[ji].full.length) {
         ji++;
         ci = 0;
       }
+      markItemText();
     };
     advance();
     if (!jobs.some((j) => j.full.length)) {
+      container.classList.remove("typing-live");
       resolve(live);
       return;
     }
@@ -636,6 +1162,7 @@ function typeRich(container, fullText) {
       if (ji >= jobs.length) {
         cursor.remove();
         scrollToBottom();
+        container.classList.remove("typing-live");
         resolve(live);
         return;
       }
@@ -806,6 +1333,7 @@ async function loadHistory() {
         rich.innerHTML = formatRich(rawText);
         p.replaceWith(rich);
         appendFinalImages(el, m.images);
+        appendFinalVoice(el, m.audio);
         el.dataset.raw = rawText;
         if (m.id) el.dataset.mid = String(m.id);
         if (lastSeenUserText) el.dataset.userText = lastSeenUserText;
@@ -1011,7 +1539,8 @@ async function sendStream(value, attachments, thinking) {
   // Live event streaming — returns true when fully handled, false to fall back.
   activeThinking = thinking;
   const controller = new AbortController();
-  activeRun = { controller, cancelled: false };
+  const myGen = ++runGen;
+  activeRun = { controller, cancelled: false, gen: myGen, thinking };
   let res;
   try {
     res = await fetch("/api/chat_stream", {
@@ -1099,11 +1628,6 @@ async function sendStream(value, attachments, thinking) {
     ph.className = "msg-actions below msg-actions-ph";
     shell.appendChild(ph);
   }
-  function stepKey(step) {
-    const t = typeof step === "string" ? step : step?.event || step?.key || "";
-    const id = typeof step === "object" && step ? step.key || step.id || "" : "";
-    return `${id}::${t}`;
-  }
   function appendStepStart(step) {
     // A tool call appears immediately: title + reason, open block,
     // bullet pending. Completion fills output/image and marks it done.
@@ -1175,6 +1699,12 @@ async function sendStream(value, attachments, thinking) {
         return;
       }
     } else {
+      // The completion label may differ from the preview (Answered, errors):
+      // the row keeps its place and takes the final title.
+      try {
+        const titleEl = item._head && item._head.querySelector(":scope > .step-title");
+        if (titleEl && text && titleEl.textContent !== text) titleEl.textContent = text;
+      } catch (_) {}
       completeStepItem(item, {
         output: typeof output === "string" ? output : "",
         shot: typeof shot === "string" ? shot : "",
@@ -1300,6 +1830,7 @@ async function sendStream(value, attachments, thinking) {
             }
             await typeRich(holder, replyText);
             appendFinalImages(shell, msg2.images);
+            appendFinalVoice(shell, msg2.audio);
             finalEl = shell;
             shell = null;
           } else if (liveHadSteps) {
@@ -1312,12 +1843,14 @@ async function sendStream(value, attachments, thinking) {
             thinking.appendChild(holder);
             await typeRich(holder, replyText);
             appendFinalImages(thinking, msg2.images);
+            appendFinalVoice(thinking, msg2.audio);
             finalEl = thinking;
           } else {
             // Direct answer, no steps: Working artifact dropped, reply only.
             thinking.remove();
             finalEl = await typeMessage(replyText, collected);
             appendFinalImages(finalEl, msg2.images);
+            appendFinalVoice(finalEl, msg2.audio);
           }
           const ids = msg2.ids || null;
           if (lastUserEl && ids && ids.user) lastUserEl.dataset.mid = ids.user;
@@ -1345,6 +1878,10 @@ async function sendStream(value, attachments, thinking) {
     // stream broke mid-way — handled below
   }
   if (!doneReceived) {
+    // Superseded turn (STOP / fresh answer / newer message took over):
+    // exit quietly — no error text, no blocking fallback. Only a genuine
+    // break of the OWNED stream still shows "Connection lost".
+    if (!activeRun || activeRun.gen !== myGen) return true;
     if (!shell && !(thinking && thinking.isConnected && thinking._block)) {
       thinking.remove();
       return false;
@@ -1402,6 +1939,7 @@ async function sendBlocking(value, attachments, thinking) {
     const replyText = String(data?.reply || "");
     const finalEl = await typeMessage(replyText, data?.events, data?.elapsed);
     appendFinalImages(finalEl, data?.images);
+    appendFinalVoice(finalEl, data?.audio);
     const ids = data?.ids || null;
     if (lastUserEl && ids && ids.user) lastUserEl.dataset.mid = ids.user;
     if (ids && ids.assistant) finalEl.dataset.mid = ids.assistant;
@@ -1506,8 +2044,14 @@ async function executeAgentTurn(value, attachments) {
     }
     if (!handled) await sendBlocking(value, attachments, thinking);
   } finally {
-    activeRun = null;
-    setSending(false);
+    // Only clear state this turn still owns — a newer turn may have taken
+    // over while this one was winding down.
+    try {
+      if (!activeRun || activeRun.thinking === thinking) {
+        activeRun = null;
+        setSending(false);
+      }
+    } catch (_) {}
     composerInput.focus();
   }
 }
@@ -1924,9 +2468,9 @@ function setVoiceLabel(text) {
   if (label) label.textContent = text;
 }
 
-/* Deliberate height morph: the switch container shrinks/grows between the
-   tall writing template and the shorter recording one (FLIP on height),
-   while content presses down / blooms with blur. */
+/* Smooth height morph (FLIP): the container eases to the visible template's
+   height while templates crossfade with a gentle rise. Bounded 260ms to
+   match the CSS rhythm; cleanup always restores auto height. */
 function morphSwitchHeight(switchEl, showEl, hideEl) {
   if (!switchEl || !showEl) return;
   try {
@@ -1942,7 +2486,7 @@ function morphSwitchHeight(switchEl, showEl, hideEl) {
     setTimeout(() => {
       switchEl.style.height = "";
       switchEl.classList.remove("animating-height");
-    }, 340);
+    }, 300);
   } catch (_) {
     switchEl.style.height = "";
     switchEl.classList.remove("animating-height");
@@ -1955,8 +2499,7 @@ function showVoicePanel() {
   if (!panel || !composer) return;
   clearVoiceLoading();
   panel.classList.remove("transcribing");
-  // Dynamic morph: writing presses down with blur while the container
-  // deliberately shrinks to the shorter recording template.
+  // Instant swap to the shorter recording template (see morphSwitchHeight).
   const switchEl = panel?.closest(".composer-switch");
   morphSwitchHeight(switchEl, panel, composer);
   const timer = document.getElementById("voiceTimer");
@@ -1977,15 +2520,9 @@ function hideVoicePanel() {
     voiceTimerInt = null;
   }
   clearVoiceLoading();
-  // Morph back: recording template blooms up with blur
-  // while the original composer rises back with the text inside.
+  // Swap back: the writing template returns instantly with the text inside.
   const switchEl = panel?.closest(".composer-switch");
-  if (switchEl) {
-    switchEl.classList.add("cancelling");
-    setTimeout(() => switchEl.classList.remove("cancelling"), 320);
-  }
   if (panel) panel.classList.remove("transcribing");
-  // Container deliberately grows back to the tall writing template.
   morphSwitchHeight(switchEl, composer, panel);
 }
 
@@ -2395,9 +2932,17 @@ function renderModeMenu() {
   ].forEach((opt) => {
     const b = document.createElement("button");
     b.type = "button";
+    b.dataset.mode = opt.val;
     b.className = "mode-opt" + (agentMode === opt.val ? " active" : "");
     const radio = document.createElement("span");
     radio.className = "radio";
+    radio.setAttribute("aria-hidden", "true");
+    const icon = document.createElement("span");
+    icon.className = "mode-opt-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.innerHTML = opt.val === "restricted"
+      ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 19 6v5.25c0 4.25-2.95 7.35-7 9.25-4.05-1.9-7-5-7-9.25V6l7-2.5Z"/><path d="m8.75 12 2.05 2.05 4.45-4.6"/></svg>`
+      : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13.1 2.75-7.2 10h5.2l-1 8.5 7.2-10h-5.2l1-8.5Z"/></svg>`;
     const txt = document.createElement("span");
     const title = document.createElement("b");
     title.textContent = opt.title;
@@ -2406,8 +2951,9 @@ function renderModeMenu() {
     desc.textContent = opt.desc + (opt.val === "restricted" ? " (default)" : "");
     txt.appendChild(title);
     txt.appendChild(desc);
-    b.appendChild(radio);
+    b.appendChild(icon);
     b.appendChild(txt);
+    b.appendChild(radio);
     b.addEventListener("click", () => {
       menu.classList.remove("open");
       if (opt.val === "free" && agentMode !== "free") {
@@ -2497,13 +3043,64 @@ function showFullAccessWarning() {
   });
 }
 
-/* ---------- question / approval cards ---------- */
+/* ---------- question / approval cards ----------
+   Ask = fused strip above the composer: lettered choice rows on top, the
+   composer itself is the custom reply (essay = question only, no rows).
+   Selection never sends — SEND posts the answer straight into the paused
+   run, where it lands inside the question step's arrow (Q + A) and the loop
+   continues from there (no user bubble, no restart). While asking, + / mode
+   / mic hide (composer.asking), STOP flips to SEND, and Working freezes
+   until the answer is sent. */
+function pauseWorkingLoop() {
+  // The loop is paused on this question (server blocks for the answer), so
+  // the Working square freezes too — no motion while waiting. Never throws.
+  try {
+    const sq = activeThinking && activeThinking._block && activeThinking._block._dotSquare;
+    if (sq) stopSquareAnimation(sq);
+  } catch (_) {}
+}
+
+function resumeWorkingLoop() {
+  // The answer is on its way — Working moves again (unless settled). Never throws.
+  try {
+    const blk = activeThinking && activeThinking._block;
+    if (blk && blk.isConnected && blk.dataset.settled !== "1" && blk._dotSquare) {
+      startSquareAnimation(blk._dotSquare);
+    }
+  } catch (_) {}
+}
+
 function hideQuestionCard() {
   const card = document.getElementById("questionCard");
   pendingQuestion = null;
+  try {
+    document.getElementById("composer")?.classList.remove("asking");
+  } catch (_) {}
   if (!card) return;
+  // Exit runs as keyframes (ask-out), never a transition: swapping the
+  // animation property always moves, even with a retained enter fill.
+  // (Never set inline animation:none here — inline wins over the stylesheet
+  // and would cancel the exit itself.)
   card.classList.add("leaving");
-  setTimeout(() => card.remove(), 180);
+  setTimeout(() => {
+    try {
+      card.remove();
+    } catch (_) {}
+    // The strip is gone — give the freed space back, unless a newer strip
+    // already took its place (it owns the padding now).
+    try {
+      if (!document.getElementById("questionCard")) {
+        const sc = document.getElementById("chatScroll");
+        if (sc) sc.style.paddingBottom = "";
+      }
+    } catch (_) {}
+  }, 220);
+  resumeWorkingLoop();
+  // The run is still generating after the strip leaves — back to STOP.
+  try {
+    const stillRunning = !!document.getElementById("thinkingMsg") || !!activeThinking;
+    if (stillRunning && sendBtn && !sendBtn.classList.contains("stop")) setSending(true);
+  } catch (_) {}
 }
 
 function showQuestionCard(q) {
@@ -2527,29 +3124,67 @@ function showQuestionCard(q) {
       btn.addEventListener("click", () => decideApproval(q.id, btn.dataset.decide));
     });
   } else {
+    card.classList.add("ask");
     card.innerHTML = `
       <div class="question-kind">Agent question</div>
       <div class="question-text"></div>
-      <div class="question-options"></div>`;
+      <div class="question-chips"></div>`;
     card.querySelector(".question-text").textContent = q.text || "";
-    const box = card.querySelector(".question-options");
-    const allChoices = [...(Array.isArray(q.choices) ? q.choices : []), "__custom__"];
-    allChoices.forEach((c, idx) => {
-      const custom = c === "__custom__";
+    const box = card.querySelector(".question-chips");
+    const choices = Array.isArray(q.choices) ? q.choices.slice(0, 8) : [];
+    const LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"];
+    choices.forEach((c, idx) => {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = "q-option" + (custom ? " custom" : "");
-      b.style.animationDelay = `${idx * 70}ms`;
-      b.textContent = custom ? "Write your own reply" : String(c).slice(0, 200);
+      b.className = "q-chip";
+      b.style.animationDelay = `${80 + idx * 55}ms`;
+      const key = document.createElement("span");
+      key.className = "q-chip-key";
+      key.textContent = LETTERS[idx] || String(idx + 1);
+      key.setAttribute("aria-hidden", "true");
+      b.appendChild(key);
+      const label = document.createElement("span");
+      label.className = "q-chip-label";
+      label.textContent = String(c).slice(0, 120);
+      label.setAttribute("dir", "auto");
+      b.appendChild(label);
+      b.setAttribute("aria-pressed", "false");
       b.addEventListener("click", () => {
-        if (pendingQuestion) pendingQuestion.selected = custom ? "__custom__" : String(c);
-        box.querySelectorAll(".q-option").forEach((x) => x.classList.toggle("selected", x === b));
-        composerInput.focus();
+        if (pendingQuestion) pendingQuestion.selected = String(c);
+        box.querySelectorAll(".q-chip").forEach((x) => {
+          const on = x === b;
+          x.classList.toggle("selected", on);
+          x.setAttribute("aria-pressed", on ? "true" : "false");
+        });
+        try {
+          composerInput.focus();
+        } catch (_) {}
       });
       box.appendChild(b);
     });
+    try {
+      document.getElementById("composer")?.classList.add("asking");
+    } catch (_) {}
+    // The loop is paused on this question: STOP becomes SEND so the answer
+    // can actually be sent (choice or typed text via the normal SEND).
+    try {
+      setSending(false);
+      if (sendBtn) {
+        sendBtn.disabled = false;
+        sendBtn.classList.remove("is-waiting");
+      }
+    } catch (_) {}
+    pauseWorkingLoop();
   }
-  wrap.prepend(card);
+  const composerNode = document.getElementById("composer");
+  if (composerNode) wrap.insertBefore(card, composerNode.closest(".composer-switch") || composerNode);
+  else wrap.prepend(card);
+  // The strip overlays the scroll: free its height + margin below the last
+  // message so it never covers it while visible.
+  try {
+    const sc = document.getElementById("chatScroll");
+    if (sc) sc.style.paddingBottom = `${200 + (card.offsetHeight || 160) + 24}px`;
+  } catch (_) {}
   scrollToBottom();
 }
 
@@ -3518,6 +4153,33 @@ function showControlCard(url) {
   scrollToBottom();
 }
 
+async function isLiveUrlAlive(url, timeoutMs = 6000) {
+  // Bounded reachability probe for a persisted stream link: a no-cors fetch
+  // resolves (opaque) on any answer and rejects only when nothing listens
+  // (dead relay, browser closed while the library still reports running).
+  // Never throws. Same pattern as the live frame watcher.
+  try {
+    const u = String(url || "");
+    if (!u.startsWith("http")) return false;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => {
+      try {
+        ctl.abort();
+      } catch (_) {}
+    }, timeoutMs);
+    try {
+      await fetch(u, { mode: "no-cors", cache: "no-store", signal: ctl.signal });
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (_) {
+    return false;
+  }
+}
+
 async function restoreLive() {
   // After a refresh: bring back the stream card / preview bar so the running
   // task keeps all its visible data. Returns true while something is live.
@@ -3535,16 +4197,18 @@ async function restoreLive() {
     }
     if (st.mode === "control" && st.url) {
       // Browser runs with no paused loop: show the right-edge tab (interactive),
-      // never a blocking card the user did not ask for.
+      // never a blocking card the user did not ask for. The persisted link is
+      // probed first: the library can still report a session whose stream is
+      // already dead, and refresh must never resurrect a dead tab.
+      if (!(await isLiveUrlAlive(st.url))) return false;
       browserStreamUrl = String(st.url);
       showEdgeTab(st.url, data.pending ? st.qid : null);
       return true;
     }
     if (st.mode === "preview") {
-      // Optimistic restore: a persisted stream means a live session is
-      // expected, so the tab returns even mid-flap. The viewer heal reroutes
-      // a refused host on the next ticks, and opening the player always
-      // re-reads the freshest persisted URL first.
+      // Same dead-link guard as above: no probe, no tab. Opening the player
+      // always re-reads the freshest persisted URL first.
+      if (!st.url || !(await isLiveUrlAlive(st.url))) return false;
       showEdgeTab(st.url, data.pending ? st.qid : null);
       return true;
     }
@@ -3579,6 +4243,35 @@ async function autoMintMissingPreview() {
     }
   } catch (_) {}
 }
+
+async function autoCheckBrowserOnAgentOpen() {
+  // Auto-check every time the agent page opens: browser running -> fetch the
+  // live link and show the right-edge template automatically (no click needed).
+  // Skips when any live UI already owns the screen, a handoff is pending, or
+  // the user explicitly closed the browser. Dead links are probed first so a
+  // stale session never pops a broken player; a running browser with no link
+  // yet falls back to the bounded background mint (at most once per 60s).
+  try {
+    if (manualControlOpen || pendingLiveQid) return;
+    if (document.getElementById("liveMini") || document.getElementById("browserTab")) return;
+    if (document.getElementById("liveControlManual") || document.getElementById("liveCard")) return;
+    if (userClosedBrowser()) return;
+    const res = await fetch("/api/browser", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json().catch(() => null);
+    if (!data || !data.running) return;
+    const url = data.stream && typeof data.stream.url === "string" ? data.stream.url : "";
+    if (url) {
+      if (!(await isLiveUrlAlive(url))) return;
+      clearBrowserClosedFlag();
+      markLiveSeen();
+      showEdgeTab(url);
+    } else {
+      autoMintMissingPreview();
+    }
+  } catch (_) {}
+}
+
 
 function onBrowserPush(data) {
   // Push version of the old poller: reflects reality only — never starts
@@ -3640,10 +4333,20 @@ function onLivePush(data) {
   } catch (_) {}
 }
 
-function onChatDonePush() {
+function onChatDonePush(data) {
   // A loop finished somewhere (this tab or another): if idle, the reply is
   // persisted now — reload once. Replaces the old catchup poller.
   try {
+    if (data && data.gateway) {
+      activeThinking = null;
+      catchupResume = false;
+      try {
+        document.getElementById("thinkingMsg")?.remove();
+        chatInner?.querySelectorAll(".msg.gateway-pending").forEach((item) => item.remove());
+      } catch (_) {}
+      loadHistory().catch(() => {});
+      return;
+    }
     if (!isChatIdle()) return;
     if (catchupResume) {
       // A resumed pre-refresh run just landed: drop the mid-less resume
@@ -3664,6 +4367,22 @@ function onChatDonePush() {
 function onChatPush(data) {
   // A resumed run died (e.g. server restarted): stop spinning, no polling.
   try {
+    if (data && data.gateway && data.active) {
+      if (!document.getElementById("thinkingMsg")) {
+        const preview = String(data.input || "").slice(0, MAX_MESSAGE);
+        hideWelcome();
+        if (preview) {
+          const pending = appendUserMessage(preview, []);
+          pending.classList.add("gateway-pending");
+        }
+        activeThinking = addThinking(preview);
+        // Follow this channel-driven run live: same Working block + steps
+        // as a local run, settled by the gateway chat_done frame.
+        catchupLiveItems = new Map();
+        catchupResume = true;
+      }
+      return;
+    }
     if (data && !data.active && activeThinking && !activeRun) {
       activeThinking = null;
       setSending(false);
@@ -3690,7 +4409,7 @@ function renderRunFrame(frame) {
     const type = frame.type;
     if (type === "event_start") {
       if (!block) return;
-      const key = `${frame.key}::${frame.event}`;
+      const key = stepKey({ key: frame.key, event: frame.event });
       if (catchupLiveItems.has(key)) return;
       const item = createStepItem({ event: frame.event, reason: frame.reason || "", output: null, media: null, shot: "" });
       markStepRunning(item);
@@ -3702,7 +4421,7 @@ function renderRunFrame(frame) {
     }
     if (type === "event") {
       if (!block) return;
-      const key = `${frame.key}::${frame.event}`;
+      const key = stepKey({ key: frame.key, event: frame.event });
       let item = catchupLiveItems.get(key);
       if (!item) {
         item = createStepItem({ event: frame.event, reason: frame.reason || "", output: null, media: frame.media || null, shot: "" });
@@ -3710,6 +4429,13 @@ function renderRunFrame(frame) {
         ensureHeaderArrow(block);
         catchupLiveItems.set(key, item);
       } else {
+        try {
+          const titleEl = item._head && item._head.querySelector(":scope > .step-title");
+          const finalTitle = humanizeEvent(frame.event || "");
+          if (titleEl && finalTitle && titleEl.textContent !== finalTitle) {
+            titleEl.textContent = finalTitle;
+          }
+        } catch (_) {}
         completeStepItem(item, {
           output: typeof frame.output === "string" ? frame.output : "",
           shot: typeof frame.shot === "string" ? frame.shot : "",
@@ -3811,42 +4537,34 @@ async function resumeActiveRun() {
 }
 
 async function sendQuestionAnswer() {
-  // Choice (or own reply) + SEND: card disappears, message sends normally.
+  // The answer resumes the paused run — it is never posted as a user
+  // message. It lands inside the question step's arrow (Q + A, from the
+  // loop's own completion event) and the loop continues from there.
+  // Nothing auto-sends: chip choice or typed text, both go through SEND.
   const q = pendingQuestion;
   if (!q) return;
   const typed = composerInput.value.trim().slice(0, 2000);
-  if (q.selected === "__custom__" && !typed) {
-    toast("Type your reply");
-    return;
-  }
-  const answer = typed || (q.selected && q.selected !== "__custom__" ? q.selected : "");
+  const chosen = typeof q.selected === "string" && q.selected.trim() ? q.selected.trim().slice(0, 2000) : "";
+  const answer = typed || chosen;
   if (!answer) {
     toast("Select a choice or type a reply");
     return;
   }
   hideQuestionCard();
-  appendUserMessage(answer, []);
-  if (answer) lastUserText = answer;
   composerInput.value = "";
   autoResize();
   sendBtn.disabled = true;
   composerInput.disabled = true;
-  activeThinking = addThinking(answer);
   try {
     const res = await fetch("/api/chat_answer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: q.id, answer }),
     });
-    if (!res.ok) {
-      activeThinking?.remove();
-      activeThinking = null;
-      toast("Answer failed");
-    }
-    // Loop continues on the open stream; its events/done arrive next.
+    if (!res.ok) toast("Answer failed");
+    // The loop resumes on the still-open stream; its completion event
+    // carries the Q + A into the step arrow, then work continues.
   } catch (_) {
-    activeThinking?.remove();
-    activeThinking = null;
     toast("Answer failed");
   } finally {
     sendBtn.disabled = false;
@@ -4287,6 +5005,16 @@ export async function initChat() {
   onPush("chat", onChatPush);
   onPush("chat_done", onChatDonePush);
   onPush("run", onRunPush);
+  // Returning to the agent page re-checks the browser automatically, so a
+  // session started while another page was open still shows its template.
+  window.addEventListener("x5:agent-open", () => {
+    autoCheckBrowserOnAgentOpen().catch(() => {});
+  });
+  // Returning to the agent page re-checks the browser automatically, so a
+  // session started while another page was open still shows its template.
+  window.addEventListener("x5:agent-open", () => {
+    autoCheckBrowserOnAgentOpen().catch(() => {});
+  });
   // A refresh mid-generation resumes the running state instead of losing it.
   resumeActiveRun().catch(() => {});
   // Manual copy is off on agent messages (the copy button still works,
@@ -4297,6 +5025,28 @@ export async function initChat() {
       if (e.target && e.target.closest && e.target.closest(".live-card")) return;
     } catch (_) {}
     e.preventDefault();
+  });
+  // Code-card copy buttons (all replies, live + history): one delegated
+  // listener — cards are rendered dynamically by formatRich.
+  chatScroll.addEventListener("click", (e) => {
+    try {
+      const btn = e.target && e.target.closest ? e.target.closest(".code-copy") : null;
+      if (!btn || !chatScroll.contains(btn)) return;
+      e.stopPropagation();
+      e.preventDefault();
+      copyCodeBlock(btn);
+    } catch (_) {}
+  });
+  // Code-card copy buttons (all replies, live + history): one delegated
+  // listener — cards are rendered dynamically by formatRich.
+  chatScroll.addEventListener("click", (e) => {
+    try {
+      const btn = e.target && e.target.closest ? e.target.closest(".code-copy") : null;
+      if (!btn || !chatScroll.contains(btn)) return;
+      e.stopPropagation();
+      e.preventDefault();
+      copyCodeBlock(btn);
+    } catch (_) {}
   });
 
   setSending(false);

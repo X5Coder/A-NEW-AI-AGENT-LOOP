@@ -412,3 +412,11 @@ body.sidebar-collapsed .nav-divider {
   display: flex;
   flex-direction: column;
 }
+.page[data-page="schedrun"] {
+  height: 100%;
+  max-width: none;
+}
+.page[data-page="schedrun"].active {
+  display: flex;
+  flex-direction: column;
+}

@@ -1,6 +1,6 @@
 """
 Trigger Engine - single engine for all triggers, continuous via Watchdog for filesystem.
-Each trigger is one-time, runs once and dies, can be created unlimited concurrently.
+Each trigger is one-time, runs once and dies, at most MAX_ACTIVE_TRIGGERS concurrently.
 When event fires, loads its skill from trigger_skills and executes isolated with full context (tools + memory + system prompt), then deletes skill and trigger.
 """
 from __future__ import annotations
@@ -28,6 +28,8 @@ def _storage_path() -> Path:
 STORAGE = _storage_path()
 _LEGACY = Path(__file__).resolve().parents[2] / "storage" / "database" / "triggers.json"
 TRIGGER_SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills" / "trigger_skills"
+
+MAX_ACTIVE_TRIGGERS = 50  # Rule 74: bound concurrent watchers, never unbounded.
 
 _LOCK = threading.Lock()
 _WATCHERS: dict[str, Any] = {}  # trigger_id -> watcher
@@ -239,6 +241,10 @@ def start_all_triggers():
 
 def check_and_start_new_trigger(trigger: dict):
     """Called after trigger creation to start its watcher."""
+    with _LOCK:
+        if len(_WATCHERS) >= MAX_ACTIVE_TRIGGERS:
+            print(f"[trigger engine] At cap ({MAX_ACTIVE_TRIGGERS}), new trigger not watched.")
+            return
     tname = trigger.get("trigger_name")
     if tname in ("filesystem_new_file", "filesystem_file_modified"):
         _start_filesystem_watch(trigger)

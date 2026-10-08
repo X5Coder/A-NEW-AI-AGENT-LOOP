@@ -1,0 +1,21 @@
+{
+  "name": "text_to_speech",
+  "description": "A text-to-speech tool that converts written text into a spoken wav voice recording using the local Supertonic-3 model with the project's single fixed custom voice (a deep, calm, JARVIS-like male voice that sounds the same in Arabic + English, no cloud). Use whenever the user asks to hear text read aloud or wants a voice message. Saves the wav under X5Agent/Data/files/audio and returns its path plus duration so it plays as a WhatsApp-style voice record inside the chat. Keep text short (one message, max 1000 chars).",
+  "inputs": {
+    "text": {
+      "type": "string",
+      "required": true,
+      "description": "Text to speak aloud (max 1000 chars)."
+    },
+    "voice": {
+      "type": "string",
+      "required": false,
+      "description": "Fixed project voice (nova). The voice is always the same; any other value is ignored."
+    },
+    "lang": {
+      "type": "string",
+      "required": false,
+      "description": "Language code: ar (default), en, etc."
+    }
+  }
+}

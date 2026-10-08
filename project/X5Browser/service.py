@@ -288,6 +288,39 @@ def _launcher_alive(browser: Any) -> bool:
         return False
 
 
+def _revert_spawned(browser: Any) -> bool:
+    """Kill a local Chrome born from a no-boot call. Never raises, never boots.
+
+    Adopt/attach must only REUSE a live endpoint. When the endpoint dies under
+    us, ChromeLauncher.start() spawns a local Chrome instead — that is the
+    automatic restart behind an explicit close_browser. Returns True when such
+    a spawn was found and quietly killed (the caller must then report stopped
+    instead of handing out the revived session). Runs only for freshly adopted
+    objects on no-boot paths, so an explicitly opened local browser is never
+    touched here.
+    """
+    try:
+        launcher = getattr(browser, "_launcher", None)
+        if launcher is None:
+            return False
+        try:
+            spawned = bool(launcher.owns_process())
+        except Exception:
+            return False
+        if not spawned:
+            return False
+    except Exception:
+        return False
+    try:
+        launcher.stop()
+    except Exception:
+        try:
+            launcher.close_profile()
+        except Exception:
+            pass
+    return True
+
+
 def _alive_no_boot() -> bool:
     """True while a session is usable without booting. Pure probe: no loop,
     no WSL, no stack.
@@ -369,6 +402,13 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
                 _browser = None
                 _started = False
                 raise RuntimeError(STOPPED_MESSAGE)
+            if _revert_spawned(adopted_browser):
+                # The endpoint died under us and adopt spawned a local Chrome
+                # instead of attaching: an automatic boot behind an explicit
+                # close. Reverted above — report stopped, keep it stopped.
+                _browser = None
+                _started = False
+                raise RuntimeError(STOPPED_MESSAGE)
             _browser = adopted_browser
             _started = True
             return adopted_browser
@@ -381,7 +421,9 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
                 "X5Browser library is not installed. Run: pip install X5Browser"
             ) from e
         # Live stack first: hidden WSL browser + working stream links (no local window).
-        # Falls back to a local browser only when the stack is unavailable.
+        # Falls back to a HEADLESS local browser only when the stack is
+        # unavailable (no WSL on Windows): no visible window ever, profile
+        # stays inside the library (never the real Chrome User Data).
         stack = None
         try:
             stack = LiveStack()
@@ -398,6 +440,20 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
             replace_kwargs: dict = {"workspace_dir": str(_workspace_dir())}
             if stack is not None:
                 replace_kwargs["debug_port"] = int(stack.cdp_port)
+            else:
+                # No live stack -> hidden fallback: never pop a visible Chrome
+                # window in front of the user.
+                replace_kwargs["headless"] = True
+            # Safety: never launch with the real user profile even if a
+            # caller built such a config upstream; the library profile is
+            # the only allowed home.
+            try:
+                prof_low = str(getattr(config, "profile_dir", "")).lower()
+                if ("google\\chrome" in prof_low and "user data" in prof_low) or prof_low.endswith("user data"):
+                    from x5browser import BrowserConfig as _BC2  # type: ignore
+                    replace_kwargs["profile_dir"] = str(_BC2.default().profile_dir)
+            except Exception:
+                pass
             config = _dc.replace(config, **replace_kwargs)
         except Exception:
             pass
@@ -515,9 +571,11 @@ async def _close_async() -> Any:
 
 
 async def _call_async(name: str, kwargs: dict) -> Any:
+    global _browser, _started
     from .catalog import is_dangerous  # noqa: F401 (kept for future gating)
     if name == "close_browser":
         return await _close_async()
+    fresh_adopt = False
     if name in EXPLICIT_STARTERS:
         browser = await _get_browser_async(allow_boot=True)
     else:
@@ -525,7 +583,12 @@ async def _call_async(name: str, kwargs: dict) -> Any:
         # never boots from a page/read/live tool, on any OS.
         if not _alive_no_boot():
             raise RuntimeError(STOPPED_MESSAGE)
+        prev = _browser
         browser = await _get_browser_async(allow_boot=False)
+        # Only a freshly adopted object can hide a spawn: a reused session was
+        # already alive (explicitly opened) before this call, so it is never
+        # checked here.
+        fresh_adopt = browser is not prev
     method = getattr(browser, name, None)
     if method is None or not callable(method):
         raise ValueError(f"Unknown browser tool: {name}")
@@ -533,7 +596,7 @@ async def _call_async(name: str, kwargs: dict) -> Any:
     last: Exception | None = None
     for attempt in range(attempts):
         try:
-            return await method(**kwargs)
+            out = await method(**kwargs)
         except (ValueError, TypeError):
             raise
         except Exception as e:
@@ -541,6 +604,15 @@ async def _call_async(name: str, kwargs: dict) -> Any:
             if attempt + 1 >= attempts or not _transient(e):
                 raise
             await asyncio.sleep(min(1.0 * (attempt + 1), 3.0))
+            continue
+        if fresh_adopt and _revert_spawned(browser):
+            # The library auto-started a local Chrome mid-call (endpoint died
+            # and _ensure_browser/launcher spawned behind us): revert to
+            # stopped instead of returning a revived session.
+            _browser = None
+            _started = False
+            raise RuntimeError(STOPPED_MESSAGE)
+        return out
     if last is not None:
         raise last
     raise RuntimeError(f"Browser tool {name} failed without details")

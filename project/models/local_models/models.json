@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "description": "Local models index - UI registry + model-to-plugin links. Heavy weights live in project/models/<type>/<name>. Drop a new model folder under project/models/local_models/ and it is auto-discovered on the next scan.",
+  "models": [
+    {
+      "id": "embedding",
+      "name": "Embedding",
+      "description": "Tool search via embeddings (plugins/tool-discovery/search)",
+      "type": "embedding",
+      "local_dir": "models/embedding/Qwen3-Embedding-0.6B",
+      "used_by": "tool_search · skills_search",
+      "plugins": []
+    },
+    {
+      "id": "stt",
+      "name": "Speech-to-Text",
+      "description": "Speech-to-text Arabic+English code-switched (CT2 format)",
+      "type": "stt",
+      "local_dir": "models/stt/whisper-medium-arabic-codeswitched-ct2",
+      "used_by": "video_transcribe · voice input",
+      "plugins": [
+        "video_transcribe"
+      ]
+    },
+    {
+      "id": "vision",
+      "name": "Vision",
+      "description": "Vision analysis - image understanding",
+      "type": "vision",
+      "local_dir": "models/vision/SmolVLM2-500M",
+      "used_by": "vision_analyze · video_analyze",
+      "plugins": [
+        "vision_analyze",
+        "video_analyze"
+      ]
+    },
+    {
+      "id": "tts",
+      "name": "Text-to-Speech",
+      "description": "Text-to-speech multilingual (31 languages) ONNX",
+      "type": "tts",
+      "local_dir": "models/tts/supertonic-3",
+      "used_by": "voice output",
+      "plugins": []
+    }
+  ]
+}

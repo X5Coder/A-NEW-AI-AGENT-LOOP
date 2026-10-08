@@ -1,0 +1,31 @@
+{
+  "name": "http_request",
+  "description": "A generic HTTP client that performs a GET, POST, PUT, PATCH or DELETE request to any http(s) URL and returns the status plus response text. Use to fetch page/API content, call REST endpoints, or talk to an MCP server URL (initialize, tools/list, tools/call via JSON-RPC body). Send whatever the target needs: any headers and any text or JSON body on any method.",
+  "inputs": {
+    "method": {
+      "type": "string",
+      "required": false,
+      "description": "HTTP method: GET (default), POST, PUT, PATCH or DELETE."
+    },
+    "url": {
+      "type": "string",
+      "required": true,
+      "description": "Target URL, http:// or https:// only (any public or local MCP/server URL)."
+    },
+    "headers": {
+      "type": "object",
+      "required": false,
+      "description": "Optional HTTP headers as string pairs (e.g. Authorization, Content-Type, MCP-Session-Id)."
+    },
+    "body": {
+      "type": "string",
+      "required": false,
+      "description": "Optional request body on any method: raw text or JSON string (MCP JSON-RPC payload, REST data, form, XML). Empty means no body."
+    },
+    "timeout": {
+      "type": "number",
+      "required": false,
+      "description": "Timeout in seconds, 1..30 (default 15)."
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "x5-whatsapp-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Loopback Baileys bridge for X5Agent WhatsApp linking (QR + pairing code). Not a public package.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.0"
+  }
+}

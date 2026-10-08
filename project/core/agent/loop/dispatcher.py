@@ -36,9 +36,14 @@ _DISCOVERABLE_MAP = {
     "vision_analyze": "plugins.core_plugins.vision_analyze.tool",
     "video_analyze": "plugins.core_plugins.video_analyze.tool",
     "video_transcribe": "plugins.core_plugins.video_transcribe.tool",
+    "video_download": "plugins.core_plugins.video_download.tool",
+    "audio_extract": "plugins.core_plugins.audio_extract.tool",
+    "embedding_memory": "plugins.core_plugins.embedding_memory.tool",
+    "text_to_speech": "plugins.core_plugins.text_to_speech.tool",
     "skill_create": "plugins.core_plugins.skill_create.tool",
     "image_memory": "plugins.core_plugins.image_memory.tool",
     "important_memory": "plugins.core_plugins.important_memory.tool",
+    "http_request": "plugins.core_plugins.http_request.tool",
 }
 
 _ALL = {**_CORE_MAP, **_DISCOVERABLE_MAP}

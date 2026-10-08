@@ -58,7 +58,7 @@ async function postJson(url, body) {
 
 function cardHtml({ tag, title, desc, badge, badgeClass, version, icon }) {
   const el = document.createElement("button");
-  el.className = "mini-card glass-panel";
+  el.className = "mini-card";
   el.type = "button";
   el.setAttribute("data-anim", "");
   el.innerHTML = `

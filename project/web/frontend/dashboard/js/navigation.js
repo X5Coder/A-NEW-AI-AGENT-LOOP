@@ -16,21 +16,21 @@ const PAGES = ["dashboard", "agent", "workspace", "gateway", "plugins", "skills"
 function routeFromPath() {
   try {
     const seg = (location.pathname || "/").replace(/\/+$/, "").split("/").pop() || "";
-    if (seg === "" || seg === "index.html") return "dashboard";
+    if (seg === "" || seg === "index.html") return "agent";
     if (PAGES.includes(seg)) return seg;
   } catch (_) {}
-  return "dashboard";
+  return "agent";
 }
 
 function urlFor(name) {
-  return name === "dashboard" ? "/" : "/" + name;
+  return name === "agent" ? "/" : "/" + name;
 }
 
 const TITLES = {
   dashboard: { title: "Dashboard", sub: "Overview of your agent activity" },
   agent: { title: "Agent", sub: "Chat with your AI assistant" },
   workspace: { title: "Workspace", sub: "Your agent's files and folders" },
-  gateway: { title: "Gateway", sub: "Connect messaging channels" },
+  gateway: { title: "WhatsApp gateway", sub: "Connect and manage your WhatsApp agent" },
   plugins: { title: "Plugins", sub: "Extend your agent capabilities" },
   skills: { title: "Skills", sub: "Reusable instructions for your agent" },
   models: { title: "Models", sub: "Manage model providers" },
@@ -155,10 +155,13 @@ export function initNavigation() {
   document.getElementById("collapseBtn")?.addEventListener("click", () => {
     setCollapsed(!isCollapsed());
   });
-  // Restore collapsed sidebar (desktop only; drawer mode ignores it via CSS).
+  // Collapsed rail is the default (desktop only; drawer mode ignores it via CSS).
+  // Only an explicit "expanded" choice opens the full sidebar.
   try {
-    if (localStorage.getItem(COLLAPSE_KEY) === "collapsed") setCollapsed(true);
-  } catch (_) {}
+    if (localStorage.getItem(COLLAPSE_KEY) !== "expanded") setCollapsed(true);
+  } catch (_) {
+    setCollapsed(true);
+  }
   scrim?.addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeDrawer();

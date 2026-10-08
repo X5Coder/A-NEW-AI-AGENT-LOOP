@@ -22,12 +22,24 @@ TIMEOUT_SECONDS = 60
 
 def _get_api_key(explicit: str | None = None) -> str:
     if explicit and isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
-    for env_key in ["OPENROUTER_API_KEY", "OPENROUTER_KEY", "OR_API_KEY"]:
-        v = os.environ.get(env_key)
-        if v and v.strip():
-            return v.strip()
-    raise ValueError("OpenRouter API key missing. Set OPENROUTER_API_KEY env or pass api_key argument.")
+        key = explicit.strip()
+    else:
+        key = ""
+        for env_key in ["OPENROUTER_API_KEY", "OPENROUTER_KEY", "OR_API_KEY"]:
+            v = os.environ.get(env_key)
+            if v and v.strip():
+                key = v.strip()
+                break
+        if not key:
+            raise ValueError("OpenRouter API key missing. Set OPENROUTER_API_KEY env or pass api_key argument.")
+    # HTTP headers are latin-1 only: a corrupted/non-ASCII key fails at send
+    # time with "'latin-1' codec can't encode". Fail here with a clear message
+    # instead (never log the key itself).
+    try:
+        key.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("OpenRouter API key is corrupted (non-ASCII chars). Re-save the key in Models.") from None
+    return key
 
 
 def _validate_messages(messages: Any) -> list[dict]:

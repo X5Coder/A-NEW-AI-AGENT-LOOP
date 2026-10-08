@@ -93,6 +93,19 @@ def _validate_command(v) -> str:
         if ws_str not in low:
             raise ValueError("Blocked: absolute path outside Workspace. Workspace only.")
             break
+    # Block UNC network paths (\\server\share) - never inside Workspace.
+    if re.search(r"(^|[\s;&|\"'])\\\\[A-Za-z0-9]", s):
+        raise ValueError("Blocked: network path outside Workspace. Workspace only.")
+    # Block unix-style absolutes outside Workspace (/etc, /home, ...).
+    # The Workspace itself never lives under these roots, so any match is an escape.
+    if re.search(r"(^|[\s;&|\"'/])-?/(etc|bin|usr|home|root|tmp|var|opt|windows|users|programdata)\b", low):
+        raise ValueError("Blocked: absolute path outside Workspace. Workspace only.")
+    # Block home-dir (~) and env/shell expansion ($VAR, ${VAR}, %VAR%, backticks, $(...)).
+    # shell=True would expand these outside the jail, so they are forbidden.
+    if re.search(r"(^|[\s;&|\"'=])~([\\/]|$|\s)", s):
+        raise ValueError("Blocked: home-dir expansion outside Workspace. Workspace only.")
+    if ("$" in s or "`" in s or re.search(r"%[A-Za-z_]+%", s)):
+        raise ValueError("Blocked: env/shell expansion not allowed. Use plain Workspace-relative paths.")
     # Block obvious escape cd commands without Workspace context.
     escape_cmds = ["cd /", "cd \\", "cd..", "cd ..", "chdir ..", "pushd ..", "popd"]
     for ec in escape_cmds:

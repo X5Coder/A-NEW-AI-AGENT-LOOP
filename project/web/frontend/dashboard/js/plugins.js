@@ -109,13 +109,13 @@ function renderPlugins(plugins) {
 
   grid.innerHTML = "";
   if (!plugins.length) {
-    grid.innerHTML = `<div class="grid-empty">No plugins to configure — core tools are always on.</div>`;
+    grid.innerHTML = `<div class="grid-empty">No plugins Available</div>`;
     return;
   }
   plugins.forEach((p) => {
     const badge = badgeFor(p);
     const card = document.createElement("button");
-    card.className = "mini-card glass-panel";
+    card.className = "mini-card";
     card.type = "button";
     card.setAttribute("data-anim", "");
     card.innerHTML = `

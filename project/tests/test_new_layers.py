@@ -2,7 +2,7 @@ import sys, os, json, time, wave, struct, math
 from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
-os.environ["OPENROUTER_API_KEY"] = "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"
+os.environ.setdefault("OPENROUTER_API_KEY", "test-dummy-key")
 
 # Unified test paths: fixtures live in X5Agent/Data (same single source of truth as runtime)
 _REPO = Path(__file__).resolve().parents[2]
@@ -64,6 +64,11 @@ with wave.open(str(dummy),"w") as wf:
 print(" transcribing dummy...")
 raw = transcribe_audio(str(dummy))
 print(f" raw: '{raw[:50]}'")
+if os.environ.get("OPENROUTER_API_KEY", "test-dummy-key") in ("", "test-dummy-key", "dummy"):
+    print(" ⏭️ skipped STT-correction/triage/pipeline live checks (no real OPENROUTER_API_KEY)")
+    dummy.unlink(missing_ok=True)
+    print("\n=== SKIPPED LIVE-API PARTS (dummy key) ===")
+    sys.exit(0)
 clean = correct_text("اممم اهلااا كيف حالكك اليوم امم", api_key=os.environ["OPENROUTER_API_KEY"])
 print(f" corrected: '{clean[:100]}'")
 assert "اهلا" in clean or "كيف حالك" in clean

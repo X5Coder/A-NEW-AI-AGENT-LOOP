@@ -6,7 +6,7 @@
  */
 "use strict";
 
-import { attachChartTooltip, animateIn, pinChartTip } from "./ui.js?v=8";
+import { attachChartTooltip, animateIn, pinChartTip } from "./ui.js?v=9";
 import { onPush } from "./events.js?v=1";
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -65,46 +65,120 @@ function formatCompact(n) {
   return String(Math.round(n));
 }
 
+function escHtml(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function smoothLine(pts) {
+  if (pts.length < 2) return pts.length ? `M ${pts[0][0]} ${pts[0][1]}` : "";
+  let d = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += ` C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+
+let flowUid = 0;
+
 function renderChart(el, labels, values, unit, animate) {
   if (!el) return;
-  const max = Math.max(...values, 1);
-  const total = values.reduce((a, b) => a + b, 0);
+  const n = Math.max(labels.length, values.length);
+  const vals = Array.from({ length: n }, (_, i) => Number(values[i]) || 0);
+  const labs = Array.from({ length: n }, (_, i) => String(labels[i] ?? "—"));
+  const total = vals.reduce((a, b) => a + b, 0);
   const hasData = total > 0;
-  const peakIdx = hasData ? values.indexOf(max) : -1;
+  const uid = `f${++flowUid}`;
+
+  if (!hasData) {
+    el.innerHTML = `
+      <div class="flow">
+        <svg class="flow-svg" viewBox="0 0 600 190" preserveAspectRatio="none" aria-hidden="true">
+          <line x1="0" y1="47" x2="600" y2="47" class="flow-grid" />
+          <line x1="0" y1="95" x2="600" y2="95" class="flow-grid" />
+          <line x1="0" y1="142" x2="600" y2="142" class="flow-grid" />
+          <line x1="0" y1="178" x2="600" y2="178" class="flow-grid" stroke-dasharray="3 6" />
+        </svg>
+        <div class="chart-empty">No activity in this range — send a message to the agent.</div>
+      </div>`;
+    if (animate) animateIn(el);
+    return;
+  }
+
+  const W = 600;
+  const H = 190;
+  const padL = 10;
+  const padR = 10;
+  const padT = 14;
+  const padB = 12;
+  const max = Math.max(...vals, 1);
+  const step = n > 1 ? (W - padL - padR) / (n - 1) : 0;
+  const pts = vals.map((v, i) => {
+    const x = n > 1 ? padL + i * step : W / 2;
+    const y = padT + (1 - Math.max(0, v) / max) * (H - padT - padB);
+    return [x, y];
+  });
+  const line = smoothLine(pts);
+  const area = `${line} L ${pts[pts.length - 1][0].toFixed(1)} ${H - padB} L ${pts[0][0].toFixed(1)} ${H - padB} Z`;
+  const peakIdx = vals.indexOf(max);
+  const lastIdx = n - 1;
+
+  // Thin X labels so phones never crowd: keep ≤6 readable ticks, spacing preserved.
+  const maxTicks = n > 12 ? 5 : 7;
+  const keep = new Set();
+  if (n <= maxTicks) {
+    for (let i = 0; i < n; i++) keep.add(i);
+  } else {
+    for (let k = 0; k < maxTicks; k++) keep.add(Math.round((k * (n - 1)) / (maxTicks - 1)));
+  }
 
   el.innerHTML = `
-    <div class="chart-track">
-      ${values
-        .map(
-          (v, i) => `
-        <div class="bar" data-label="${labels[i]}" data-value="${hasData ? `${formatCompact(v)}${unit}` : "no activity"}">
-          <div class="bar-fill${i === peakIdx ? " peak" : ""}"${animate ? ` data-anim="bar" data-delay="${i * 60}"` : ""} style="--h:${hasData ? Math.max(4, Math.round((v / max) * 100)) : 2}%"></div>
-        </div>`
-        )
-        .join("")}
-    </div>
-    <div class="chart-x">
-      ${labels.map((l) => `<span>${l}</span>`).join("")}
-    </div>
-    ${hasData ? "" : `<div class="chart-empty">No activity in this range — send a message to the agent.</div>`}`;
+    <div class="flow">
+      <svg class="flow-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Usage flow chart">
+        <defs>
+          <linearGradient id="x5FlowFill-${uid}" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="var(--chart-fill-top)" stop-opacity="1" />
+            <stop offset="1" stop-color="var(--chart-fill-bot)" stop-opacity="1" />
+          </linearGradient>
+          <linearGradient id="x5FlowStroke-${uid}" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="var(--chart-line)" />
+            <stop offset="1" stop-color="var(--chart-line-hi)" />
+          </linearGradient>
+        </defs>
+        ${[0.25, 0.5, 0.75].map((f) => `<line x1="0" y1="${(padT + f * (H - padT - padB)).toFixed(1)}" x2="${W}" y2="${(padT + f * (H - padT - padB)).toFixed(1)}" class="flow-grid" />`).join("")}
+        <path class="flow-area" d="${area}" fill="url(#x5FlowFill-${uid})" />
+        <path class="flow-line" d="${line}" stroke="url(#x5FlowStroke-${uid})" />
+        ${[peakIdx, lastIdx].filter((v, i, a) => a.indexOf(v) === i).map((i) => `<circle class="flow-dot${i === peakIdx ? " peak" : ""}" cx="${pts[i][0].toFixed(1)}" cy="${pts[i][1].toFixed(1)}" r="${i === peakIdx ? 5 : 4}" />`).join("")}
+        ${pts.map((p, i) => `<rect class="flow-hit" x="${Math.max(0, p[0] - step / 2).toFixed(1)}" y="0" width="${(n > 1 ? step : W).toFixed(1)}" height="${H}" data-label="${escHtml(labs[i])}" data-value="${escHtml(`${formatCompact(vals[i])}${unit}`)}" tabindex="0" role="img" aria-label="${escHtml(`${labs[i]}: ${formatCompact(vals[i])}${unit}`)}" />`).join("")}
+      </svg>
+      <div class="flow-x">${labs.map((l, i) => `<span>${keep.has(i) ? escHtml(l) : ""}</span>`).join("")}</div>
+    </div>`;
+
+  // Fix gradient refs to the per-chart uid (keeps multi-chart pages collision-free).
+  try {
+    el.querySelector(".flow-area")?.setAttribute("fill", `url(#x5FlowFill-${uid})`);
+    el.querySelector(".flow-line")?.setAttribute("stroke", `url(#x5FlowStroke-${uid})`);
+  } catch (_) {}
 
   if (animate) animateIn(el);
   attachChartTooltip(el);
-  // Touch screens have no hover: tapping a bar pins the day info instead.
+  // Touch screens have no hover: tapping a point pins the day info instead.
   try {
     if (window.matchMedia("(hover: none)").matches) {
-      el.querySelectorAll(".bar").forEach((bar) => {
-        bar.addEventListener("click", () => pinChartTip(bar));
+      el.querySelectorAll(".flow-hit").forEach((hit) => {
+        hit.addEventListener("click", () => pinChartTip(hit));
       });
     }
   } catch (_) {
     // matchMedia unavailable — hover tooltips still work
   }
-}
-
-function formatMoney(n) {
-  const v = typeof n === "number" && isFinite(n) ? n : 0;
-  return `$${v.toFixed(2)}`;
 }
 
 function setBadge(id, text) {
@@ -120,13 +194,12 @@ function setRangeLabel(id, range) {
 export async function initCharts() {
   const tokensEl = document.getElementById("chartTokens");
   const reqEl = document.getElementById("chartRequests");
-  const costEl = document.getElementById("chartCost");
   if (!tokensEl || !reqEl) return;
 
   // Silent background refresh: skip DOM updates when data is unchanged
   // (no flicker, open tooltips stay), animate only on first paint,
   // and keep the last good chart if a tick fails instead of wiping it.
-  const seen = { tokens: null, req: null, cost: null };
+  const seen = { tokens: null, req: null };
   let firstPaint = true;
   let range = "7d";
   let cached = null;
@@ -137,11 +210,10 @@ export async function initCharts() {
 
   function paint(animate) {
     if (!cached) return;
-    const { labels, counts, costs, tokens } = sliceRange(cached, range);
+    const { labels, counts, tokens } = sliceRange(cached, range);
 
     const sTok = sig(range, labels, tokens);
     const sReq = sig(range, labels, counts);
-    const sCost = sig(range, labels, costs);
     if (animate || sTok !== seen.tokens) {
       seen.tokens = sTok;
       renderChart(tokensEl, labels, tokens, "", animate);
@@ -150,30 +222,21 @@ export async function initCharts() {
       seen.req = sReq;
       renderChart(reqEl, labels, counts, "", animate);
     }
-    if (costEl && (animate || sCost !== seen.cost)) {
-      seen.cost = sCost;
-      renderChart(costEl, labels, costs.map((v) => Math.round(v * 100)), "¢", animate);
-    }
     firstPaint = false;
 
     const totalReq = counts.reduce((a, b) => a + b, 0);
     const totalTok = tokens.reduce((a, b) => a + b, 0);
-    const totalCost = costs.reduce((a, b) => a + b, 0);
     setBadge("tokensBadge", `${formatCompact(totalTok)} total`);
     setBadge("requestsBadge", `${formatCompact(totalReq)} total`);
-    setBadge("costBadge", `${formatMoney(totalCost)} total`);
     setRangeLabel("tokensRangeLabel", range);
     setRangeLabel("requestsRangeLabel", range);
-    setRangeLabel("costRangeLabel", range);
   }
 
   function paintEmpty() {
     renderChart(tokensEl, [], [], "", true);
     renderChart(reqEl, [], [], "", true);
-    if (costEl) renderChart(costEl, [], [], "¢", true);
     setBadge("tokensBadge", "unavailable");
     setBadge("requestsBadge", "unavailable");
-    setBadge("costBadge", "unavailable");
     firstPaint = false;
   }
 

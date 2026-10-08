@@ -5,12 +5,14 @@
  */
 "use strict";
 
-import { toast, openModal, closeModal, modalShell } from "./ui.js?v=8";
+import { toast, openModal, closeModal, modalShell, animateIn } from "./ui.js?v=9";
 import { onPush } from "./events.js?v=1";
 
 let wsPath = "";
 let wsVersion = 0;
 let wsBusy = false;
+let wsFile = null; // opened file view { full, name, meta, kind } — null = folder listing
+let wsReadOnly = false; // browser-downloads area: no upload / mkdir / delete
 
 function fmtSize(bytes) {
   const n = Number(bytes) || 0;
@@ -43,6 +45,23 @@ function isImageName(name) {
   return /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(String(name || ""));
 }
 
+/* File kind by extension — each kind gets its own thumb icon + tint. */
+function fileKind(name) {
+  const m = /\.([a-z0-9]+)$/i.exec(String(name || ""));
+  const ext = (m && m[1] ? m[1] : "").toLowerCase();
+  if (["mp4", "webm", "mov", "mkv", "avi", "m4v"].includes(ext)) return "video";
+  if (["mp3", "wav", "ogg", "oga", "m4a", "flac", "aac"].includes(ext)) return "audio";
+  if (["pdf", "doc", "docx", "xls", "xlsx", "csv", "ppt", "pptx", "txt", "md", "html", "json", "xml"].includes(ext)) return "doc";
+  return "file";
+}
+
+function thumbSvg(kind) {
+  if (kind === "video") return videoSvg();
+  if (kind === "audio") return audioSvg();
+  if (kind === "doc") return docSvg();
+  return fileSvg();
+}
+
 function escName(s) {
   return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -56,7 +75,10 @@ let lastPath = "\0";
 
 function sigFor(path, entries) {
   try {
-    return path + "|" + entries.map((e) => `${e?.type}:${e?.name}:${e?.size ?? e?.items ?? ""}`).join(",");
+    // The opened file is part of the view: entering/leaving it must re-render
+    // even when the folder entries are unchanged (otherwise Back looks dead).
+    const view = wsFile ? `file:${wsFile.name}` : "list";
+    return path + "|" + view + "|" + entries.map((e) => `${e?.type}:${e?.name}:${e?.size ?? e?.items ?? ""}${e?.external ? ":x" : ""}`).join(",");
   } catch (_) {
     return "";
   }
@@ -74,6 +96,25 @@ async function loadWorkspace() {
     const data = await res.json();
     const entries = Array.isArray(data?.entries) ? data.entries : [];
     wsPath = typeof data?.path === "string" ? data.path : wsPath;
+    // Newest first — files and folders share one timeline, latest on top.
+    try {
+      entries.sort((a, b) => {
+        const ta = Number(a?.mtime) || 0;
+        const tb = Number(b?.mtime) || 0;
+        if (tb !== ta) return tb - ta;
+        return String(a?.name || "").localeCompare(String(b?.name || ""));
+      });
+    } catch (_) {}
+
+    // Browser downloads are read-only: no upload / new-folder / delete inside them.
+    try {
+      const inDl = wsPath === "downloads" || wsPath.startsWith("downloads/");
+      wsReadOnly = inDl;
+      const up = document.getElementById("wsUploadBtn");
+      const mk = document.getElementById("wsMkdirBtn");
+      if (up) up.style.display = inDl ? "none" : "";
+      if (mk) mk.style.display = inDl ? "none" : "";
+    } catch (_) {}
 
     // Silent background refresh: skip re-render when nothing changed,
     // so polling never flickers in front of the user.
@@ -93,11 +134,13 @@ async function loadWorkspace() {
         acc = acc ? `${acc}/${p}` : p;
         html += `<span class="ws-crumb-sep">/</span><button type="button" data-ws-nav="${escName(acc)}" class="ws-crumb-btn">${escName(p)}</button>`;
       });
+      if (wsFile) html += `<span class="ws-crumb-sep">/</span><span class="ws-crumb-cur">${escName(wsFile.name)}</span>`;
       html += `</span><button type="button" class="ws-copy-btn" id="wsCopyPath" title="Copy full path" aria-label="Copy full path">${copySvg()}</button>`;
       bar.innerHTML = html;
       bar.querySelectorAll("[data-ws-nav]").forEach((b) => {
         b.addEventListener("click", () => {
           wsPath = b.dataset.wsNav || "";
+          wsFile = null;
           loadWorkspace();
         });
       });
@@ -128,7 +171,15 @@ async function loadWorkspace() {
       });
     }
 
+    // Opened file view: the file must still exist, otherwise fall back to listing.
+    if (wsFile && !entries.some((e) => e?.type !== "folder" && e?.name === wsFile.name)) wsFile = null;
+
     list.innerHTML = "";
+    if (wsFile) {
+      list.classList.toggle("ws-grid", false);
+      renderFileView(list, wsFile);
+      return;
+    }
     list.classList.toggle("ws-grid", entries.length > 0);
     if (!entries.length) {
       const empty = document.createElement("div");
@@ -142,41 +193,77 @@ async function loadWorkspace() {
       });
       return;
     }
-    entries.forEach((e) => {
-      const btn = document.createElement("button");
+    entries.forEach((e, i) => {
+      // Outer is a div (not a <button>): a clickable delete control inside
+      // a <button> is invalid HTML and the outer card still fires on trash
+      // clicks in some browsers — that is the "redirect on delete" bug.
+      const btn = document.createElement("div");
       btn.className = "ws-card";
-      btn.type = "button";
+      btn.setAttribute("role", "button");
+      btn.setAttribute("tabindex", "0");
+      if (i < 12) btn.setAttribute("data-anim", "");
       const isFolder = e?.type === "folder";
+      const isExt = e?.external === true;
       const full = joinPath(wsPath, e?.name || "");
       const meta = isFolder ? fmtCount(e) : [fmtSize(e?.size), fmtDate(e?.mtime)].filter(Boolean).join(" · ");
+      const kind = isFolder ? "folder" : fileKind(e?.name);
+      const kindLabel = isFolder ? "Folder" : kind === "file" ? "File" : kind[0].toUpperCase() + kind.slice(1);
       const thumb = isFolder
-        ? `<span class="ws-thumb">${folderSvg()}</span>`
+        ? `<span class="ws-thumb folder">${folderSvg()}</span>`
         : isImageName(e?.name)
           ? `<img class="ws-thumb-img" loading="lazy" alt="" src="/api/workspace/download?path=${encodeURIComponent(full)}" />`
-          : `<span class="ws-thumb">${fileSvg()}</span>`;
+          : `<span class="ws-thumb ${kind}">${thumbSvg(kind)}</span>`;
+      const badge = isExt ? `<span class="ws-ext">browser</span>` : "";
+      const go = isFolder ? arrowSvg() : downloadSvg();
+      // The top-level downloads folder is essential: never offer delete for it.
+      const isProtected = wsPath === "" && (e?.name || "") === "downloads";
+      const del = (wsReadOnly || isProtected) ? "" : `<button type="button" class="ws-del" title="Delete ${escName(e?.name || "")}" aria-label="Delete ${escName(e?.name || "")}">${trashSvg()}</button>`;
       btn.innerHTML = `
         ${thumb}
         <span class="ws-info">
+          <span class="ws-kind">${kindLabel}</span>
           <span class="ws-name"></span>
-          <span class="ws-meta">${escName(meta)}</span>
-        </span>`;
+          <span class="ws-meta">${escName(meta)}${badge}</span>
+        </span>
+        <span class="ws-go" aria-hidden="true">${go}</span>
+        ${del}`;
       btn.querySelector(".ws-name").textContent = e?.name || "";
-      btn.title = isFolder ? `Open ${e?.name}` : `Download ${e?.name}`;
-      btn.addEventListener("click", () => {
+      btn.title = isFolder ? `Open ${e?.name}` : `View ${e?.name}`;
+      const openEntry = () => {
         if (isFolder) {
           wsPath = full;
+          wsFile = null;
           loadWorkspace();
         } else {
-          const a = document.createElement("a");
-          a.href = "/api/workspace/download?path=" + encodeURIComponent(full);
-          a.download = e.name;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
+          wsFile = { full, name: e?.name || "", meta, kind };
+          lastSig = "";
+          loadWorkspace();
+        }
+      };
+      btn.addEventListener("click", openEntry);
+      // Keyboard open (Enter/Space) only when the card itself is focused —
+      // the inner delete <button> handles its own keys natively.
+      btn.addEventListener("keydown", (ev) => {
+        if (ev.target !== btn) return;
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          openEntry();
         }
       });
+      const delBtn = btn.querySelector(".ws-del");
+      if (delBtn) {
+        // Delete never opens the entry: stop the click here and show the
+        // animated confirm dialog (works for files and folders alike).
+        delBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          openDeleteModal(full, e?.name || "", isFolder);
+        });
+      }
       list.appendChild(btn);
     });
+    // Folder-enter transition: cards cascade in with one staggered rise.
+    animateIn(list);
   } catch (_) {
     // Invalidate the signature so the next successful poll always re-renders
     // (otherwise a stale error could stick when data is unchanged).
@@ -205,12 +292,32 @@ function fileSvg() {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /></svg>`;
 }
 
+function videoSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="14" x="3" y="5" rx="2" /><polygon points="10 9.5 15 12 10 14.5 10 9.5" fill="currentColor" stroke="none" /></svg>`;
+}
+
+function audioSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>`;
+}
+
+function docSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>`;
+}
+
 function arrowSvg() {
   return `<svg class="row-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6" /></svg>`;
 }
 
 function downloadSvg() {
   return `<svg class="row-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>`;
+}
+
+function trashSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>`;
+}
+
+function warnSvg() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" /><path d="M12 9v4" /><path d="M12 17h.01" /></svg>`;
 }
 
 function readAsDataURL(file) {
@@ -251,7 +358,7 @@ function validFolderName(v) {
   const s = String(v || "").trim();
   if (!s) return "Name required";
   if (s.length > 100) return "Too long (max 100)";
-  if (s.includes("/") || s.includes("\\") || s.includes("..")) return "Single name only, no paths";
+  if (s.includes("/") || s.includes("\\") || s === ".." || s === ".") return "Single name only, no paths";
   return "";
 }
 
@@ -316,6 +423,84 @@ async function createFolder() {
     if (e.key === "Enter") {
       e.preventDefault();
       submit();
+    }
+  });
+}
+
+function downloadFile(full, name) {
+  const a = document.createElement("a");
+  a.href = "/api/workspace/download?path=" + encodeURIComponent(full);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/* Opened file view (in-page, no dialog): identity block + no-preview note + download. */
+function renderFileView(list, file) {
+  const view = document.createElement("div");
+  view.className = "ws-file";
+  view.setAttribute("data-anim", "");
+  const kindLabel = file.kind === "file" ? "File" : file.kind[0].toUpperCase() + file.kind.slice(1);
+  view.innerHTML = `
+    <span class="ws-thumb big ${file.kind}">${thumbSvg(file.kind)}</span>
+    <span class="ws-kind">${escName(kindLabel)}</span>
+    <span class="ws-file-name"></span>
+    <span class="ws-meta">${escName(file.meta || "")}</span>
+    <p class="ws-preview-note">Preview isn't available for this file here.</p>
+    <span class="ws-file-actions">
+      <button type="button" class="glass-btn" id="wsFileBack">Back</button>
+      ${wsReadOnly ? "" : `<button type="button" class="glass-btn danger" id="wsFileDelete">Delete</button>`}
+      <button type="button" class="glass-btn" id="wsFileDownload">Download</button>
+    </span>`;
+  view.querySelector(".ws-file-name").textContent = file.name;
+  list.appendChild(view);
+  view.querySelector("#wsFileBack")?.addEventListener("click", () => {
+    wsFile = null;
+    lastSig = "";
+    loadWorkspace();
+  });
+  view.querySelector("#wsFileDownload")?.addEventListener("click", () => {
+    downloadFile(file.full, file.name);
+  });
+  view.querySelector("#wsFileDelete")?.addEventListener("click", () => {
+    openDeleteModal(file.full, file.name, false);
+  });
+  animateIn(list);
+}
+
+/* Delete confirmation: folders warn that everything inside goes too. */
+function openDeleteModal(full, name, isFolder) {
+  openModal(modalShell({
+    icon: warnSvg(),
+    title: isFolder ? "Delete folder" : "Delete file",
+    subtitle: name,
+    body: isFolder
+      ? `<p class="ws-preview-note">“${escName(name)}” and <b>everything inside it</b> will be permanently deleted.</p>`
+      : `<p class="ws-preview-note">“${escName(name)}” will be permanently deleted.</p>`,
+    foot: `
+      <button class="glass-btn" data-close type="button">Cancel</button>
+      <button class="glass-btn danger" id="wsDeleteConfirm" type="button">Delete</button>`,
+  }));
+  document.getElementById("wsDeleteConfirm")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    try {
+      const res = await fetch("/api/workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", path: wsPath, name }),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out?.error || "delete failed");
+      closeModal();
+      if (wsFile && wsFile.name === name) wsFile = null;
+      toast(isFolder ? "Folder deleted" : "File deleted");
+      lastSig = "";
+      loadWorkspace();
+    } catch (e) {
+      toast(e instanceof Error && e.message ? e.message : "Delete failed");
+      btn.disabled = false;
     }
   });
 }

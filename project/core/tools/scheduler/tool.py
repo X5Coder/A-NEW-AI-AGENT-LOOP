@@ -378,11 +378,16 @@ def execute(action: str, job_id: str | None = None, task: str | None = None, sta
     if act == "delete":
         removed = jobs.pop(idx)
         _save_jobs(jobs)
-        # Auto-delete scheduled skill
+        # Auto-delete scheduled skill + the job's branch session
         skill_ref = removed.get("skill_ref")
         skill_deleted = False
         if skill_ref:
             skill_deleted = _delete_scheduled_skill(skill_ref)
+        try:
+            from core.scheduler.session import delete_session as _del_session
+            _del_session(removed.get("job_id") or "")
+        except Exception:
+            pass
         return {"event": event, "action": act, "deleted": removed, "skill_deleted": skill_deleted, "skill_ref": skill_ref}
 
     if act == "pause":

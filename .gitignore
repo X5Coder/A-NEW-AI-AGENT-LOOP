@@ -12,10 +12,12 @@ project/models/stt/*
 !project/models/stt/.gitkeep
 
 # Alternative: ignore all model binaries everywhere
-**/models/**/ *.safetensors
-**/models/**/ *.bin
-**/models/**/ *.onnx
-**/models/**/ *.pt
+**/*.safetensors
+**/*.bin
+**/*.onnx
+**/*.pt
+**/*.ct2
+**/*.engine
 
 # X5Agent runtime sandbox - never commit user data / workspace
 X5Agent/Data/
@@ -45,3 +47,9 @@ Thumbs.db
 # Logs & temp
 *.log
 tmp/
+.pytest_cache/
+*.backup-before-*.html
+*.backup-before-*.css
+
+# WhatsApp bridge deps (installed via npm, never commit)
+project/gateway/whatsapp/bridge/node_modules/

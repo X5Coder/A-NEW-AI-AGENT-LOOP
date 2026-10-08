@@ -33,18 +33,18 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   ├── user_memory_organize_system.md
 │   ├── agent_memory_extract_system.md
 │   └── agent_memory_organize_system.md
-├── X5Browser/                      # versioned browser layer (wrapper 1.3.0 over lib x5browser==1.2.0, see X5Browser/VERSION)
+├── X5Browser/                      # versioned browser layer (wrapper 1.4.0 over lib x5browser==1.4.0, see X5Browser/VERSION)
 │   ├── __init__.py                 # exports version + tool lists (all 39 are core plugins)
 │   ├── VERSION                     # wrapper + lib pin (bump on library updates)
 │   ├── catalog.py                  # single source: 39 tool specs (38 library + show_preview), ALL core plugins (4 dangerous)
-│   ├── service.py                  # single browser owner: EXPLICIT lifecycle (only open_browser/restart_browser boot; any other tool while stopped fails 'browser stopped', never boots WSL/units/Chrome on any OS) + orphan-stop (close from a fresh process stops live-stack units instead of no-op) + adopt (fresh process attaches to a live endpoint, still no boot) + quick probe (single-shot for polls/per-turn context) + bg asyncio loop + live stack boot = one LiveStack.start() call (library owns units/install/self-heal/WSL keep-alive; local fallback) + LIVE LINKS READ FROM THE LIBRARY (live_links() -> control+preview+owner, no cache/heal/persist) + read-only status_report() (never boots) + lifecycle lock/gen (no start-close race) + start/stop + screenshots (Data/files/browser, max 20) + boot fast-path (skip start when the ports answer; fail fast when units are active but Windows-unreachable, so a broken route never burns the stack timeout)
+│   ├── service.py                  # single browser owner: EXPLICIT lifecycle (only open_browser/restart_browser boot; any other tool while stopped fails 'browser stopped', never boots WSL/units/Chrome on any OS) + orphan-stop (close from a fresh process stops live-stack units instead of no-op) + adopt (fresh process attaches to a live endpoint, still no boot) + quick probe (single-shot for polls/per-turn context) + bg asyncio loop + live stack boot = one LiveStack.start() call (library owns units/install/self-heal/WSL keep-alive; headless local fallback when stack unavailable: no visible window, library profile only, never real User Data) + LIVE LINKS READ FROM THE LIBRARY (live_links() -> control+preview+owner, no cache/heal/persist) + read-only status_report() (never boots) + lifecycle lock/gen (no start-close race) + start/stop + screenshots (Data/files/browser, max 20) + boot fast-path (skip start when the ports answer; fail fast when units are active but Windows-unreachable, so a broken route never burns the stack timeout)
 │   ├── tools.py                    # validation (untrusted args, http(s) only, Workspace jail) + execute + normalized output (library ok=false refusals never masked) + browser_status answered locally (never boots) + links copied from the library
 │   └── events.py                   # short non-technical label per tool (all 39, user-friendly)
 ├── core/
 │   ├── paths.py                    # X5Agent resolver: workspace/data/models roots + ensure_x5agent() + resolve_inside_workspace()
 │   ├── agent/
 │   │   ├── loop/                       # 500-step loop, never fails silently
-│   │   ├── engine.py               # run_loop(user_input, max_steps=500, provider=openrouter) + dynamic tools + on_event stream (event/reason/media/step/live frames) + optional reason node per tool call (model `reason` stripped before execute, never synthesized; empty → step shows with no arrow unless output/image) + turn elapsed_sec (persisted per message) + restricted approvals + on_question pause (ask/approval/live) + on_live_event + cancel flag + live-URL redaction (model never sees stream links)
+│   │   │   ├── engine.py               # run_loop(user_input, max_steps=500, provider=openrouter) + dynamic tools + on_event stream (event/reason/media/step/live frames) + optional reason node per tool call (model `reason` stripped before execute, never synthesized; empty → step shows with no arrow unless curated detail/image) + curated per-tool step detail UNDER reason (todo steps, file names, short code/terminal preview incl. exit code, question Q+A; default reason-only, raw output never dumped; failures show one short cause, titles never raw errors) + turn elapsed_sec (persisted per message) + final_audio (text_to_speech records → standalone voice bubble, persisted as assistant audio) + restricted approvals + on_question pause (ask/approval/live) + on_live_event + cancel flag + live-URL redaction (model never sees stream links) + mid-step cancel break (STOP during a pause drops the result silently)
 │   │   │   ├── dispatcher.py           # maps tool name -> execute (core + discoverable)
 │   │   │   └── __init__.py
 │   │   ├── context/
@@ -81,7 +81,8 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   │   │   └── __init__.py
 │   │   └── auto_memory.py              # auto every 50 msgs: extract (with 50 msgs) → store → organize (without chat, deduplicate)
 │   ├── scheduler/                  # scheduler engine for large tasks (isolated execution)
-│   │   ├── engine.py               # check_and_execute_due_jobs() every 60s, computes next_run, isolated mode, concurrent via ThreadPool
+│   │   ├── engine.py               # check_and_execute_due_jobs() every 60s, computes next_run, isolated mode, concurrent via ThreadPool + on_start/on_done executing callbacks + run_history output bounded 2000/run (last 10) + persists into the job's branch session (never main chat)
+│   │   ├── session.py              # one branch session per job: Data/database/scheduler_sessions/<job_id>.json (last 100 msgs, history_block for L6, auto-deleted with the job)
 │   │   └── __init__.py
 │   ├── trigger/                    # trigger watcher engine (one-time filesystem triggers)
 │   │   └── engine.py               # watchers per trigger, fires skill once then dies + deletes skill
@@ -153,7 +154,7 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │           ├── events.py           # Workspace · {action}
 │           └── __init__.py
 ├── plugins/
-│   ├── core_plugins/               # CORE PLUGINS: always on, hidden from UI, no switches (9 tools, flat)
+│   ├── core_plugins/               # CORE PLUGINS: always on, hidden from UI, no switches (14 tools, flat)
 │   │   ├── read_file/              # jailed Workspace only
 │   │   │   ├── spec.json
 │   │   │   ├── tool.py
@@ -161,12 +162,33 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   │   │   └── __init__.py
 │   │   ├── write_file/             # Events: Writing · {file_name}
 │   │   ├── search_files/           # Events: Searching files
-│   │   ├── vision_analyze/         # Events: Analyzing · {image_name}
-│   │   ├── video_analyze/          # Events: Analyzing video · {video_name}
-│   │   ├── video_transcribe/       # Events: Transcribing video · {video_name}
+│   │   ├── vision_analyze/         # Events: Analyzing · {image_name} (images + video visual content incl. Workspace videos/video_analyze frames)
+│   │   ├── video_analyze/          # Events: Analyzing video · {video_name} (accepts Workspace + project + Data/files)
+│   │   ├── video_transcribe/       # Events: Transcribing video · {video_name} (accepts Workspace + project + Data/files)
+│   │   ├── video_download/         # Events: Downloading video · {host} (yt-dlp URL -> Workspace mp4 + metadata for vision)
+│   │   │   ├── spec.json
+│   │   │   ├── tool.py
+│   │   │   ├── events.py
+│   │   │   └── __init__.py
+│   │   ├── audio_extract/          # Events: Extracting audio · {video_name} (FFmpeg video -> Workspace mp3/wav + metadata)
+│   │   │   ├── spec.json
+│   │   │   ├── tool.py
+│   │   │   ├── events.py
+│   │   │   └── __init__.py
+│   │   ├── embedding_memory/         # Events: Saving/Searching memory (reason+text=store, query+top_k=search, Qwen3 -> Data/vector/embedding_memory.json, conditional L5 count line hidden when empty)
+│   │   │   ├── spec.json
+│   │   │   ├── tool.py
+│   │   │   ├── events.py
+│   │   │   └── __init__.py
+│   │   ├── text_to_speech/           # Events: Speaking · {words} (fixed nova voice via integrated model only -> Data/files/audio wav, plays as standalone bubble via /api/audio)
+│   │   │   ├── spec.json
+│   │   │   ├── tool.py
+│   │   │   ├── events.py
+│   │   │   └── __init__.py
 │   │   ├── skill_create/           # Events: Creating skill · {skill_name}
 │   │   ├── image_memory/           # Events: Storing/Updating/Listing images
 │   │   ├── important_memory/       # Events: Saving/Listing memories
+│   │   ├── http_request/           # Events: Fetching/Posting · {host} (generic GET/POST/PUT/PATCH/DELETE to any http(s) URL incl. MCP JSON-RPC, any headers + any text/JSON body on any method, stdlib only, 1MB cap, 3 retries)
 │   │   └── __init__.py
 │   ├── tool-discovery/
 │   │   └── search/
@@ -193,8 +215,8 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   ├── Skill 2/
 │   └── Skill 3/
 ├── web/
-│   ├── server/                         # local dev server (127.0.0.1:5173, path-validated, document attachments (100MB) -> Workspace copy + priority block)
-│   │   ├── server.py                   # static server + SPA fallback (extensionless→index.html) + JSON APIs (dashboard/cost/balance/health/conversation/plugins/skills/models/chat/chat_stream/chat_answer/chat_cancel/message/stt/plugin_state/model_state/providers/providers/test/live_state/shot/workspace) + /api/events SSE push hub (one stream/tab, hello snapshot, singleton watchers broadcast on change only) + secrets: UI save→vault+Data/.env+environ, UI clear→deleted everywhere, cost measured (usage_log + live pricing), SSE live loop on chat_stream (event/reason/media/live frames + live question pause) + LIVE STATE READ FROM THE LIBRARY: live_snapshot()/live_active() take running + control/preview links straight from X5Browser (no live_state.json, no host-heal, no relay/viewer restart) + in-memory live pause (_LIVE_PAUSE: qid→tool/reason, survives refresh, dropped on answer/expire/loop-end) + /api/chat_frames (bounded run-progress frames: event_start/event/question/live/live_end, never tokens) fanned out as `run` pushes so a refreshed page rebuilds the running Working block + steps against a route that is unreachable from Windows while units answer inside WSL (fail fast, never burn the stack timeout)
+│   ├── server/                         # local dev server (127.0.0.1:5173, path-validated, chat attachments (image/video/text/document, doc 100MB) -> Workspace mirror copy + priority block)
+│   │   ├── server.py                   # static server + SPA fallback (extensionless→index.html) + JSON APIs (dashboard/cost/balance/health/conversation/plugins/skills/models/chat/chat_stream/chat_answer/chat_cancel/message/stt/plugin_state/model_state/providers/providers/test/live_state/shot/workspace/scheduler + /api/audio TTS records) + /api/events SSE push hub (one stream/tab, hello snapshot, singleton watchers broadcast on change only) + scheduler snapshot/emit (_get_scheduler_data/_events_emit_scheduler, 15s watcher + force after chat run/skill edit) + scheduler engine ticker (60s, executing callbacks → live "يتم التنفيذ" push) + secrets: UI save→vault+Data/.env+environ, UI clear→deleted everywhere, cost measured (usage_log + live pricing), SSE live loop on chat_stream (event/reason/media/live frames + live question pause) + LIVE STATE READ FROM THE LIBRARY: live_snapshot()/live_active() take running + control/preview links straight from X5Browser (no live_state.json, no host-heal, no relay/viewer restart) + in-memory live pause (_LIVE_PAUSE: qid→tool/reason, survives refresh, dropped on answer/expire/loop-end) + /api/chat_frames (bounded run-progress frames: event_start/event/question/live/live_end, never tokens) fanned out as `run` pushes so a refreshed page rebuilds the running Working block + steps against a route that is unreachable from Windows while units answer inside WSL (fail fast, never burn the stack timeout) + done frames carry audio (final TTS voice records)
 │   │   └── __init__.py
 │   └── frontend/
 │       └── dashboard/                  # X5Agent Console — Manus-adapted DARK-ONLY theme, modular (no inline style/script)
@@ -211,7 +233,7 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │           │   ├── base.backup-before-manus.css
 │   │   ├── layout.css          # 308px nav / 56px toolbar / gray canvas + RTL drawer + icon rail with transform slide + hidden nav scrollbar
 │           │   ├── layout.backup-before-manus.css
-│           │   ├── components.css      # white cards, pills, black send, blue charts, thinking-block (dot-square ring wave + wave Working + per-step arrow → reason/output/image), red errors only
+│           │   ├── components.css      # white cards, pills, black send, blue charts, thinking-block (dot-square ring wave + wave Working + per-step arrow → reason/curated-detail/image, pre-wrap), red errors only + msg-voice bubble styles
 │           │   ├── components.backup-before-manus.css
 │           │   ├── responsive.css      # breakpoints 1024/640 (logical drawer side + slide)
 │           │   └── responsive.backup-before-manus.css
@@ -221,18 +243,30 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │               ├── navigation.js       # drawer + desktop slide collapse + real-URL routing (/agent...) + toolbar titles
 │               ├── dashboard.js        # 4 stats (Requests/Tokens/Balance/Model) + toolbar status: /api/dashboard + /api/cost + /api/balance + /api/models
 │               ├── charts.js           # Tokens+Requests+Cost charts, 7D/30D/months ranges, /api/cost (silent refresh: sig-skip, first-paint anim only, peak highlight, hover desktop, tap mobile)
-│               ├── chat.js             # agent: rich RTL/LTR typing (dir per language, Space Grotesk Working pinned LTR-left) + thinking-block per turn (dot-square 5x5 ring wave + wave Working, header arrow pops in with first step; reply typed once at done with normal animation, tool-phase text moves inside its event; settled Done + elapsed seconds + collapsed with reply below, empty block dropped, cancel renders Stopped line only; every content step has arrow → reason + output + lazy image; history reloads settled + expandable anytime) + live control card (interactive iframe + fullscreen + glass متابعة) + floating preview bar (attached strip, single icon btn + close-confirm) + fixed-right vertical-only tab + free-floating player (instant open, free drag/resize, half-off-right forceful dock only, snap-back inside otherwise, viewport-clamped open/drag/resize, stale-URL self-heal + auto-mint + tap-recover, down-hysteresis 4, insecure-context notice + https-upgrade) + live control card (ask sentence + fullscreen + confirm-continue, animated close) + push-driven (events.js, zero polling: browser tab/live/chat/reload via SSE) + live_state restore (one-shot) + @mentions + thumbs + voice recording panel + STT to composer/direct-send + attach menu (image/video/document→fileInputDocument max 100MB, 280px doc card with progress ring inside composer + entrance animation + per-type icon) + mode/approvals/questions + hover/long-press msg actions + hash route persists + refresh mid-run replays /api/chat_frames so the same task keeps its Working block + every step and keeps following `run` pushes + human_control closes the floating preview/edge tab before its card + right-edge tab slides in from the right + step bullets run ORANGE then turn GREEN with a check on success + agent chat is selectable/copyable again + composer focus glow animates in and fades out + show_preview opens the floating watch-only window (idempotent)
-│               ├── events.js             # single SSE push channel: one EventSource/tab, hello snapshot + change-only frames (browser/live/chat/chat_done/dashboard/workspace), auto-reconnect with hello resync, no polling anywhere
+│               ├── chat.js             # agent: rich RTL/LTR typing (dir per language + explicit li dir, typing-live hides empty markers, Space Grotesk Working pinned LTR-left) + pro codeblock (raw-fence extract, tiny highlight, fixed header lang+copy hover/touch, typed with colors, roomy pre + wrap guards) + tables explicit dir + row-headers (spec col right in RTL, left in LTR) + thinking-block per turn (dot-square 5x5 ring wave + wave Working, header arrow pops in with first step; reply typed once at done with normal animation, tool-phase text moves inside its event; settled Done + elapsed seconds + collapsed with reply below, empty block dropped, cancel renders Stopped line only; every content step has arrow → reason + curated per-tool detail + lazy image (default reason-only, raw output never dumped; detail pre-wrap multi-line); history reloads settled + expandable anytime) + live control card (interactive iframe + fullscreen + glass متابعة) + floating preview bar (attached strip, single icon btn + close-confirm) + fixed-right vertical-only tab + free-floating player (instant open, free drag/resize, half-off-right forceful dock only, snap-back inside otherwise, viewport-clamped open/drag/resize, stale-URL self-heal + auto-mint + tap-recover, down-hysteresis 4, insecure-context notice + https-upgrade) + live control card (ask sentence + fullscreen + confirm-continue, animated close) + push-driven (events.js, zero polling: browser tab/live/chat/reload via SSE) + live_state restore (one-shot) + @mentions + thumbs + voice recording panel + STT to composer/direct-send + attach menu (image/video/document→fileInputDocument max 100MB, 280px doc card with progress ring inside composer + entrance animation + per-type icon) + mode/approvals/ask-strip (fused lettered rows above composer, essay = question-only + composer reply, STOP flips to SEND + Working freezes while asking, +/mode/mic hidden, chip-or-typed + SEND only, dedicated ask-in enter + ask-out keyframe exit (fill-proof), frees scroll below last message; answer lands inside the step arrow as Q+A + loop resumes, never a user bubble) + run tokens (superseded turns exit quietly) + step keying by call id (completion retitles the same row, no orphans) + hover/long-press msg actions + hash route persists + refresh mid-run replays /api/chat_frames so the same task keeps its Working block + every step and keeps following `run` pushes + human_control closes the floating preview/edge tab before its card + right-edge tab slides in from the right + step bullets run ORANGE then turn GREEN on success (no check) + agent chat is selectable/copyable again + TTS voice bubble (appendFinalVoice/createVoiceBubble: play/pause + seekable hash-wave bars + time, one-at-a-time, persisted via m.audio) + composer focus glow animates in and fades out + show_preview opens the floating watch-only window (idempotent) + agent-open auto-check (browser running → live edge tab auto-shows, no-link → bounded mint)
+│               ├── events.js             # single SSE push channel: one EventSource/tab, hello snapshot + change-only frames (browser/live/chat/chat_done/dashboard/workspace/scheduler), auto-reconnect with hello resync, no polling anywhere
+│               ├── schedule.js           # scheduler side panel (Agent section only via body.sched-visible): right-edge tab "Scheduled Tasks" (same open/dock animation as #liveMini: tab.off while floating, ×/half-off-right docks back) + floating list (current-task rectangles open detail dialog; executed-run rectangles open full session) + detail dialog (status pill + stats grid + تعليمات المهمة edit + clickable run rectangles + two-step delete) + per-run FULL page (hash session /#sched-<job>-<run>: enter slide, status chip, branch session .msg bubbles + full composer, refresh-safe)
 │               ├── workspace.js          # workspace page: one-level file browser + breadcrumb + upload/mkdir + download-only + push reload on version change (no poll)
 │               ├── plugins.js          # discoverable only: action=permission switches, silent save, core hidden
 │               ├── skills.js           # user skills: cards grid (unified icon copies skill, no badge) + glass +Add + glass create/edit dialog (glass fields + persistent red errors + local draft, cleared on save + glass save/cancel, locked name on edit) + view modal with Copy/Edit, searchable via skills_search
-│               ├── gateway.js          # WhatsApp/Telegram: badges + config modals + localStorage
+│               ├── gateway.js          # WhatsApp-only setup: locked agent number, QR/code linking, allowed numbers, live status, disconnect
 │               ├── models.js           # Cloud provider cards only, no section title + vault (masked keys)
 │               └── settings.js         # password validation + logout (local-only)
-├── gateway/
+├── gateway/                            # messaging channels (server-authoritative config in Data/database/gateway.json)
+│   ├── store.py                        # validated WA/TG settings (token masked on read, never logged)
+│   ├── channels.py                     # outbound text senders per channel (chunked, best-effort)
+│   ├── dispatch.py                     # unified commands (/browser /dashboard /cancel) + 5s coalescing + queued runs + reason-first events + WA send options (read/typing/reply) + same-account LID auto-allow + runs execute once via the main chat_stream pipeline (mirrored live, local fallback when busy)
+│   ├── service.py                      # auto-start: TG poller thread + WA push wiring (no WA threads, zero polling)
 │   ├── telegram/
+│   │   ├── adapter.py                  # Bot API: getMe + per-chat sendMessage test (stdlib only)
+│   │   ├── poller.py                   # long-poll getUpdates -> normalize (text/voice/photo/doc) -> dispatch
+│   │   └── __init__.py
 │   ├── whatsapp/
-│   └── discord/
+│   │   ├── adapter.py                  # owns Baileys bridge lifecycle (spawn/use/stop, loopback only) + per-boot push secret/URL + pidfile orphans + wedge watchdog + LID-first sends + segno QR data-URLs + inbox/send
+│   │   ├── listener.py                 # bridge wakeup drain: /inbox -> normalize (DM only, LID/phone identity + own-LID capture) -> dispatch (push-driven, zero polling)
+│   │   ├── bridge/                     # node service: package.json (baileys 6.x) + bridge.js (/health|status|connect|pair|disconnect|inbox|send + media)
+│   │   └── __init__.py
+│   └── discord/                          # reserved
 ├── storage/                      # LEGACY read-only fallback (authoritative home is X5Agent/Data, migrated once at startup)
 │   ├── database/                   # fallback copies (todos/scheduler/conversation/triggers + 4 memories + plugin_state + model_providers)
 │   ├── vector/                     # fallback embeddings (tool/chat/trigger)
@@ -244,7 +278,10 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   │   └── service.py              # analyze_image() (Data/files images first, legacy fallback), lazy load, 3 retries
 │   ├── stt/
 │   │   └── service.py              # transcribe_file(), lazy load, raw text (no correction layer)
-│   ├── tts/                            # reserved placeholder (no service yet)
+│   ├── tts/                            # TTS service: synthesize() with the fixed project voice (nova) via the integrated model only, 3 retries
+│   │   ├── service.py              # synthesize(text, voice=None→nova, lang, out_path): custom-voice blend + FFmpeg shaping; presets raw; validation rejects unknown voices
+│   │   ├── voices.py               # custom voice catalog (nova: M3/M4/M2 blend + pace/steps + shaping profile) + build_style() cached (no external service/model)
+│   │   └── postprocess.py          # FFmpeg voice shaping: rubberband pitch (formant preserved) + EQ + room + compression + loudnorm, atomic replace, 2 attempts
 │   ├── manifest.json               # single source of truth: local_dir -> models/<type>/<name>
 │   ├── loader.py                   # ensure_models() + get_model_path() (manifest primary, merged copies, never re-downloads) + scan_local_models()
 │   ├── local_models/               # user-facing registry (local_dir -> models/<type>/<name>)
@@ -262,6 +299,7 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   └── test_documents.py             # documents: 300-word chunks + markitdown + vision fallback + delete purges embeddings + wiring
 │   └── test_streaming.py             # SSE decoding (no mojibake) + tool-delta rebuild
 │   └── test_browser_lifecycle.py     # browser close-noop (no boot) + lifecycle lock
+│   └── test_tts_voice.py             # fixed custom voice catalog/default/reject + shaping filter + optional model synthesis (skips without weights/ffmpeg)
 ├── docs/
 │   └── README.md
 ├── .env
@@ -277,10 +315,10 @@ project/                           # == X5Agent/System Core (immutable engine, r
 - `core/memory/` — 4 memories (writes ALWAYS X5Agent/Data, reads Data-first) + auto_memory service
 - `core/documents/` — document store (file_id = Workspace-relative path; convert->chunk->embed; vision fallback for thin PDF pages; delete/purge orphans with Workspace)
 - `core/tools/` — 13 core tools each own folder with Event (tool_search, question, vector_chat_search, document_search, todo_list, scheduler, skills_search, skills_view, terminal, wait, workspace, trigger, trigger_search) + workspace block in context (L4 top-level only) + documents metadata block (L4) + chat-uploaded documents priority block (L8) + direct-answer rule: no summary suffix when no tools were called (general_mission.md:7, system.md:6)
-- `X5Browser/` — versioned single-folder browser layer (wrapper 1.3.0 over lib x5browser==1.2.0): catalog (39 specs: 38 library 1:1 + project `show_preview`, ALL core plugins, 4 dangerous) + service (sole browser owner, EXPLICIT lifecycle: only open/restart boot, all others fail 'browser stopped' while down, bg asyncio loop, live stack = one LiveStack.start(), LIVE LINKS READ FROM THE LIBRARY via live_links(), read-only status_report(), profile stays inside library, screenshots in Data/files/browser max 20) + tools (validation + normalized output, browser_status never boots) + events (plain-English label per tool). All 39 behind `tool_search` embedding (store scans catalog, hash auto-rebuilds). Dangerous 4 (fill_form, upload_files, export_page, console_command): restricted mode asks via question, otherwise direct.
-- `plugins/` — `core_plugins/` (9 always-on hidden tools, flat: read_file, write_file, search_files, vision_analyze, video_analyze, video_transcribe, skill_create, image_memory, important_memory) — always effective, no UI switches, still searchable via `tool_search` embedding. `plugins/` UI page is intentionally empty. Filesystem trigger types stay in `plugins/filesystem/triggers/` (trigger_search system). Models page is cloud-only (no local section).
+- `X5Browser/` — versioned single-folder browser layer (wrapper 1.4.0 over lib x5browser==1.4.0): catalog (39 specs: 38 library 1:1 + project `show_preview`, ALL core plugins, 4 dangerous) + service (sole browser owner, EXPLICIT lifecycle: only open/restart boot, all others fail 'browser stopped' while down, bg asyncio loop, live stack = one LiveStack.start(), LIVE LINKS READ FROM THE LIBRARY via live_links(), read-only status_report(), profile stays inside library, screenshots in Data/files/browser max 20) + tools (validation + normalized output, browser_status never boots) + events (plain-English label per tool). All 39 behind `tool_search` embedding (store scans catalog, hash auto-rebuilds). Dangerous 4 (fill_form, upload_files, export_page, console_command): restricted mode asks via question, otherwise direct.
+- `plugins/` — `core_plugins/` (14 always-on hidden tools, flat: read_file, write_file, search_files, vision_analyze, video_analyze, video_transcribe, video_download, audio_extract, embedding_memory, text_to_speech, skill_create, image_memory, important_memory, http_request) — always effective, no UI switches, still searchable via `tool_search` embedding. `plugins/` UI page is intentionally empty. Filesystem trigger types stay in `plugins/filesystem/triggers/` (trigger_search system). Models page is cloud-only (no local section).
 - `skills/` — reusable skills (frontend-design-pro auto-loaded + discoverable via SKILL.md) + scheduled_skills (auto-generated) + trigger_skills (one-time)
-- `web/` — server + frontend/dashboard
+- `web/` — server + frontend/dashboard (chat renders TTS voice records as standalone bubbles via /api/audio; no raw player in steps)
 - `gateway/` — telegram/whatsapp/discord adapters (events rendered as per Events table)
 - `storage/` — LEGACY read-only fallback only (never written by runtime; Data is authoritative; migrated once at startup)
 - `models/` — code only (services + manifest -> project/models/<type>; weights gitignored via project/models rule)
@@ -288,14 +326,14 @@ project/                           # == X5Agent/System Core (immutable engine, r
 
 ## Events Contract
 - Core Tools: tool_search→Finding tools, question→Waiting for you, vector_chat_search→Searching memory, document_search→Searching docs · {file_name}, todo_list→Planning task, scheduler→Scheduling · {short schedule}, skills_search→Finding skills, skills_view→Opening · {skill_name}, terminal→Running · {command}, wait→Waiting · {duration}, workspace→Workspace · {action}, trigger→Managing trigger · {trigger_name}, trigger_search→Finding triggers + browser core: page_snapshot→Viewing page snapshot, navigate→Navigating to {url}, click→Clicking element {ref}, fill→Typing into element {ref}
-- Discoverable (all core plugins, always on, hidden from UI): read_file→Reading · {file_name}, write_file→Writing · {file_name}, search_files→Searching files, vision_analyze→Analyzing · {image_name}, video_analyze→Analyzing video · {video_name}, video_transcribe→Transcribing video · {video_name}, skill_create→Creating skill · {skill_name}, image_memory→Storing/Updating/Listing images, important_memory→Saving/Listing memories + 39 browser events (see X5Browser/events.py)
+- Discoverable (all core plugins, always on, hidden from UI): read_file→Reading · {file_name}, write_file→Writing · {file_name}, search_files→Searching files, vision_analyze→Analyzing · {image_name}, video_analyze→Analyzing video · {video_name}, video_transcribe→Transcribing video · {video_name}, video_download→Downloading video · {host}, audio_extract→Extracting audio · {video_name}, embedding_memory→Saving/Searching memory, text_to_speech→Speaking · {words}, skill_create→Creating skill · {skill_name}, image_memory→Storing/Updating/Listing images, important_memory→Saving/Listing memories, http_request→Fetching/Posting · {host} + 39 browser events (see X5Browser/events.py)
 - Rules: {file_name}/{skill_name}/{image_name} filename only, {command} truncated, {short schedule} compact, never display long free-form inputs
 - Tool Search: semantic top-k over discoverable tools, loop bounded by max_steps=500
-- Video Handling: video not saved, only metadata sent; frame analysis via ThreadPool(4) for speed; STT per timestamp
+- Video Handling: video_download saves mp4 to Workspace (yt-dlp, 100MB cap) + returns metadata; video_analyze/transcribe accept Workspace files; frame analysis via ThreadPool(4) for speed; STT per timestamp; audio_extract saves mp3/wav to Workspace via FFmpeg
 
 ## Embedding Auto-Logic
 - On startup (`main.py` + `tool_search` first call) -> `plugins/tool-discovery/search/store.py:ensure_embeddings()`:
-  - collects all discoverable specs (verbatim descriptions, now 9 core_plugins + 39 browser)
+  - collects all discoverable specs (verbatim descriptions, now 14 core_plugins + 39 browser)
   - computes SHA256 hash
   - if hash matches stored `storage/vector/tool_embeddings.json` -> reuse
   - else delete old, embed all descriptions via `models/embedding/service.py` (Qwen3-Embedding-0.6B, 3 retries), save new hash+embeddings
@@ -306,3 +344,17 @@ When structure changes:
 1. Update the tree above to match disk reality
 2. Update physical directories (create/remove `.gitkeep`)
 3. Mention the map change in commit/message
+
+## Known Gaps — 2026-10-08 (recovered from opencode/Codex session logs; verified by compile+checks)
+> A cleanup accident wiped uncommitted work; it was rebuilt from
+> `~/.local/share/opencode/opencode.db` tool history (writes/reads/edits) plus
+> `~/.codex/sessions` apply_patch blocks (Oct-07 WhatsApp sessions), verified with
+> `py_compile` (31 files), `node --check` (13 files) and JSON parsing (27 specs).
+> Items below are the only deltas left vs the tree. `project/.env` (gitignored)
+> must be re-created locally AND the exposed OpenRouter key rotated (it lives on
+> in git history).
+- RESTORED ✅: all `project/gateway/*.py` + `telegram/*` + `whatsapp/*` + `bridge/`, all 5 missing core plugins (14/14 present), `core/scheduler/session.py`, `js/schedule.js`, `tests/test_tts_voice.py`, `models/local_models/models.json`, and all post-`fd42295` tracked edits (server/engine/chat/css/…).
+- RESTORED EXTRA (needs tree entries): `project/web/server/download_sync.py` + `project/tests/test_download_sync.py` (Workspace download sync, bounded).
+- DELIBERATE DEVIATION: `js/gateway.js` keeps the integrated opencode version (exports `initGateway`, used by `app.js`); the Codex rewrite was dropped after it caused a blank-template regression — only compatible Codex hunks were kept.
+- DEFERRED (no breakage, verified): `dispatch.py` helpers `_reply_to`/`_notify_main_chat_changed`, `channels.py` `mark_read`/status check (zero callers), `chat.js` duplicate `highlightCode` (last-wins, syntax valid), `components.css` variant rules (CSS never breaks).
+- debt: `_an.py/_an2.py/_c.py/out.txt` debug junk deleted; hardcoded test API keys replaced by env `setdefault` + live-API skip guards.

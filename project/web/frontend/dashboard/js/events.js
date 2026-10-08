@@ -10,7 +10,7 @@
 
 const handlers = new Map(); // type -> Set<fn>
 const lastState = new Map(); // state types only (replayed to late subscribers)
-const STATE_TYPES = new Set(["browser", "live", "chat", "dashboard", "workspace"]);
+const STATE_TYPES = new Set(["browser", "live", "chat", "dashboard", "workspace", "scheduler", "gateway"]);
 let started = false;
 
 export function onPush(type, fn) {
@@ -27,7 +27,7 @@ function dispatch(frame) {
   if (!frame || typeof frame.type !== "string") return;
   if (frame.type === "hello" && frame.data && typeof frame.data === "object") {
     const snap = frame.data;
-    for (const key of ["browser", "chat", "workspace", "dashboard", "live"]) {
+    for (const key of ["browser", "chat", "workspace", "dashboard", "live", "scheduler", "gateway"]) {
       if (snap[key] !== undefined) {
         lastState.set(key === "live" ? "live" : key, snap[key]);
         emit(key === "live" ? "live" : key, snap[key]);
