@@ -2,12 +2,14 @@
 
 Owns: per-chat state machines, command routing (/browser /dashboard
 /cancel), media-to-text conversion (voice STT, image/file Workspace hints),
-agent execution with reason-first narration (reason before each event,
-raw output never dumped, final answer at the end).
+agent execution through the shared site session (the Agent page renders the
+same run live; the channel gets ONLY the final reply after it finishes).
 
-Flow per chat: messages collect for 5s -> one merged request -> run.
-A message arriving mid-run is queued (one notice) and runs right after.
-Inbound media converts at run time inside the worker. Never raises.
+Flow per chat: messages collect for 5s (every new message restarts the 5s)
+-> one merged request (one message per line, in order) -> run. A message
+arriving mid-run gets a fixed numbered ack and is queued; all queued texts
+merge and run once the loop finishes. /cancel stops the loop AND drops every
+queued query. Inbound media converts at run time inside the worker. Never raises.
 """
 from __future__ import annotations
 
@@ -100,6 +102,7 @@ def _state_for(key: tuple[str, str]) -> dict:
                 "running": False,
                 "cancel": None,
                 "notified": False,
+                "queued_count": 0,
             }
             _states[key] = st
         return st
@@ -216,18 +219,6 @@ def _convert_part(part: dict) -> tuple[str, str]:
     return text or f"[file received: {name}]", hint
 
 
-def _send_reason(channel: str, chat: str, seen: dict, *args) -> None:
-    try:
-        reason = str(args[2] if len(args) > 2 else "") if len(args) > 2 else ""
-    except Exception:
-        reason = ""
-    reason = (reason or "").strip()
-    if not reason or reason == seen.get("last"):
-        return
-    seen["last"] = reason
-    _send.send_text(channel, chat, f"▫️ {reason[:300]}")
-
-
 def _typing_loop(channel: str, chat: str, done) -> None:
     """Refresh the typing indicator until the run ends. Best-effort."""
     try:
@@ -291,6 +282,15 @@ def _run_parts(channel: str, chat: str, parts: list, cancel) -> None:
         log_event("run_end", f"{channel}:{chat}")
 
 
+def _merge_texts(texts: list[str]) -> str:
+    """One message per line, in arrival order (user's exact merge format)."""
+    try:
+        lines = [str(t or "").strip() for t in (texts or [])]
+        return "\n".join(line for line in lines if line).strip()
+    except Exception:
+        return ""
+
+
 def _run_parts_inner(channel: str, chat: str, parts: list, cancel, opts: dict | None = None) -> None:
     texts: list[str] = []
     hints: list[str] = []
@@ -304,7 +304,7 @@ def _run_parts_inner(channel: str, chat: str, parts: list, cancel, opts: dict | 
         if h:
             hints.append(h)
     extra = len(parts) - _MaxParts
-    body = "\n".join(texts).strip()
+    body = _merge_texts(texts)
     if hints:
         body += "\n\n[attachments]\n" + "\n".join(hints)
     if extra > 0:
@@ -313,17 +313,16 @@ def _run_parts_inner(channel: str, chat: str, parts: list, cancel, opts: dict | 
         _send.send_text(channel, chat, "Couldn't read that — try again.")
         return
     seen: dict = {}
-    if len(body) > 4000:
-        # Shared session input cap: long runs execute locally, unmirrored.
+    # ALWAYS mirror through the shared site session first (the Agent page
+    # renders the same run live with SSE typing animation). Local fallback
+    # only when the dashboard is unreachable — never for progress, only final.
+    result = _stream_dashboard_run(body, channel, chat, seen, cancel)
+    if result is None:
+        log_event("run_busy", f"{channel}:{chat} shared run busy, local fallback")
         result = _run_direct(body, channel, chat, seen, cancel)
-    else:
-        result = _stream_dashboard_run(body, channel, chat, seen, cancel)
-        if result is None:
-            log_event("run_busy", f"{channel}:{chat} shared run busy, local fallback")
-            result = _run_direct(body, channel, chat, seen, cancel)
-        elif isinstance(result, dict) and result.get("transport_error"):
-            log_event("run_fallback", f"{channel}:{chat} {result.get('transport_error')}")
-            result = _run_direct(body, channel, chat, seen, cancel)
+    elif isinstance(result, dict) and result.get("transport_error"):
+        log_event("run_fallback", f"{channel}:{chat} {result.get('transport_error')}")
+        result = _run_direct(body, channel, chat, seen, cancel)
     try:
         reply_to = ""
         if channel == "whatsapp" and (opts or {}).get("reply"):
@@ -349,24 +348,15 @@ def _run_parts_inner(channel: str, chat: str, parts: list, cancel, opts: dict | 
 
 
 def _run_direct(body: str, channel: str, chat: str, seen: dict, cancel) -> dict:
-    """Local agent run (fallback: shared session busy/unreachable/too long)."""
-    def _narrate_ev(text: str) -> None:
-        try:
-            r = str(text or "").strip()[:300]
-            if not r or r == seen.get("last"):
-                return
-            seen["last"] = r
-            _send.send_text(channel, chat, r)
-        except Exception:
-            pass
-
+    """Local agent run (last-resort fallback). Silent: the channel gets
+    ONLY the final reply (never progress texts)."""
     try:
         from core.agent.loop.engine import run_loop
 
         return run_loop(
             body,
-            on_tool_start=lambda *a: _send_reason(channel, chat, seen, *a),
-            on_event=lambda t, o=None, k=None, m=None, r=None, s=None: _narrate_ev(t),
+            on_tool_start=None,
+            on_event=None,
             on_question=None,
             restricted=False,
             cancel_flag=cancel,
@@ -376,26 +366,18 @@ def _run_direct(body: str, channel: str, chat: str, seen: dict, cancel) -> dict:
 
 
 def _stream_dashboard_run(body: str, channel: str, chat: str, seen: dict, cancel) -> dict | None:
-    """Run ONCE through the main site session; tee progress to the channel.
+    """Run ONCE through the main site session; channel gets ONLY the final.
 
     The dashboard Agent page renders the message + steps live from the same
-    frames (shared context, single execution). Returns the done payload,
-    None when the shared run is busy (caller falls back local), or
-    {"transport_error": ...} when unreachable (caller falls back local).
+    frames (shared context, single execution, real SSE typing animation).
+    Progress/live frames are never forwarded as channel texts — the reply
+    is sent after the run finishes. Returns the done payload, None when the
+    shared run stayed busy past the bounded wait (caller falls back local),
+    or {"transport_error": ...} when unreachable (caller falls back local).
     Never raises.
     """
     import json as _json
     import urllib.request as _urlreq
-
-    def _narrate(reason: str) -> None:
-        try:
-            r = str(reason or "").strip()[:300]
-            if not r or r == seen.get("last"):
-                return
-            seen["last"] = r
-            _send.send_text(channel, chat, f"▫️ {r}")
-        except Exception:
-            pass
 
     def _forward_cancel() -> None:
         try:
@@ -411,26 +393,58 @@ def _stream_dashboard_run(body: str, channel: str, chat: str, seen: dict, cancel
         except Exception:
             pass
 
-    try:
+    def _cancelled() -> bool:
+        try:
+            return bool(cancel is not None and cancel.is_set())
+        except Exception:
+            return False
+
+    def _open_stream():
         req = _urlreq.Request(
             _dashboard_url + "api/chat_stream",
-            data=_json.dumps({"message": body, "mode": "free", "source": "whatsapp"}).encode("utf-8"),
+            data=_json.dumps({"message": body, "mode": "free", "source": channel}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        return _urlreq.urlopen(req, timeout=None)
+
+    try:
         try:
-            res = _urlreq.urlopen(req, timeout=None)
+            res = _open_stream()
         except Exception as e:
-            code = getattr(e, "code", 0)
-            if code == 409:
+            if getattr(e, "code", 0) != 409:
+                return {"transport_error": f"dashboard unreachable: {str(e)[:120]}"}
+            # Website busy with its own run: bounded wait for the shared
+            # session (3s x 40 = ~120s), then give up to local fallback.
+            # Cancel-aware: a /cancel during the wait stops immediately.
+            waited = False
+            for _ in range(40):
+                if _cancelled():
+                    return {"cancelled": True}
+                try:
+                    time.sleep(3)
+                except Exception:
+                    break
+                if _cancelled():
+                    return {"cancelled": True}
+                try:
+                    res = _open_stream()
+                    waited = True
+                    break
+                except Exception as e2:
+                    if getattr(e2, "code", 0) != 409:
+                        return {"transport_error": f"dashboard unreachable: {str(e2)[:120]}"}
+                    continue
+            else:
                 return None
-            return {"transport_error": f"dashboard unreachable: {str(e)[:120]}"}
+            if not waited:
+                return None
     except Exception as e:
         return {"transport_error": str(e)[:120]}
     try:
         for raw in res:
             try:
-                if cancel is not None and cancel.is_set():
+                if _cancelled():
                     _forward_cancel()
                     try:
                         res.close()
@@ -449,21 +463,7 @@ def _stream_dashboard_run(body: str, channel: str, chat: str, seen: dict, cancel
             if not isinstance(fr, dict):
                 continue
             t = fr.get("type")
-            if t == "event_start":
-                _narrate(fr.get("reason") or fr.get("event") or "")
-            elif t == "event":
-                # Completion after the reason: same dedup key, so an
-                # identical label does not echo twice.
-                _narrate(fr.get("event") or "")
-            elif t == "live":
-                try:
-                    lv = fr.get("live") or {}
-                    u = lv.get("url") if isinstance(lv, dict) else ""
-                    if u:
-                        _send.send_text(channel, chat, f"Live: {str(u)[:500]}")
-                except Exception:
-                    pass
-            elif t == "done":
+            if t == "done":
                 # Normalize to the run_loop result shape (final_answer, ...).
                 return {"final_answer": fr.get("reply"),
                         "steps": fr.get("steps", 0),
@@ -475,7 +475,8 @@ def _stream_dashboard_run(body: str, channel: str, chat: str, seen: dict, cancel
                 return {"error": fr.get("error") or "run failed"}
             elif t == "cancelled":
                 return {"cancelled": True}
-            # ping/token/event/live_end ignored; questions impossible here.
+            # event/event_start/token/live/live_end/ping ignored here on purpose:
+            # the channel gets ONLY the final reply (animation lives on the site).
         return {"transport_error": "stream ended without result"}
     except Exception as e:
         return {"transport_error": f"stream failed: {str(e)[:120]}"}
@@ -500,6 +501,7 @@ def _worker(key: tuple[str, str]) -> None:
             cancel = threading.Event()
             st["cancel"] = cancel
             st["notified"] = False
+            st["queued_count"] = 0
         _run_parts(channel, chat, parts, cancel)
 
 
@@ -527,29 +529,43 @@ def _handle_command(msg: dict) -> bool:
         with st["lock"]:
             running = st["running"]
             cancel = st["cancel"]
+            pending = len(st["parts"])
+            timer = st["timer"]
+            st["timer"] = None
+            # Drop everything: the 5s-collected batch + every queued query.
+            st["parts"] = []
+            st["queued_count"] = 0
+            st["notified"] = False
+        try:
+            if timer is not None:
+                timer.cancel()
+        except Exception:
+            pass
         if running and cancel is not None:
             try:
                 cancel.set()
             except Exception:
                 pass
-            # Runs execute in the shared site session: stop that loop too.
-            try:
-                import urllib.request as _urlreq
+        # Runs execute in the shared site session: stop that loop too.
+        try:
+            import urllib.request as _urlreq
 
-                _urlreq.urlopen(
-                    _urlreq.Request(
-                        _dashboard_url + "api/chat_cancel",
-                        data=b"{}",
-                        headers={"Content-Type": "application/json"},
-                        method="POST",
-                    ),
-                    timeout=10,
-                )
-            except Exception:
-                pass
-            _send.send_text(channel, chat, "⏹ Stopping the run…")
+            _urlreq.urlopen(
+                _urlreq.Request(
+                    _dashboard_url + "api/chat_cancel",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ),
+                timeout=10,
+            )
+        except Exception:
+            pass
+        if running or pending:
+            _send.send_text(channel, chat, "⏹ اتلغى كل حاجة — اللوب الحالي وكل الرسائل المستنية.")
+            log_event("cancel", f"{channel}:{chat} running={running} dropped={pending}")
         else:
-            _send.send_text(channel, chat, "Nothing running.")
+            _send.send_text(channel, chat, "مفيش حاجة شغالة.")
         return True
     if cmd == "/browser":
         try:
@@ -599,16 +615,21 @@ def handle_incoming(msg: dict) -> None:
             if len(st["parts"]) > 60:
                 st["parts"] = st["parts"][-60:]
             if st["running"]:
-                if not st["notified"]:
-                    st["notified"] = True
-                    try:
-                        _send.send_text(
-                            key[0],
-                            key[1],
-                            "⏳ A run is already going — your message is queued and runs right after it finishes.",
-                        )
-                    except Exception:
-                        pass
+                # Mid-loop message: fixed numbered ack per message. All queued
+                # texts merge (one per line) and run once the loop finishes.
+                try:
+                    st["queued_count"] = int(st.get("queued_count") or 0) + 1
+                except Exception:
+                    st["queued_count"] = 1
+                n = st["queued_count"]
+                try:
+                    _send.send_text(
+                        key[0],
+                        key[1],
+                        f"📩 استلمت رسالتك ({n}) — هدمجها مع اللي بعدها وأنفذ الكل بعد ما أخلص الرد الحالي.",
+                    )
+                except Exception:
+                    pass
                 return
             try:
                 if st["timer"] is not None:

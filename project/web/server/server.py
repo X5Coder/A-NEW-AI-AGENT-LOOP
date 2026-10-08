@@ -3735,10 +3735,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_chat_stream(self):
         """Same as /api/chat but streams tool-call events live (SSE) as the loop runs.
 
-        Gateway runs (source=whatsapp) share this exact pipeline: one
-        execution, same session context, live on the Agent page. They run
-        unrestricted with no question pauses (identical to a direct run);
-        a busy session answers 409 so the channel falls back locally.
+        Gateway runs (source=whatsapp|telegram|gateway) share this exact
+        pipeline: one execution, same session context, live on the Agent page
+        with real SSE animation (steps + typed reply). They run unrestricted
+        with no question pauses (identical to a direct run); a busy session
+        answers 409 so the channel waits briefly, then falls back locally.
         """
         import queue as _queue
 
@@ -3749,7 +3750,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": str(e)}, status=e.status)
             return
 
-        gw = str(payload.get("source") or "") == "whatsapp"
+        gw = str(payload.get("source") or "").strip().lower() in ("whatsapp", "telegram", "gateway")
         if gw:
             try:
                 with _RUN_LOCK:

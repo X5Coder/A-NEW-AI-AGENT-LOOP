@@ -255,7 +255,7 @@ project/                           # == X5Agent/System Core (immutable engine, r
 ├── gateway/                            # messaging channels (server-authoritative config in Data/database/gateway.json)
 │   ├── store.py                        # validated WA/TG settings (token masked on read, never logged)
 │   ├── channels.py                     # outbound text senders per channel (chunked, best-effort)
-│   ├── dispatch.py                     # unified commands (/browser /dashboard /cancel) + 5s coalescing + queued runs + reason-first events + WA send options (read/typing/reply) + same-account LID auto-allow + runs execute once via the main chat_stream pipeline (mirrored live, local fallback when busy)
+│   ├── dispatch.py                     # unified commands (/browser /dashboard /cancel) + 5s coalescing (each msg restarts 5s, merged one-per-line) + queued runs with numbered fixed acks + final-only channel sends (live SSE animation on the site only) + full /cancel (loop + all queued dropped) + WA send options (read/typing/reply) + same-account LID auto-allow + runs execute once via the main chat_stream pipeline (mirrored live, bounded busy-wait, local fallback when unreachable)
 │   ├── service.py                      # auto-start: TG poller thread + WA push wiring (no WA threads, zero polling)
 │   ├── telegram/
 │   │   ├── adapter.py                  # Bot API: getMe + per-chat sendMessage test (stdlib only)

@@ -4333,18 +4333,49 @@ function onLivePush(data) {
   } catch (_) {}
 }
 
-function onChatDonePush(data) {
+async function onChatDonePush(data) {
   // A loop finished somewhere (this tab or another): if idle, the reply is
   // persisted now — reload once. Replaces the old catchup poller.
   try {
     if (data && data.gateway) {
       activeThinking = null;
       catchupResume = false;
+      // Remember replies already on screen so only the fresh gateway reply
+      // gets the real SSE-style typing animation below.
+      let known = null;
+      try {
+        known = new Set();
+        chatInner?.querySelectorAll(".msg.assistant").forEach((m) => {
+          if (m.dataset.mid) known.add(m.dataset.mid);
+        });
+      } catch (_) { known = null; }
       try {
         document.getElementById("thinkingMsg")?.remove();
         chatInner?.querySelectorAll(".msg.gateway-pending").forEach((item) => item.remove());
       } catch (_) {}
-      loadHistory().catch(() => {});
+      try { await loadHistory(); } catch (_) {}
+      // Gateway reply: same typing animation as a local run (typeRich on the
+      // reply text only — steps/images/voice stay as rendered). Best-effort.
+      try {
+        const assistants = chatInner ? Array.from(chatInner.querySelectorAll(".msg.assistant")) : [];
+        let target = null;
+        for (let i = assistants.length - 1; i >= 0; i--) {
+          const m = assistants[i];
+          if (known && m.dataset.mid && known.has(m.dataset.mid)) continue;
+          if (!String(m.dataset.raw || "").trim()) continue;
+          target = m;
+          break;
+        }
+        if (target) {
+          const raw = String(target.dataset.raw || "").slice(0, MAX_MESSAGE);
+          const content = target.querySelector(":scope > .msg-content");
+          const rich = content
+            ? content.querySelector(":scope > div:not(.thinking-block):not(.msg-final-shots):not(.msg-voice)")
+            : null;
+          if (raw && rich) await typeRich(rich, raw);
+          scrollToBottom();
+        }
+      } catch (_) {}
       return;
     }
     if (!isChatIdle()) return;
