@@ -102,6 +102,6 @@ def test_code_reads_store_first():
     src = (PROJECT_ROOT / "core" / "paths.py").read_text(encoding="utf-8")
     assert "x5store" in src and ".x5store" in src
     # Local dev (no /app/data): falls back to the normal X5Agent/Data.
-      assert str(_paths.data_root()).endswith(_os.path.join("X5Agent", "Data"))
+    assert str(_paths.data_root()).endswith(_os.path.join("X5Agent", "Data"))
     emb = (PROJECT_ROOT / "core" / "embedding" / "bootstrap.py").read_text(encoding="utf-8")
     assert "x5store" in emb
