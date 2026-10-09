@@ -1858,7 +1858,7 @@ async function sendStream(value, attachments, thinking) {
           finalEl.dataset.raw = replyText;
           finalEl.dataset.userText = value;
           attachAssistantBar(finalEl, replyText);
-          if (msg2.needs_model) appendNeedsModelButton(finalEl);
+          if (msg2.needs_model) appendNeedsModelButton(finalEl, msg2.needs_kind);
           return true;
         } else if (msg2?.type === "error") {
           thinking.remove();
@@ -1868,7 +1868,7 @@ async function sendStream(value, attachments, thinking) {
           const { el: errEl, p: perr } = appendAssistantShell();
           perr.textContent =
             `Error: ${[msg2.error, msg2.detail].filter(Boolean).join(" — ") || "request failed"}`;
-          if (msg2.needs_model) appendNeedsModelButton(errEl);
+          if (msg2.needs_model) appendNeedsModelButton(errEl, msg2.needs_kind);
           scrollToBottom();
           return true;
         }
@@ -1932,6 +1932,7 @@ async function sendBlocking(value, attachments, thinking) {
         [data?.error, data?.detail].filter(Boolean).join(" — ") || `HTTP ${res.status}`
       );
       err.needsModel = Boolean(data?.needs_model);
+      err.needsKind = String(data?.needs_kind || "text");
       throw err;
     }
     thinking.remove();
@@ -1946,12 +1947,13 @@ async function sendBlocking(value, attachments, thinking) {
     finalEl.dataset.raw = replyText;
     finalEl.dataset.userText = value;
     attachAssistantBar(finalEl, replyText);
+    if (data?.needs_model) appendNeedsModelButton(finalEl, data?.needs_kind);
   } catch (err) {
     thinking.remove();
     activeThinking = null;
     const { el: errEl, p } = appendAssistantShell();
     p.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
-    if (err && err.needsModel) appendNeedsModelButton(errEl);
+    if (err && err.needsModel) appendNeedsModelButton(errEl, err.needsKind);
     scrollToBottom();
   }
 }
@@ -1965,6 +1967,11 @@ async function handleSend() {
   // Open agent question: choice (or own reply) + SEND.
   if (pendingQuestion && pendingQuestion.kind === "ask") {
     await sendQuestionAnswer();
+    return;
+  }
+  // Model-activation pause: the loop waits for Skip / Activate buttons only.
+  if (pendingQuestion && pendingQuestion.kind === "needs_model") {
+    toast("Pick Skip or Activate model first");
     return;
   }
   const value = composerInput.value.trim().slice(0, MAX_MESSAGE);
@@ -2941,8 +2948,8 @@ function renderModeMenu() {
     icon.className = "mode-opt-icon";
     icon.setAttribute("aria-hidden", "true");
     icon.innerHTML = opt.val === "restricted"
-      ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 19 6v5.25c0 4.25-2.95 7.35-7 9.25-4.05-1.9-7-5-7-9.25V6l7-2.5Z"/><path d="m8.75 12 2.05 2.05 4.45-4.6"/></svg>`
-      : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13.1 2.75-7.2 10h5.2l-1 8.5 7.2-10h-5.2l1-8.5Z"/></svg>`;
+      ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5.2c0 4.2-2.9 7.3-7 9.2-4.1-1.9-7-5-7-9.2V6l7-2.5Z"/><path d="m8.8 12 2 2 4.4-4.6"/></svg>`
+      : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2.8 4.8 13.2h5.4L9 21.2l8.2-10.4h-5.4L13 2.8Z"/></svg>`;
     const txt = document.createElement("span");
     const title = document.createElement("b");
     title.textContent = opt.title;
@@ -3111,7 +3118,26 @@ function showQuestionCard(q) {
   const card = document.createElement("div");
   card.className = "question-card";
   card.id = "questionCard";
-  if (pendingQuestion.kind === "approval") {
+  if (pendingQuestion.kind === "needs_model") {
+    // Paused tool needs a model kind: Skip continues without it,
+    // Activate jumps to AI Models and auto-opens the right dialog.
+    const kind = String(q.needs_kind || "text").toLowerCase();
+    const tool = String(q.tool || "");
+    card.classList.add("needs-model");
+    card.innerHTML = `
+      <div class="question-kind">Model needed</div>
+      <div class="question-text"></div>
+      <div class="question-options">
+        <button type="button" class="glass-btn" data-decide="skip">Skip</button>
+        <button type="button" class="glass-btn accent" data-decide="activate">Activate model</button>
+      </div>`;
+    card.querySelector(".question-text").textContent =
+      q.text || (tool ? `Tool ${tool} needs a model that is not connected.` : "This task needs a model that is not connected.");
+    card.querySelectorAll("[data-decide]").forEach((btn) => {
+      btn.addEventListener("click", () => decideNeedsModel(q.id, btn.dataset.decide, kind));
+    });
+    pauseWorkingLoop();
+  } else if (pendingQuestion.kind === "approval") {
     card.innerHTML = `
       <div class="question-kind">Approval needed</div>
       <div class="question-command"></div>
@@ -3200,6 +3226,23 @@ async function decideApproval(qid, decision) {
   } catch (_) {
     toast("Answer failed");
   }
+}
+
+async function decideNeedsModel(qid, decision, kind) {
+  // Skip resumes the loop without the tool; activate stops it and
+  // deep-links to AI Models with that dialog auto-opened.
+  hideQuestionCard();
+  try {
+    await fetch("/api/chat_answer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: qid, decision }),
+    });
+  } catch (_) {
+    toast("Answer failed");
+    return;
+  }
+  if (decision === "activate") openModelPage(kind);
 }
 
 /* ---------------- live browser: control card + floating preview ---------------- */
@@ -4704,16 +4747,40 @@ function makeActBtn(icon, label, fn, danger) {
   return b;
 }
 
-function appendNeedsModelButton(shell) {
-  // Red shortcut under the no-model error state — jumps straight to the Models section.
+function openModelPage(kind) {
+  // Glass-button path: go to AI Models and auto-open that template dialog.
+  const k = String(kind || "text").toLowerCase();
+  try { navigate("ai-models"); } catch (_) {}
+  try {
+    setTimeout(() => {
+      try {
+        if (typeof window.openAiModelDialog === "function") window.openAiModelDialog(k);
+        else window.dispatchEvent(new CustomEvent("x5:open-model", { detail: { kind: k } }));
+      } catch (_) {}
+    }, 120);
+  } catch (_) {}
+}
+
+function appendNeedsModelButton(shell, kind) {
+  // Glass shortcut under the no-model state — message + glass button that
+  // jumps to AI Models and auto-opens the right dialog.
+  const k = String(kind || "text").toLowerCase();
   const content = shell.querySelector(".msg-content");
-  if (!content || content.querySelector(".needs-model-btn")) return;
+  if (!content || content.querySelector(".needs-model-wrap")) return;
+  const wrap = document.createElement("div");
+  wrap.className = "needs-model-wrap";
+  const note = document.createElement("div");
+  note.className = "needs-model-note";
+  note.textContent = "Connect a model to continue. One click opens the setup page.";
+  note.setAttribute("dir", "auto");
   const b = document.createElement("button");
   b.type = "button";
-  b.className = "needs-model-btn";
-  b.textContent = "Setup Model";
-  b.addEventListener("click", () => navigate("models"));
-  content.appendChild(b);
+  b.className = "needs-model-btn glass";
+  b.textContent = "Connect model";
+  b.addEventListener("click", () => openModelPage(k));
+  wrap.appendChild(note);
+  wrap.appendChild(b);
+  content.appendChild(wrap);
   scrollToBottom();
 }
 

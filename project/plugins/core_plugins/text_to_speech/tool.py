@@ -1,19 +1,25 @@
 """
-text_to_speech - speak text aloud with the fixed project voice in X5Agent/Data/files/audio.
-The voice is always the same custom "nova" identity (blended from the model's
-own preset styles + a deepening voice profile), so Arabic and English replies
-sound like one consistent speaker. The wav plays as a WhatsApp-style voice
-record inside the chat (served by /api/audio, rendered as a bubble).
-Delegates synthesis to models/tts/service.py (lazy load, 3 retries).
+text_to_speech - speak text via the connected AI Text to Speech model.
+Audio is saved in X5Agent/Data/files/audio and plays as a voice record
+inside the chat (served by /api/audio, rendered as a bubble).
+Refuses with a fixed message (+ model link) when no TTS model is connected.
+(Voice choice, if any, is fixed inside the Connection JSON.)
 """
 from __future__ import annotations
 
+import base64
 import uuid
 from pathlib import Path
 
 from .events import format_event
 
 MAX_AUDIO_BYTES = 8 * 1024 * 1024
+
+_EXT_BY_MIME = {
+    "audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav",
+    "audio/x-wav": ".wav", "audio/ogg": ".ogg", "audio/mp4": ".m4a",
+    "audio/webm": ".webm", "audio/flac": ".flac",
+}
 
 
 def _audio_dir() -> Path:
@@ -30,41 +36,61 @@ def _audio_dir() -> Path:
     return d.resolve()
 
 
+def _save_media(media: str, source: str) -> tuple[Path, int]:
+    """Decode base64/data-URL or download http(s) URL (capped). Returns (path, bytes)."""
+    import urllib.request as _url
+    if source == "url":
+        req = _url.Request(media, method="GET", headers={"User-Agent": "X5Agent/1.0"})
+        with _url.urlopen(req, timeout=120) as resp:
+            chunks: list[bytes] = []
+            total = 0
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            while True:
+                piece = resp.read(65536)
+                if not piece:
+                    break
+                total += len(piece)
+                if total > MAX_AUDIO_BYTES:
+                    raise ValueError("Spoken audio too large, send shorter text")
+                chunks.append(piece)
+            blob = b"".join(chunks)
+    else:
+        blob_b64 = media.split(",", 1)[1] if source == "data_url" and "," in media else media
+        try:
+            blob = base64.b64decode(blob_b64)
+        except Exception:
+            raise ValueError("The service returned unreadable audio data")
+        ctype = ""
+        if source == "data_url" and media.startswith("data:"):
+            ctype = media[5:].split(";", 1)[0].strip().lower()
+    if len(blob) > MAX_AUDIO_BYTES:
+        raise ValueError("Spoken audio too large, send shorter text")
+    ext = _EXT_BY_MIME.get(ctype, ".mp3")
+    out = _audio_dir() / f"tts_{uuid.uuid4().hex[:8]}{ext}"
+    out.write_bytes(blob)
+    return out, len(blob)
+
+
 def execute(text: str, voice: str | None = None, lang: str | None = None) -> dict:
     event = format_event(text=text if isinstance(text, str) else "")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text must be non-empty string")
-    # The project voice is fixed: any request resolves to the same custom
-    # identity so the speaker never changes. Explicit presets are rejected
-    # so callers cannot switch voices mid-conversation.
-    from models.tts.voices import default_voice_name, is_custom_voice
-    v = default_voice_name()
-    if isinstance(voice, str) and voice.strip() and is_custom_voice(voice.strip()):
-        v = voice.strip().lower()
-    lg = lang.strip().lower() if isinstance(lang, str) and lang.strip() else "ar"
-
-    from models.tts.service import synthesize
-    out = _audio_dir() / f"tts_{uuid.uuid4().hex[:8]}.wav"
+    if len(text) > 5000:
+        raise ValueError("text too long (max 5000 chars)")
+    from core.ai_models.store import require_model
+    from core.ai_models.engine import synthesize
+    record = require_model("tts")  # fixed refusal + model link when missing
     try:
-        result = synthesize(text=text, voice=v, lang=lg, out_path=out)
-    except (ValueError, TypeError, FileNotFoundError):
+        out = synthesize(record, {"text": text.strip()})
+    except RuntimeError:
         raise
     except Exception as e:
         raise RuntimeError(f"Speech synthesis failed: {e}") from None
-
-    size = int(result.get("size_bytes", 0))
-    if size > MAX_AUDIO_BYTES:
-        try:
-            out.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise ValueError("Spoken audio too large, send shorter text")
+    path, size = _save_media(out["media"], out.get("source", "base64"))
     return {
         "event": event,
-        "audio_path": out.name,
-        "duration_sec": result.get("duration_sec", 0),
+        "audio_path": path.name,
+        "duration_sec": 0,
         "size_bytes": size,
-        "voice": result.get("voice", v),
-        "lang": result.get("lang", lg),
-        "hint": f"Voice record saved as {out.name}. It plays inside the chat.",
+        "hint": f"Voice record saved as {path.name}. It plays inside the chat.",
     }

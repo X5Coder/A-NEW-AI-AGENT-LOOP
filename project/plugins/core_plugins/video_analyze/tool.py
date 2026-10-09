@@ -1,5 +1,5 @@
 """
-video_analyze - async video frame-by-frame analysis via SmolVLM2-500M.
+video_analyze - async video frame-by-frame analysis via the connected AI Vision Model.
 Each operation has job_id, model polls every wait period. Frames analyzed concurrently via ThreadPool for speed.
 Video not saved, only metadata sent to text model.
 """
@@ -197,11 +197,14 @@ def _extract_frames(video_path: Path, max_frames: int = 12) -> list[Path]:
         return []
 
 def _analyze_frame(frame_path: Path, prompt: str) -> dict:
-    """Analyze single frame via vision model, returns {frame, analysis}."""
+    """Analyze single frame via the connected AI Vision Model."""
     try:
-        from models.vision.service import analyze_image
-        # analyze_image expects image_path
-        ans = analyze_image(image_path=str(frame_path), prompt=prompt)
+        from core.ai_models.media import image_to_base64
+        from core.ai_models.store import require_model
+        from core.ai_models.engine import analyze
+        record = require_model("vision")  # fixed refusal + model link when missing
+        b64, mime = image_to_base64(frame_path)
+        ans = analyze(record, {"prompt": prompt, "image_base64": b64, "image_mime": mime})
         return {"frame": frame_path.name, "analysis": ans, "success": True}
     except Exception as e:
         return {"frame": frame_path.name, "analysis": f"Failed: {e}", "success": False}

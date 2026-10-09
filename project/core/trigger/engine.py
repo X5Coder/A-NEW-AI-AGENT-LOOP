@@ -34,6 +34,52 @@ MAX_ACTIVE_TRIGGERS = 50  # Rule 74: bound concurrent watchers, never unbounded.
 _LOCK = threading.Lock()
 _WATCHERS: dict[str, Any] = {}  # trigger_id -> watcher
 
+# Approved inbox/outbox layout (Workspace-relative). outbox/done is NEVER watched.
+FORBIDDEN_WATCH_SUFFIXES = ("outbox/done", "outbox\\done")
+
+
+def _resolve_watch_dir(watch_path: str) -> Path:
+    """Resolve watch_path inside Workspace first, fallback legacy project-relative. Never raises."""
+    raw = (watch_path or "").strip() or "inbox/docs"
+    # Block outbox/done explicitly to prevent write->trigger infinite loops.
+    lowered = raw.replace("\\", "/").lower().strip("/")
+    _parts = [p for p in lowered.split("/") if p]
+    for i in range(len(_parts) - 1):
+        if _parts[i] == "outbox" and _parts[i + 1] == "done":
+            raise ValueError("watch_path outbox/done is write-only and must never be watched")
+    try:
+        import sys as _sys
+        _proj = Path(__file__).resolve().parents[2]
+        _root = _proj if _proj.name == "project" else Path(__file__).resolve().parents[3]
+        if str(_root) not in _sys.path:
+            _sys.path.insert(0, str(_root))
+        from core.paths import resolve_inside_workspace, workspace_root
+        # Workspace-relative (preferred): inbox/docs, outbox/ready_upload, ...
+        if not Path(raw).is_absolute():
+            try:
+                return resolve_inside_workspace(raw)
+            except ValueError:
+                pass
+        else:
+            # Absolute outside Workspace is blocked.
+            try:
+                return resolve_inside_workspace(raw)
+            except ValueError:
+                raise ValueError("watch_path must be inside Workspace")
+        ws = workspace_root().resolve()
+        cand = (ws / raw).resolve()
+        try:
+            cand.relative_to(ws)
+            return cand
+        except ValueError:
+            raise ValueError("watch_path must be inside Workspace")
+    except ValueError:
+        raise
+    except Exception:
+        project_root = Path(__file__).resolve().parents[2]
+        return ((project_root / raw).resolve() if not Path(raw).is_absolute()
+                else Path(raw).resolve())
+
 
 def _load_triggers() -> list[dict]:
     for cand in (STORAGE, _LEGACY):
@@ -54,10 +100,10 @@ def _save_triggers(triggers: list[dict]) -> None:
 def _load_skill_content(skill_ref: str) -> str | None:
     if not skill_ref:
         return None
-    project_root = Path(__file__).resolve().parents[2]
-    target = project_root / "skills" / "trigger_skills" / skill_ref / "skill.json"
+    base = TRIGGER_SKILLS_DIR
+    target = base / skill_ref / "skill.json"
     try:
-        target.resolve().relative_to((project_root / "skills" / "trigger_skills").resolve())
+        target.resolve().relative_to(base.resolve())
     except ValueError:
         return None
     if not target.exists():
@@ -75,11 +121,14 @@ def _delete_skill_and_trigger(trigger_id: str):
         triggers.pop(idx)
         _save_triggers(triggers)
         if skill_ref:
-            project_root = Path(__file__).resolve().parents[2]
-            target = project_root / "skills" / "trigger_skills" / skill_ref
+            target = TRIGGER_SKILLS_DIR / skill_ref
+            try:
+                target.resolve().relative_to(TRIGGER_SKILLS_DIR.resolve())
+            except ValueError:
+                target = None
             try:
                 import shutil
-                if target.exists():
+                if target is not None and target.exists():
                     shutil.rmtree(str(target))
             except Exception:
                 pass
@@ -126,10 +175,9 @@ def _start_filesystem_watch(trigger: dict):
         # Fallback to polling
         return _start_polling_watch(trigger)
     config = trigger.get("config") or {}
-    watch_path = config.get("watch_path") or "storage/files/watch"
+    watch_path = config.get("watch_path") or "inbox/docs"
     pattern = config.get("pattern") or "*"
-    project_root = Path(__file__).resolve().parents[2]
-    watch_dir = (project_root / watch_path).resolve() if not Path(watch_path).is_absolute() else Path(watch_path).resolve()
+    watch_dir = _resolve_watch_dir(str(watch_path))
     # Ensure watch dir exists
     watch_dir.mkdir(parents=True, exist_ok=True)
 
@@ -185,10 +233,13 @@ def _start_polling_watch(trigger: dict):
     def poll():
         import time as _time
         config = trigger.get("config") or {}
-        watch_path = config.get("watch_path") or "storage/files/watch"
+        watch_path = config.get("watch_path") or "inbox/docs"
         pattern = config.get("pattern") or "*"
-        project_root = Path(__file__).resolve().parents[2]
-        watch_dir = (project_root / watch_path).resolve()
+        try:
+            watch_dir = _resolve_watch_dir(str(watch_path))
+        except ValueError as e:
+            print(f"[trigger engine] Invalid watch_path for {trigger.get('trigger_id')}: {e}")
+            return
         seen = set()
         # Initial scan
         if watch_dir.exists():

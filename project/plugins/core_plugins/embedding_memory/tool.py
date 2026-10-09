@@ -98,7 +98,7 @@ def _cosine(q: list[float], m: list[float]) -> float:
 
 
 def _do_store(chunk: str) -> dict:
-    from models.embedding.service import embed_texts
+    from core.embedding.service import embed_texts
     vectors = embed_texts([chunk], normalize=True)
     entries = _load()
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -112,7 +112,7 @@ def _do_store(chunk: str) -> dict:
 
 
 def _do_search(q: str, k: int) -> dict:
-    from models.embedding.service import embed_query
+    from core.embedding.service import embed_query
     entries = _load()
     if not entries:
         return {"event": format_event(query=q), "action": "search",

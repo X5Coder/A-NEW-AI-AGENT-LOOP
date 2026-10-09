@@ -1,7 +1,7 @@
 [project]
 name = "x5agent"
-version = "0.1.0"
-description = "Professional Agent Loop with local models (embedding/vision/stt/tts) and tool-discovery via embedding search"
+version = "0.2.0"
+description = "Professional Agent Loop with built-in embedding model and universal AI model connections (AI Models templates)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -24,21 +24,11 @@ dependencies = [
     "python-pptx>=1.0",
     "yt-dlp>=2024.8.6",
     "curl-cffi>=0.5",  # yt-dlp impersonation (required for TikTok)
-    "supertonic>=1.3",  # local TTS (Supertonic-3 ONNX, used by text_to_speech)
 ]
-
-[project.optional-dependencies]
-stt-ct2 = ["ctranslate2>=4.0", "faster-whisper>=1.0"]
-tts = ["supertonic>=1.3"]
-all = ["ctranslate2>=4.0", "faster-whisper>=1.0", "supertonic>=1.3", "torch>=2.2", "accelerate>=0.30"]
-
-[project.scripts]
-setup-models = "scripts.setup_models:main"
-doctor = "scripts.doctor:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "models*", "scripts*"]
+include = ["core*", "scripts*"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

@@ -1,6 +1,6 @@
 import sys, json, os
 from pathlib import Path
-project_root = Path(__file__).parent
+project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
 os.environ.setdefault("OPENROUTER_API_KEY", "test-dummy-key")
 

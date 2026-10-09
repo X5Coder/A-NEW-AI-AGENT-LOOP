@@ -1,6 +1,7 @@
 # X5Agent
 
-Professional local agent with 4 offline models.
+Professional agent with one built-in model (embedding) plus universal
+connections to any AI model through **AI Models** templates.
 
 ---
 
@@ -21,17 +22,13 @@ python main.py
 git clone https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP.git
 Set-Location A-NEW-AI-AGENT-LOOP/project
 pip install -e .
-python main.py
+python install.py              # one command: checks + updates + owner + console URL
+python -m web.server.server   # start the console (http://127.0.0.1:5173/)
 ```
 
----
-
-## Doctor
-
-```bash
-python scripts/doctor.py
-python scripts/setup_models.py --check
-```
+The bundled `embedding_model/` folder (~1.2 GB) ships with the project
+copy (release zip) and is used offline - nothing is downloaded on first run
+(GPU is used automatically when available, else CPU).
 
 ---
 
@@ -39,12 +36,11 @@ python scripts/setup_models.py --check
 
 | Model | Path | Size |
 | --- | --- | --- |
-| Embedding | `models/embedding/Qwen3-Embedding-0.6B` | 1.15 GB |
-| STT | `models/stt/whisper-medium-arabic-codeswitched-ct2` | 2.94 GB |
-| Vision | `models/vision/SmolVLM2-500M` | 1.94 GB |
-| TTS | `models/tts/supertonic-3` | 0.39 GB |
+| Embedding (built-in, hidden) | `embedding_model/` | 1.15 GB |
 
-Total: 6.28 GB
+Chat, vision, image, speech-to-text and text-to-speech are NOT shipped:
+connect any of them in the console under **AI Models** (5 fixed templates,
+same 4 fields each, universal Connection JSON).
 
 ---
 
@@ -52,11 +48,6 @@ Total: 6.28 GB
 
 ```bash
 python main.py
-python scripts/doctor.py
-python scripts/setup_models.py
-python scripts/setup_models.py --check
-python scripts/setup_models.py --only vision
-python scripts/setup_models.py --force
 ```
 
 ---
@@ -66,14 +57,8 @@ python scripts/setup_models.py --force
 ```
 project/
 ├── main.py
-├── models/
-│   ├── manifest.json
-│   ├── loader.py
-│   ├── embedding/
-│   ├── stt/
-│   ├── vision/
-│   └── tts/
-└── scripts/
-    ├── setup_models.py
-    └── doctor.py
+├── embedding_model/      # bundled embedding weights (offline, ships with release zip)
+├── core/
+│   ├── embedding/        # built-in embedding bootstrap + service
+│   └── ai_models/        # universal connection engine (5 templates)
 ```

@@ -107,6 +107,232 @@ mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/html", ".html")
 
 
+# Console version shown at the end of the sidebar (single source of truth,
+# keep in sync with pyproject.toml). Served via /api/dashboard.
+APP_VERSION = "0.2.0"
+
+UPDATE_REPO = "X5Coder/A-NEW-AI-AGENT-LOOP"
+
+# Source-only update job state (in-memory, one at a time, bounded lines).
+_UPDATE_STATE = {"state": "idle", "lines": [], "done": False, "ok": False,
+                 "restart_required": False}
+_UPDATE_LOCK = threading.Lock()
+
+
+def _update_log(line: str) -> None:
+    try:
+        with _UPDATE_LOCK:
+            _UPDATE_STATE["lines"].append(str(line)[:200])
+            del _UPDATE_STATE["lines"][:-50]
+    except Exception:
+        pass
+
+
+def _updates_local_path():
+    """Repo-root updates.json first, project-local copy as fallback. Never raises."""
+    try:
+        root_candidate = PROJECT_ROOT.parent / "updates.json"
+        if root_candidate.is_file():
+            return root_candidate
+        return PROJECT_ROOT / "updates.json"
+    except Exception:
+        return PROJECT_ROOT / "updates.json"
+
+
+def _read_updates_file(path):
+    """Read + validate an updates.json file. Returns ((version, description, features), None) or (None, error)."""
+    try:
+        raw = Path(path).read_bytes()
+    except Exception:
+        return None, "missing"
+    try:
+        if len(raw) > 20000:
+            return None, "file too large (max 20KB)"
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None, "invalid JSON"
+    if not isinstance(data, dict):
+        return None, "must be a JSON object"
+    version = data.get("version")
+    if not isinstance(version, str) or not version.strip() or len(version) > 20:
+        return None, 'needs a "version" string (e.g. "0.2.0")'
+    description = data.get("description", "")
+    if description is None:
+        description = ""
+    if not isinstance(description, str) or len(description) > 500:
+        return None, 'needs a "description" string (max 500 chars)'
+    features = data.get("features")
+    if not isinstance(features, list):
+        return None, 'needs a "features" list of strings'
+    clean = [str(f)[:300] for f in features[:50] if str(f).strip()]
+    return (version.strip(), description.strip(), clean), None
+
+
+def _fetch_remote_updates_json(timeout: int = 10):
+    """Fetch updates.json from GitHub raw (main, then master). Returns (parsed, error)."""
+    import urllib.error as _err
+    import urllib.request as _url
+
+    rel = "updates.json"  # repo root — single file, never a folder
+    last_error = "Could not reach GitHub (offline?)."
+    for branch in ("main", "master"):
+        url = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{branch}/{rel}"
+        try:
+            req = _url.Request(url, headers={"User-Agent": "x5agent-console"})
+            with _url.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+            import tempfile as _tf
+            with _tf.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(raw)
+                tmp_path = tmp.name
+            try:
+                parsed, err = _read_updates_file(tmp_path)
+            finally:
+                try:
+                    Path(tmp_path).unlink()
+                except Exception:
+                    pass
+            if err is not None:
+                return None, f"Remote updates.json is invalid ({err})."
+            return parsed, None
+        except _err.HTTPError as e:
+            if e.code == 404:
+                last_error = ("Remote updates.json not found on GitHub yet — "
+                              "push updates.json (repo root) first.")
+                continue
+            return None, f"GitHub answered with HTTP {e.code}."
+        except Exception:
+            last_error = "Could not reach GitHub (offline?)."
+    return None, last_error
+
+
+def _is_newer_version(remote: str, local: str) -> bool:
+    """True when the remote version is newer (numeric parts, fallback: different)."""
+    try:
+        def parts(v):
+            out = []
+            for chunk in str(v).strip().lstrip("v").split("."):
+                digits = ""
+                for ch in chunk:
+                    if ch.isdigit():
+                        digits += ch
+                    else:
+                        break
+                out.append(int(digits) if digits else 0)
+            return out
+        r, l = parts(remote), parts(local)
+        n = max(len(r), len(l))
+        r += [0] * (n - len(r))
+        l += [0] * (n - len(l))
+        return r > l
+    except Exception:
+        return str(remote) != str(local)
+
+
+def _local_version_info():
+    """Local version + short commit — never raises, never empty version."""
+    commit = None
+    try:
+        import subprocess as _sp
+
+        root = PROJECT_ROOT
+        if not (root / ".git").exists() and (root.parent / ".git").exists():
+            root = root.parent
+        proc = _sp.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(root),
+                       capture_output=True, text=True, timeout=10)
+        if proc.returncode == 0 and proc.stdout.strip():
+            commit = proc.stdout.strip()[:12]
+    except Exception:
+        commit = None
+    return APP_VERSION, commit
+
+
+def _github_latest_info():
+    """Local vs remote update state — never raises, always returns a dict.
+
+    Single source of truth: updates.json at the repo root (one file, no folder).
+    The check compares the local file with the same file on GitHub (raw)
+    and shows its description + features list before updating.
+    No GitHub releases needed.
+    """
+    local, local_commit = _local_version_info()
+
+    def _base(**kw):
+        out = {"local": local, "local_commit": local_commit, "latest": None,
+               "up_to_date": None, "source": "updates.json",
+               "notes": None, "error": None}
+        out.update(kw)
+        return out
+
+    local_parsed, local_err = _read_updates_file(_updates_local_path())
+    if local_parsed is None:
+        return _base(error=f"Local updates.json is {local_err} — "
+                           "expected updates.json at the repo root "
+                           "with {version, description, features}.")
+    local = local_parsed[0]
+    remote_parsed, remote_err = _fetch_remote_updates_json()
+    if remote_parsed is None:
+        return _base(error=remote_err)
+    remote_version, remote_description, remote_features = remote_parsed
+    if not _is_newer_version(remote_version, local):
+        return _base(latest=remote_version, up_to_date=True)
+    blocks = []
+    if remote_description:
+        blocks.append(remote_description)
+    blocks.extend(f"• {f}" for f in remote_features)
+    return _base(latest=remote_version, up_to_date=False,
+                 notes="\n".join(blocks) or None)
+
+
+def _run_update_job() -> None:
+    """Background: git pull --ff-only (tracked code only) + re-ensure embeddings. Never raises."""
+    try:
+        import subprocess as _sp
+
+        root = PROJECT_ROOT
+        if not (root / ".git").exists() and (root.parent / ".git").exists():
+            root = root.parent
+        _update_log(f"$ git pull --ff-only  ({root.name}/)")
+        try:
+            proc = _sp.run(["git", "pull", "--ff-only"], cwd=str(root),
+                           capture_output=True, text=True, timeout=300)
+        except FileNotFoundError:
+            raise RuntimeError("git is not installed")
+        for line in ((proc.stdout or "") + (proc.stderr or "")).splitlines()[:50]:
+            if line.strip():
+                _update_log(line.strip()[:200])
+        if proc.returncode != 0:
+            raise RuntimeError("git pull did not fast-forward (local changes?)")
+        # Specs may have changed -> re-ensure embeddings (seed/rebuild, bounded).
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            import importlib.util as _il
+
+            def _load(rel, name):
+                spec = _il.spec_from_file_location(name, str(PROJECT_ROOT / rel))
+                mod = _il.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+
+            tools = _load("plugins/tool-discovery/search/store.py", "upd_tools").ensure_embeddings()
+            trigs = _load("plugins/trigger-discovery/search/store.py", "upd_trigs").ensure_embeddings()
+            _update_log(f"embeddings ready: {len(tools)} tools, {len(trigs)} triggers")
+        except Exception as e:
+            _update_log(f"embedding warmup skipped: {str(e)[:120]}")
+        with _UPDATE_LOCK:
+            _UPDATE_STATE.update({"state": "done", "done": True, "ok": True,
+                                  "restart_required": True})
+            _UPDATE_STATE["lines"].append("Done - restart the console to apply the new code.")
+    except Exception as e:
+        try:
+            with _UPDATE_LOCK:
+                _UPDATE_STATE.update({"state": "error", "done": True, "ok": False})
+                _UPDATE_STATE["lines"].append(f"Update failed: {str(e)[:200]}")
+        except Exception:
+            pass
+
+
 def _safe_json_load(path: Path, default):
     """Read JSON file safely — returns default on missing/invalid."""
     try:
@@ -198,6 +424,7 @@ def _get_dashboard_data() -> dict:
         "status": "operational",
         "uptime": uptime_str,
         "uptime_since": _dt.datetime.fromtimestamp(SERVER_START).astimezone().isoformat(),
+        "version": APP_VERSION,
     }
 
 
@@ -225,7 +452,7 @@ def _get_plugins_data() -> dict:
         "read_file": {"title": "Read File", "version": "v1.1.0", "user_desc": "Read files safely with path validation.", "icon": "RF"},
         "write_file": {"title": "Write File", "version": "v1.1.0", "user_desc": "Create files with path validation.", "icon": "WF"},
         "search_files": {"title": "Search Files", "version": "v1.0.0", "user_desc": "Find files by name and content.", "icon": "SF"},
-        "vision_analyze": {"title": "Vision Analyze", "version": "v2.0.0", "user_desc": "Analyze images locally with SmolVLM2-500M.", "icon": "VA"},
+        "vision_analyze": {"title": "Vision Analyze", "version": "v2.0.0", "user_desc": "Analyze images with the connected AI Vision Model.", "icon": "VA"},
         "video_analyze": {"title": "Video Analyze", "version": "v1.3.0", "user_desc": "Analyze video frame by frame in parallel.", "icon": "VA"},
         "video_transcribe": {"title": "Video Transcribe", "version": "v1.2.0", "user_desc": "Extract video audio and transcribe with Whisper.", "icon": "VT"},
         "skill_create": {"title": "Skill Create", "version": "v1.0.0", "user_desc": "Create reusable skills for future use.", "icon": "SC"},
@@ -444,109 +671,14 @@ def _get_skills_data() -> dict:
     return {"count": len(result), "skills": result}
 
 
-CLOUD_PROVIDERS = [
-    {
-        "id": "openrouter",
-        "name": "OpenRouter",
-        "tag": "OR",
-        "description": "Unified gateway — DeepSeek, Claude, Gemini, Llama via one key. Used for chat.",
-        "base_url": "https://openrouter.ai/api/v1",
-        "models": ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-chat", "openai/gpt-4o-mini", "openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini-2.0-flash"],
-        "routable": True,
-    },
-    {
-        "id": "openai",
-        "name": "OpenAI",
-        "tag": "OA",
-        "description": "GPT models via the official OpenAI API.",
-        "base_url": "https://api.openai.com/v1",
-        "models": ["gpt-4o-mini", "gpt-4o", "o1-mini"],
-        "routable": False,
-    },
-    {
-        "id": "anthropic",
-        "name": "Anthropic",
-        "tag": "AN",
-        "description": "Claude models for long-context reasoning and writing.",
-        "base_url": "https://api.anthropic.com",
-        "models": ["claude-sonnet-4", "claude-haiku-3-5"],
-        "routable": False,
-    },
-    {
-        "id": "google",
-        "name": "Google AI",
-        "tag": "GO",
-        "description": "Gemini models with multimodal understanding.",
-        "base_url": "https://generativelanguage.googleapis.com",
-        "models": ["gemini-2.0-flash", "gemini-1.5-pro"],
-        "routable": False,
-    },
-    {
-        "id": "deepseek",
-        "name": "DeepSeek",
-        "tag": "DS",
-        "description": "DeepSeek chat and reasoner via the official API.",
-        "base_url": "https://api.deepseek.com/v1",
-        "models": ["deepseek-chat", "deepseek-reasoner"],
-        "routable": False,
-    },
-]
-
-def _providers_path() -> Path:
-    # Unified: writes ALWAYS to X5Agent/Data (zip backup). Fallback legacy only if resolver missing.
-    try:
-        from core.paths import data_db_file
-        return data_db_file("model_providers.json")
-    except Exception:
-        return PROJECT_ROOT / "storage" / "database" / "model_providers.json"
-
-
-PROVIDERS_PATH = _providers_path()
-_PROVIDERS_LEGACY = PROJECT_ROOT / "storage" / "database" / "model_providers.json"
-
-
-def _load_providers() -> dict:
-    for cand in (PROVIDERS_PATH, _PROVIDERS_LEGACY):
-        try:
-            if cand.exists():
-                data = json.loads(cand.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    if not isinstance(data.get("providers"), dict):
-                        data["providers"] = {}
-                    return data
-        except Exception:
-            continue
-    return {"providers": {}}
-
-
-def _save_providers(data: dict) -> None:
-    PROVIDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = PROVIDERS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(PROVIDERS_PATH)
-
-
-def _mask_key(key: str) -> str:
-    k = str(key or "")
-    if not k:
-        return ""
-    if len(k) <= 4:
-        return "••••"
-    return "••••" + k[-4:]
-
-
-PROVIDER_ENV = {
-    "openrouter": "OPENROUTER_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "google": "GOOGLE_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-}
+# NOTE: the old per-provider cloud vault is gone. Chat models connect through
+# AI Models templates (core/ai_models/store.py); each key is mirrored to
+# Data/.env under its own AI_<KIND>_API_KEY name and never returned to the UI.
 
 # No canned agent replies exist anywhere: when no model is connected the APIs
 # below fail clearly (HTTP 503 / SSE error frame) and the UI shows an error
 # state with a shortcut to Models. Every chat reply is written by the AI only.
-NO_MODEL_ERROR = "No model connected. Connect a model in Models before sending."
+NO_MODEL_ERROR = "No text model configured. Open AI Models → AI Text Model, press Test, then Save."
 
 
 def _valid_env_name(env_name: str) -> bool:
@@ -620,167 +752,54 @@ def _remove_env_key(env_name: str) -> None:
 
 
 def _chat_readiness() -> tuple:
-    """Returns (ready, model, api_key). Ready only when a routable provider is
-    active in the vault AND has a key saved. No env/default fallback — the UI state is real."""
-    data = _load_providers()
-    providers = data.get("providers", {})
-    active = data.get("active")
-    if not isinstance(active, str) or not active:
-        return False, "", None
-    cat = next((c for c in CLOUD_PROVIDERS if c["id"] == active), None)
-    if not cat or not cat.get("routable"):
-        return False, "", None
-    entry = providers.get(active, {})
-    key = str(entry.get("api_key") or "").strip() if isinstance(entry, dict) else ""
-    model = str(entry.get("model") or "").strip() if isinstance(entry, dict) else ""
-    if not key:
-        return False, "", None
-    return True, (model or "deepseek/deepseek-v4.1-flash"), key
-
-
-def _resolve_chat_model() -> tuple:
-    """Resolve (model, api_key) for chat from the vault only (no env fallback)."""
-    ready, model, key = _chat_readiness()
-    if ready:
-        return model, key
-    vault = _load_providers().get("providers", {}).get("openrouter", {})
-    model = str(vault.get("model") or "").strip() if isinstance(vault, dict) else ""
-    return (model or "deepseek/deepseek-v4.1-flash"), None
-
-
-# One model download at a time: {lock, current, jobs: {id: {state, detail, expected_mb}}}
-_MODEL_DL = {"lock": threading.Lock(), "current": None, "jobs": {}}
-
-
-def _model_download_dir_size_mb(target) -> float:
-    try:
-        total = 0
-        count = 0
-        for base, _dirs, files in __import__("os").walk(str(target)):
-            for f in files:
-                try:
-                    total += (Path(base) / f).stat().st_size
-                except Exception:
-                    continue
-                count += 1
-                if count > 200000:
-                    break
-        return round(total / (1024 * 1024), 1)
-    except Exception:
-        return 0.0
-
-
-def _run_model_download(mid: str) -> None:
+    """Returns (ready, model, api_key). Ready only when the universal text model
+    (AI Models section) is configured. No env/default fallback — the UI state is real."""
     try:
         if str(PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(PROJECT_ROOT))
-        from scripts.setup_models import ensure_single_model, get_project_root, load_manifest
+        from core.ai_models.store import get_text_model as _ai_get
+        rec = _ai_get()
+        if rec is not None:
+            return True, (rec.get("model_name") or "text"), None
+    except Exception:
+        pass
+    return False, "", None
 
-        proot = get_project_root()
-        manifest = load_manifest(proot)
-        entry = next((m for m in manifest.get("models", []) if m.get("id") == mid), None)
-        if entry is None:
-            raise ValueError(f"unknown model: {mid}")
-        with _MODEL_DL["lock"]:
-            _MODEL_DL["jobs"][mid]["expected_mb"] = int(entry.get("expected_size_mb", 0) or 0)
-        ensure_single_model(proot, entry)
-        with _MODEL_DL["lock"]:
-            _MODEL_DL["jobs"][mid] = {"state": "ready", "detail": "", "expected_mb": _MODEL_DL["jobs"][mid].get("expected_mb", 0)}
-    except Exception as e:
-        with _MODEL_DL["lock"]:
-            prev = _MODEL_DL["jobs"].get(mid, {})
-            _MODEL_DL["jobs"][mid] = {"state": "error", "detail": str(e)[:200], "expected_mb": prev.get("expected_mb", 0)}
-    finally:
-        with _MODEL_DL["lock"]:
-            if _MODEL_DL["current"] == mid:
-                _MODEL_DL["current"] = None
+
+def _resolve_chat_model() -> tuple:
+    """Resolve (model, api_key) for chat from the AI Models store (compat shim)."""
+    ready, model, _key = _chat_readiness()
+    if ready:
+        return model, None
+    return "", None
 
 
 def _get_models_data() -> dict:
-    """Local models (live scan) + cloud provider vault. Secrets never leave the server (hint only)."""
-    import os
-
+    """Dashboard compat: chat-model state from the AI Models store (universal templates)."""
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
-    try:
-        from models.loader import scan_local_models
-        from core.tools.registry import get_plugin_state, is_model_effective
-
-        scanned = scan_local_models()
-        _mst = get_plugin_state().get("models", {})
-    except Exception:
-        scanned = []
-        _mst = {}
-
-    local = []
-    for m in scanned:
-        mid = str(m.get("id") or "")
-        try:
-            effective = is_model_effective(mid)
-        except Exception:
-            effective = True
-        local.append({
-            "id": mid,
-            "name": str(m.get("name") or mid),
-            "description": str(m.get("description") or ""),
-            "type": str(m.get("type") or "custom"),
-            "local_dir": str(m.get("local_dir") or ""),
-            "used_by": str(m.get("used_by") or ""),
-            "plugins": [p for p in (m.get("plugins") or []) if isinstance(p, str)],
-            "status": str(m.get("status") or "missing"),
-            "enabled": _mst.get(mid, {}).get("enabled", True) is not False,
-            "effective": bool(effective),
-        })
-
-    pdata = _load_providers()
-    vault = pdata.get("providers", {})
-    _raw_aid = pdata.get("active")
-    active_id = str(_raw_aid) if isinstance(_raw_aid, str) and _raw_aid else None
-    cloud = []
-    for cat in CLOUD_PROVIDERS:
-        pid = cat["id"]
-        entry = vault.get(pid, {}) if isinstance(vault.get(pid), dict) else {}
-        saved_key = str(entry.get("api_key") or "")
-        # Connected reflects a key saved through the UI only — no env/default magic.
-        connected = bool(saved_key.strip())
-        if pid == "openrouter":
-            current_model = str(entry.get("model") or "").strip() or "deepseek/deepseek-v4.1-flash"
-        else:
-            current_model = str(entry.get("model") or (cat["models"][0] if cat["models"] else ""))
-        # Activation (switch) is separate from configuration (saved key).
-        # Exclusive: only the active provider reports active=true; None means all off.
-        is_active = (pid == active_id)
-        cloud.append({
-            "id": pid,
-            "name": cat["name"],
-            "tag": cat["tag"],
-            "description": cat["description"],
-            "base_url": cat["base_url"],
-            "models": list(cat["models"]),
-            "routable": cat["routable"],
-            "has_key": bool(saved_key.strip()),
-            "key_hint": _mask_key(saved_key),
-            "model": current_model,
-            "connected": connected,
-            "active": bool(is_active),
-        })
+    local: list = []
+    cloud: list = []
+    active_id = None
 
     default_model, _ = _resolve_chat_model()
     ready, _, _ = _chat_readiness()
-    live = next((c for c in cloud if c["active"] and c["routable"] and c["connected"]), None)
+    # Source of truth is the AI Models store (universal text model); the old
+    # cloud vault above is kept for backward-compat reads only.
+    live = {"id": "text", "name": "AI Text Model"} if ready else None
     return {
         "local": local,
         "cloud": cloud,
         "remote": {
-            "id": live["id"] if live else "openrouter",
-            "name": live["name"] if live else "OpenRouter",
-            "connected": bool(live),
-            "default_model": default_model,
+            "id": "text",
+            "name": "AI Text Model",
+            "connected": bool(ready),
+            "default_model": default_model or "—",
         },
-        "default_model": default_model,
-        "model": default_model,
-        "provider": live["name"] if live else "",
-        "active_provider": active_id,
+        "default_model": default_model or "—",
+        "model": default_model or "—",
+        "provider": "AI Text Model" if ready else "",
+        "active_provider": "text" if ready else None,
         "chat_ready": bool(ready),
     }
 
@@ -931,100 +950,13 @@ def _get_pricing() -> tuple[dict, str]:
     return {}, "unavailable"
 
 
-# Balance cache: provider key quota must not be queried on every dashboard tick.
-_BALANCE_CACHE: dict = {"at": 0.0, "data": None}
-_BALANCE_TTL_SECONDS = 300
-_OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/auth/key"
-
-
-def _query_openrouter_balance(api_key: str) -> dict | None:
-    """
-    Query OpenRouter for the key's usage/limit. Returns dict or None on failure.
-    Stdlib only (no new dependency), server-side, short timeout, max 2 attempts.
-    Never logs the key.
-    """
-    import json as _json
-    import urllib.request as _url
-
-    last: Exception | None = None
-    for _attempt in (1, 2):
-        try:
-            req = _url.Request(
-                _OPENROUTER_KEY_URL,
-                headers={"Authorization": "Bearer " + api_key},
-            )
-            with _url.urlopen(req, timeout=8) as resp:
-                if resp.status != 200:
-                    return None
-                payload = _json.loads(resp.read().decode("utf-8"))
-            data = payload.get("data") if isinstance(payload, dict) else None
-            return data if isinstance(data, dict) else None
-        except Exception as e:
-            last = e
-            continue
-    return None
-
-
 def _get_balance_data() -> dict:
     """
-    Current spendable balance for the Balance card.
-    - Own OpenRouter key with a limit -> remaining USD (limit - usage).
-    - Own key without a limit (or non-OpenRouter own key) -> unlimited (local project has no quota).
-    - No provider connected -> balance None (UI shows connective empty state).
-    Result cached 5 minutes. Never exposes any key.
+    Balance card: universal templates bill on their own services, so there is
+    no single quota to show. Returns the connective empty state (the UI points
+    to AI Models). Never exposes any key.
     """
-    import time as _time
-
-    now = _time.time()
-    try:
-        cached = _BALANCE_CACHE.get("data")
-        if cached is not None and now - float(_BALANCE_CACHE.get("at", 0)) < _BALANCE_TTL_SECONDS:
-            return cached
-    except Exception:
-        pass
-
-    result: dict = {"balance": None, "currency": "USD", "unlimited": False, "label": ""}
-    try:
-        data = _load_providers()
-        providers = data.get("providers", {}) if isinstance(data, dict) else {}
-        active = data.get("active") if isinstance(data, dict) else None
-        entry = providers.get(active) if isinstance(active, str) else None
-        key = str(entry.get("api_key") or "").strip() if isinstance(entry, dict) else ""
-        if not key:
-            result["label"] = "no provider"
-            return result
-        if active == "openrouter":
-            info = _query_openrouter_balance(key)
-            if info is None:
-                # Quota endpoint unreachable: fall back to unlimited display rather than a wrong $0.
-                result["unlimited"] = True
-                result["label"] = "own API key"
-                return result
-            limit = info.get("limit")
-            if limit is None:
-                result["unlimited"] = True
-                result["label"] = "own API key"
-            else:
-                try:
-                    usage = float(info.get("usage") or 0)
-                    remaining = max(0.0, float(limit) - usage)
-                except Exception:
-                    remaining = 0.0
-                result["balance"] = round(remaining, 2)
-                result["label"] = str(info.get("label") or "openrouter")[:64]
-        else:
-            # Own key on a direct provider: billed by the provider, no local quota.
-            result["unlimited"] = True
-            result["label"] = "own API key"
-    except Exception:
-        pass
-
-    try:
-        _BALANCE_CACHE["at"] = now
-        _BALANCE_CACHE["data"] = result
-    except Exception:
-        pass
-    return result
+    return {"balance": None, "currency": "USD", "unlimited": False, "label": "own models"}
 
 
 class _ChatError(Exception):
@@ -1688,9 +1620,29 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/models":
             self._handle_models_api()
             return
+        if parsed.path == "/api/ai_models":
+            self._handle_ai_models_get()
+            return
+        if parsed.path == "/api/ai_models/setup_prompt":
+            self._handle_ai_models_setup_prompt_get()
+            return
+        if parsed.path == "/api/embedding_status":
+            self._handle_embedding_status_get()
+            return
+        if parsed.path == "/api/update_check":
+            self._handle_update_check_get()
+            return
+        if parsed.path == "/api/update_progress":
+            self._handle_update_progress_get()
+            return
         if parsed.path == "/api/model_download":
-            mid = parse_qs(parsed.query).get("id", [""])[0]
-            self._handle_model_download_get(mid)
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
+            return
+        if parsed.path == "/api/requirements":
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
+            return
+        if parsed.path == "/api/requirements/status":
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
             return
         if parsed.path == "/api/live_state":
             self._handle_live_state_api()
@@ -1769,16 +1721,40 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_plugin_state_post()
             return
         if parsed.path == "/api/model_state":
-            self._handle_model_state_post()
+            self._send_json({"error": "Removed — local models are gone; connect models in AI Models."}, status=410)
+            return
+        if parsed.path == "/api/ai_models/save":
+            self._handle_ai_models_save_post()
+            return
+        if parsed.path == "/api/ai_models/test":
+            self._handle_ai_models_test_post()
+            return
+        if parsed.path == "/api/ai_models/clear":
+            self._handle_ai_models_clear_post()
+            return
+        if parsed.path == "/api/update_run":
+            self._handle_update_run_post()
             return
         if parsed.path == "/api/model_download":
-            self._handle_model_download_post()
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
+            return
+        if parsed.path == "/api/requirements/download":
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
+            return
+        if parsed.path == "/api/requirements/resume":
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
+            return
+        if parsed.path == "/api/requirements/pause":
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
+            return
+        if parsed.path == "/api/doctor":
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
             return
         if parsed.path == "/api/providers":
-            self._handle_providers_post()
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
             return
         if parsed.path == "/api/providers/test":
-            self._handle_provider_test_post()
+            self._send_json({"error": "Removed — configure your model in AI Models."}, status=410)
             return
         if parsed.path == "/api/skills":
             self._handle_skill_create_post()
@@ -2930,11 +2906,238 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": "skill save failed", "detail": str(e)[:200]}, status=500)
 
     def _handle_models_api(self):
+        # Compat shim: the Dashboard "Current Model" card reads /api/models.
+        # Source of truth is now the AI Models store (universal text model).
         try:
-            data = _get_models_data()
-            self._send_json(data)
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.ai_models.store import public_text_model as _ai_public
+            pub = _ai_public()
+            name = str(pub.get("model_name") or "").strip() or "—"
+            self._send_json({
+                "local": [], "cloud": [], "remote": {
+                    "id": "text", "name": name,
+                    "connected": bool(pub.get("configured")),
+                    "default_model": name,
+                },
+                "default_model": name, "model": name,
+                "provider": "", "active_provider": None,
+                "chat_ready": bool(pub.get("configured")),
+            })
         except Exception as e:
             self._send_json({"error": "failed to load models", "detail": str(e)}, status=500)
+
+    def _handle_ai_models_get(self):
+        """GET /api/ai_models — UI-safe view of every template (keys never returned)."""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.ai_models.store import KINDS as _KINDS, public_model as _ai_public
+            self._send_json({k: _ai_public(k) for k in _KINDS})
+        except Exception as e:
+            self._send_json({"error": "failed to load AI models", "detail": str(e)[:200]}, status=500)
+
+    def _handle_ai_models_setup_prompt_get(self):
+        """GET /api/ai_models/setup_prompt?kind=text — the per-kind section of
+        models_prompts.md (single file, `## KIND:` sections)."""
+        try:
+            from urllib.parse import parse_qs as _pqs, urlparse as _up
+            kind = _pqs(_up(self.path).query).get("kind", ["text"])[0]
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.ai_models.store import KINDS as _KINDS
+            from core.ai_models.models_prompts import get_prompt as _get_prompt
+            if kind not in _KINDS:
+                kind = "text"
+            text = _get_prompt(kind)
+            if not text.strip():
+                raise FileNotFoundError("prompt section empty")
+            self._send_json({"kind": kind, "prompt": text})
+        except Exception as e:
+            self._send_json({"error": "setup prompt unavailable", "detail": str(e)[:200]}, status=500)
+
+    def _ai_record_from_payload(self, payload: dict) -> tuple:
+        """Returns (kind, record). Raises _ChatError on bad kind/config shape."""
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from core.ai_models.store import KINDS as _KINDS
+        kind = str(payload.get("kind") or "text")
+        if kind not in _KINDS:
+            raise _ChatError(f"unknown model kind '{kind}'")
+        config = payload.get("parser_definition", payload.get("config_json"))
+        if isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except Exception:
+                raise _ChatError("Parser Definition is not valid JSON.")
+        if not isinstance(config, dict):
+            raise _ChatError("Parser Definition must be an object.")
+        api_url = str(payload.get("api_url") or "")
+        if len(api_url) > 2000:
+            raise _ChatError("API URL too long.")
+        if api_url.lower().startswith(("javascript:", "file:", "data:", "ftp:")):
+            raise _ChatError("API URL must be an http(s) path.")
+        api_key = str(payload.get("api_key") or "")
+        if not api_key and ("keep_key" not in payload or payload.get("keep_key")):
+            # Empty key field: the dialog shows dots, not the real value.
+            # Reuse the stored key so Test/Save keep working after reopening
+            # the dialog (old clients send no keep_key flag at all; new ones
+            # send keep_key=false only when the field was cleared on purpose).
+            try:
+                from core.ai_models.store import get_model as _get_stored
+                _stored = _get_stored(kind)
+                if isinstance(_stored, dict) and str(_stored.get("api_key") or ""):
+                    api_key = str(_stored.get("api_key"))
+            except Exception:
+                pass
+        return kind, {
+            "model_name": str(payload.get("model_name") or ""),
+            "server_url": str(payload.get("server_url") or ""),
+            "api_url": api_url,
+            "api_key": api_key,
+            "config_json": config,
+            "parser_definition": config,
+            "kind": kind,
+        }
+
+    def _handle_ai_models_test_post(self):
+        """POST /api/ai_models/test {kind, model_name, server_url, api_url, api_key, parser_definition} —
+        AIP/1 parser goes through the interpreter; legacy connection JSON uses the engine.
+        Never echoes the key. Marks session-tested on success."""
+        try:
+            payload = self._read_json_body(100000)
+        except _ChatError as e:
+            self._send_json({"error": str(e)}, status=e.status)
+            return
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.ai_models import engine as _eng
+            from core.ai_models.store import mark_tested as _mark
+            try:
+                kind, record = self._ai_record_from_payload(payload)
+            except _ChatError as e:
+                self._send_json({"ok": False, "error": {
+                    "category": "invalid_config", "message": str(e),
+                    "technical": str(e), "copyable": str(e)}}, status=400)
+                return
+            cfg = record.get("parser_definition") or {}
+            if isinstance(cfg, dict) and cfg.get("language") == "AIP/1":
+                from core.ai_models import aip as _aip
+                result = _aip.test_connection(record, kind)
+            else:
+                result = _eng.test_connection(record)
+            if result.get("ok"):
+                try:
+                    _mark(kind)
+                except Exception:
+                    pass
+            self._send_json(result)
+        except Exception as e:
+            self._send_json({"ok": False, "error": {
+                "category": "server", "message": f"Test failed: {e}"[:300],
+                "technical": str(e)[:300], "copyable": str(e)[:500]}}, status=500)
+
+    def _handle_ai_models_save_post(self):
+        """POST /api/ai_models/save {kind, model_name, server_url, api_key, config_json, force} —
+        persists only after a Test pass in this session, unless force=true (explicit override)."""
+        try:
+            payload = self._read_json_body(100000)
+        except _ChatError as e:
+            self._send_json({"error": str(e)}, status=e.status)
+            return
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.ai_models.store import save_model as _save
+            try:
+                kind, record = self._ai_record_from_payload(payload)
+            except _ChatError as e:
+                self._send_json({"error": str(e)}, status=400)
+                return
+            pub = _save(
+                kind,
+                record["model_name"], record["server_url"], record["api_key"],
+                record["config_json"],
+                force=bool(payload.get("force")),
+                api_url=record.get("api_url", ""),
+            )
+            self._send_json({"ok": True, "model": pub})
+        except PermissionError as e:
+            self._send_json({"error": str(e)[:300], "needs_test": True}, status=409)
+        except (ValueError, RuntimeError) as e:
+            self._send_json({"error": str(e)[:300]}, status=400)
+        except Exception as e:
+            self._send_json({"error": "save failed", "detail": str(e)[:200]}, status=500)
+
+    def _handle_embedding_status_get(self):
+        """GET /api/embedding_status — built-in resource install state for the progress bar."""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.embedding.bootstrap import detect_device, get_status
+            status = get_status()
+            status["device"] = detect_device()
+            self._send_json(status)
+        except Exception as e:
+            self._send_json({"state": "unknown", "detail": str(e)[:200]}, status=500)
+
+    def _handle_update_check_get(self):
+        """GET /api/update_check — local vs remote state + notes (never raises, always 200)."""
+        try:
+            self._send_json(_github_latest_info())
+        except Exception as e:
+            local, local_commit = _local_version_info()
+            self._send_json({"local": local, "local_commit": local_commit,
+                             "latest": None, "up_to_date": None, "source": None,
+                             "notes": None, "error": str(e)[:200]})
+
+    def _handle_update_run_post(self):
+        """POST /api/update_run — source-only update in background (git ff-only, data untouched)."""
+        try:
+            with _UPDATE_LOCK:
+                if _UPDATE_STATE["state"] == "working":
+                    self._send_json({"error": "Update already running."}, status=409)
+                    return
+                _UPDATE_STATE.update({"state": "working", "lines": [], "done": False,
+                                      "ok": False, "restart_required": False})
+            t = threading.Thread(target=_run_update_job, name="x5-update", daemon=True)
+            t.start()
+            self._send_json({"started": True})
+        except Exception as e:
+            self._send_json({"error": str(e)[:200]}, status=500)
+
+    def _handle_update_progress_get(self):
+        """GET /api/update_progress — live lines of the running/finished update."""
+        try:
+            with _UPDATE_LOCK:
+                snap = {"state": _UPDATE_STATE["state"],
+                        "lines": list(_UPDATE_STATE["lines"][-50:]),
+                        "done": _UPDATE_STATE["done"], "ok": _UPDATE_STATE["ok"],
+                        "restart_required": _UPDATE_STATE["restart_required"]}
+            self._send_json(snap)
+        except Exception as e:
+            self._send_json({"error": str(e)[:200]}, status=500)
+
+    def _handle_ai_models_clear_post(self):
+        """POST /api/ai_models/clear {kind} — disconnect one template (vault + .env + session mark)."""
+        try:
+            payload = self._read_json_body(10000)
+        except _ChatError as e:
+            self._send_json({"error": str(e)}, status=e.status)
+            return
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.ai_models.store import KINDS as _KINDS, clear_model as _clear
+            kind = str(payload.get("kind") or "text")
+            if kind not in _KINDS:
+                self._send_json({"error": f"unknown model kind '{kind}'"}, status=400)
+                return
+            _clear(kind)
+            self._send_json({"ok": True})
+        except Exception as e:
+            self._send_json({"error": "clear failed", "detail": str(e)[:200]}, status=500)
 
     def _handle_conversation_get(self):
         try:
@@ -3192,9 +3395,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 if str(PROJECT_ROOT) not in sys.path:
                     sys.path.insert(0, str(PROJECT_ROOT))
-                from models.stt.service import transcribe_file
+                from core.ai_models.media import read_audio
+                from core.ai_models.store import require_model
+                from core.ai_models.engine import transcribe
 
-                text = transcribe_file(saved, language=language)
+                record = require_model("stt")  # fixed refusal + model link when missing
+                blob2, mime2 = read_audio(saved)
+                text = transcribe(record, {"audio_bytes": blob2, "mime": mime2})
+            except RuntimeError as e:
+                self._send_json({"error": str(e)[:300], "needs_model": True}, status=503)
+                return
             finally:
                 try:
                     saved.unlink(missing_ok=True)
@@ -3352,220 +3562,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json({"error": "state save failed", "detail": str(e)[:200]}, status=500)
 
-    def _handle_model_state_post(self):
-        """Enable/disable a local model (cascades to its plugins)."""
-        try:
-            payload = self._read_json_body(10000)
-        except _ChatError as e:
-            self._send_json({"error": str(e)}, status=e.status)
-            return
-        try:
-            if str(PROJECT_ROOT) not in sys.path:
-                sys.path.insert(0, str(PROJECT_ROOT))
-            from core.tools.registry import known_model_ids, set_model_enabled
-
-            model = payload.get("model")
-            if not isinstance(model, str) or model not in known_model_ids():
-                self._send_json({"error": "unknown model"}, status=400)
-                return
-            if not isinstance(payload.get("enabled"), bool):
-                self._send_json({"error": "enabled must be boolean"}, status=400)
-                return
-            set_model_enabled(model, payload["enabled"])
-            self._send_json({"ok": True})
-        except ValueError as e:
-            self._send_json({"error": str(e)[:200]}, status=400)
-        except Exception as e:
-            self._send_json({"error": "state save failed", "detail": str(e)[:200]}, status=500)
-
-    def _handle_model_download_post(self):
-        """Start downloading a missing model in the background (one at a time)."""
-        try:
-            payload = self._read_json_body(10000)
-        except _ChatError as e:
-            self._send_json({"error": str(e)}, status=e.status)
-            return
-        try:
-            if str(PROJECT_ROOT) not in sys.path:
-                sys.path.insert(0, str(PROJECT_ROOT))
-            from core.tools.registry import known_model_ids
-
-            mid = payload.get("id")
-            if not isinstance(mid, str) or mid not in known_model_ids():
-                self._send_json({"error": "unknown model"}, status=400)
-                return
-            with _MODEL_DL["lock"]:
-                if _MODEL_DL["current"] is not None and _MODEL_DL["current"] != mid:
-                    self._send_json({"error": f"another download is running: {_MODEL_DL['current']}"}, status=409)
-                    return
-                cur = _MODEL_DL["jobs"].get(mid)
-                if _MODEL_DL["current"] == mid or (isinstance(cur, dict) and cur.get("state") == "downloading"):
-                    self._send_json({"ok": True, "state": "downloading"})
-                    return
-                _MODEL_DL["jobs"][mid] = {"state": "downloading", "detail": "", "expected_mb": 0}
-                _MODEL_DL["current"] = mid
-            t = threading.Thread(target=_run_model_download, args=(mid,), daemon=True)
-            t.start()
-            self._send_json({"ok": True, "state": "downloading"})
-        except Exception as e:
-            self._send_json({"error": "download start failed", "detail": str(e)[:200]}, status=500)
-
-    def _handle_model_download_get(self, mid: str):
-        """Poll a model download: state + downloaded MB vs expected MB."""
-        try:
-            if str(PROJECT_ROOT) not in sys.path:
-                sys.path.insert(0, str(PROJECT_ROOT))
-            from core.tools.registry import known_model_ids
-            from scripts.setup_models import get_allowed_models_root, get_project_root, load_manifest, validate_local_dir
-
-            if not isinstance(mid, str) or mid not in known_model_ids():
-                self._send_json({"error": "unknown model"}, status=400)
-                return
-            with _MODEL_DL["lock"]:
-                job = dict(_MODEL_DL["jobs"].get(mid, {"state": "idle", "detail": "", "expected_mb": 0}))
-            downloaded = 0.0
-            try:
-                proot = get_project_root()
-                manifest = load_manifest(proot)
-                entry = next((m for m in manifest.get("models", []) if m.get("id") == mid), None)
-                if entry is not None:
-                    if not job.get("expected_mb"):
-                        job["expected_mb"] = int(entry.get("expected_size_mb", 0) or 0)
-                    target = validate_local_dir(entry["local_dir"], get_allowed_models_root(proot), proot)
-                    if target.exists():
-                        downloaded = _model_download_dir_size_mb(target)
-            except Exception:
-                pass
-            job["downloaded_mb"] = downloaded
-            self._send_json(job)
-        except Exception as e:
-            self._send_json({"error": "status failed", "detail": str(e)[:200]}, status=500)
-
-    def _handle_provider_test_post(self):
-        """Test a provider connection with its saved key. Returns ok/error without leaking the key."""
-        import urllib.error as _urlerr
-        import urllib.request as _url
-        try:
-            payload = self._read_json_body(10000)
-        except _ChatError as e:
-            self._send_json({"error": str(e)}, status=e.status)
-            return
-        try:
-            pid = payload.get("id")
-            known = {c["id"]: c for c in CLOUD_PROVIDERS}
-            if pid not in known:
-                self._send_json({"error": "unknown provider"}, status=400)
-                return
-            data = _load_providers()
-            entry = data.get("providers", {}).get(pid, {})
-            key = str(entry.get("api_key") or "").strip() if isinstance(entry, dict) else ""
-            if not key:
-                self._send_json({"ok": False, "error": "No API key saved for this provider"}, status=400)
-                return
-            cat = known[pid]
-            base = cat["base_url"].rstrip("/")
-            # Each vendor exposes a different key-validating probe (one attempt, 10s timeout).
-            # NOTE: OpenRouter /models is public (200 even with a bad key) — /auth/key truly validates.
-            if pid == "openrouter":
-                url, headers = base + "/auth/key", {"Authorization": f"Bearer {key}"}
-            elif pid == "anthropic":
-                url, headers = base + "/v1/models", {"x-api-key": key, "anthropic-version": "2023-06-01"}
-            elif pid == "google":
-                url, headers = base + "/v1beta/models?key=" + key, {}
-            elif pid == "deepseek":
-                url, headers = "https://api.deepseek.com/models", {"Authorization": f"Bearer {key}"}
-            else:
-                url, headers = base + "/models", {"Authorization": f"Bearer {key}"}
-            req = _url.Request(url, headers=headers, method="GET")
-            try:
-                with _url.urlopen(req, timeout=10) as resp:
-                    code = getattr(resp, "status", 200)
-                    if 200 <= code < 300:
-                        self._send_json({"ok": True, "status": code})
-                        return
-                    self._send_json({"ok": False, "error": f"HTTP {code}"}, status=502)
-                    return
-            except _urlerr.HTTPError as e:
-                if e.code in (401, 403):
-                    self._send_json({"ok": False, "error": "Authentication failed — check the API key"}, status=502)
-                elif e.code == 404:
-                    self._send_json({"ok": False, "error": "HTTP 404 — bad endpoint or unknown model"}, status=502)
-                else:
-                    self._send_json({"ok": False, "error": f"HTTP {e.code}"}, status=502)
-            except Exception as e:
-                # Surface the real failure reason (auth vs network) without the key.
-                msg = str(e)[:200]
-                if "timed out" in msg.lower() or "timeout" in msg.lower():
-                    msg = "Connection timed out — check network"
-                self._send_json({"ok": False, "error": msg}, status=502)
-        except Exception as e:
-            self._send_json({"ok": False, "error": str(e)[:200]}, status=500)
-
-    def _handle_providers_post(self):
-        """Save a cloud provider key (masked display). A new key replaces the old one."""
-        try:
-            payload = self._read_json_body(10000)
-        except _ChatError as e:
-            self._send_json({"error": str(e)}, status=e.status)
-            return
-        try:
-            pid = payload.get("id")
-            known = [c["id"] for c in CLOUD_PROVIDERS]
-            if pid not in known:
-                self._send_json({"error": "unknown provider"}, status=400)
-                return
-            data = _load_providers()
-            entry = data["providers"].get(pid)
-            if not isinstance(entry, dict):
-                entry = {}
-                data["providers"][pid] = entry
-            if "api_key" in payload:
-                new_key = payload["api_key"]
-                if new_key is not None and not isinstance(new_key, str):
-                    self._send_json({"error": "api_key must be string"}, status=400)
-                    return
-                new_key = (new_key or "").strip()
-                env_name = PROVIDER_ENV.get(pid, f"{pid.upper()}_API_KEY")
-                if new_key:
-                    if len(new_key) > 256:
-                        self._send_json({"error": "api_key too long"}, status=400)
-                        return
-                    entry["api_key"] = new_key
-                    import datetime as _dt
-
-                    entry["updated_at"] = _dt.datetime.utcnow().isoformat() + "Z"
-                    # Keys saved in the UI also live in .env like any normal setup.
-                    _write_env_key(env_name, new_key)
-                else:
-                    # Clearing the key in the UI deletes it everywhere (vault + .env + process env).
-                    entry.pop("api_key", None)
-                    entry.pop("updated_at", None)
-                    _remove_env_key(env_name)
-            if "model" in payload:
-                new_model = str(payload["model"] or "").strip()[:128]
-                if new_model:
-                    entry["model"] = new_model
-            if "active" in payload:
-                # Exclusive activation via switch: enabling one disables the rest.
-                # Disabling the active one leaves NO active provider (real off state).
-                if not isinstance(payload["active"], bool):
-                    self._send_json({"error": "active must be boolean"}, status=400)
-                    return
-                if payload["active"]:
-                    data["active"] = pid
-                elif data.get("active") == pid:
-                    data["active"] = None
-            _save_providers(data)
-            saved = str(entry.get("api_key") or "")
-            self._send_json({
-                "ok": True,
-                "has_key": bool(saved.strip()),
-                "key_hint": _mask_key(saved),
-                "model": str(entry.get("model") or ""),
-            })
-        except Exception as e:
-            self._send_json({"error": "provider save failed", "detail": str(e)[:200]}, status=500)
-
     def _handle_chat_answer_post(self):
         """Deliver the user's answer to a paused loop question (ask or approval).
 
@@ -3591,6 +3587,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             decision = payload.get("decision")
             answer = payload.get("answer")
             if isinstance(decision, str) and decision in ("continue", "stop"):
+                q.put({"decision": decision})
+            elif isinstance(decision, str) and decision in ("skip", "activate"):
                 q.put({"decision": decision})
             elif isinstance(answer, str) and answer.strip():
                 q.put({"answer": answer.strip()[:2000]})
@@ -3696,7 +3694,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             ready, _, _ = _chat_readiness()
             if not ready:
                 self._cleanup_paths(saved_paths)
-                self._send_json({"error": NO_MODEL_ERROR, "needs_model": True}, status=503)
+                self._send_json({"error": NO_MODEL_ERROR, "needs_model": True, "needs_kind": "text"}, status=503)
                 return
 
             # Run the REAL agent loop (tools, memory, vision) — no direct-LLM shortcut.
@@ -3708,7 +3706,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 result = run_loop(loop_input, max_steps=CHAT_LOOP_STEPS, verbose=False, model=chat_model, api_key=chat_key)
             except (ValueError, RuntimeError) as e:
                 self._send_json(
-                    {"error": "LLM request failed — check OPENROUTER_API_KEY and network", "detail": str(e)[:200]},
+                    {"error": "LLM request failed — connect a model in AI Models", "detail": str(e)[:200]},
                     status=502,
                 )
                 return
@@ -3719,7 +3717,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             events = self._extract_loop_events(result)
             final = result.get("final_answer") or ""
             audio_list = result.get("final_audio") or []
-            self._send_json({
+            _need_kind = result.get("needs_model_kind")
+            _out = {
                 "reply": str(final),
                 "events": events,
                 "steps": result.get("steps", 0),
@@ -3728,7 +3727,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 "images": result.get("final_images") or [],
                 "audio": audio_list,
                 "elapsed": result.get("elapsed_sec", 0),
-            })
+            }
+            if isinstance(_need_kind, str) and _need_kind:
+                _out["needs_model"] = True
+                _out["needs_kind"] = _need_kind
+            self._send_json(_out)
         except Exception as e:
             self._send_json({"error": "chat failed", "detail": str(e)}, status=500)
 
@@ -3786,6 +3789,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     "type": "error",
                     "error": NO_MODEL_ERROR,
                     "needs_model": True,
+                    "needs_kind": "text",
                 }, ensure_ascii=False) + "\n\n").encode("utf-8")
                 self.wfile.write(data)
                 self.wfile.flush()
@@ -3844,6 +3848,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 "choices": [str(c)[:200] for c in (qpayload.get("options") or [])[:4]],
                 "command": str(qpayload.get("command") or "")[:500],
             }
+            if kind == "needs_model":
+                # Model-activation pause: which kind + which tool, so the UI can
+                # show Skip / Activate and deep-link to the right dialog.
+                try:
+                    from core.ai_models.store import KIND_TITLES as _TITLES
+                    _k = str(qpayload.get("kind") or "text")
+                    _t = str(qpayload.get("tool") or "")
+                    frame["needs_kind"] = _k
+                    frame["tool"] = _t[:40]
+                    frame["text"] = f"Needs {_TITLES.get(_k, _k)} (used by {_t or 'this task'})."
+                except Exception:
+                    frame["needs_kind"] = str(qpayload.get("kind") or "text")
+                    frame["tool"] = str(qpayload.get("tool") or "")[:40]
             if kind == "live":
                 # Handoff pause: remember ONLY its metadata (the URL is read from
                 # the library when needed) so a refresh restores the card.
@@ -3875,11 +3892,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # Gateway runs pause ONLY for live control handoffs (the channel
             # answers them with "continue"). Ask stays unanswered and
             # approvals auto-continue — today's behavior, never a stall.
+            # Missing-model pauses auto-skip so gateway runs never stall.
             try:
                 if kind == "live":
                     return _on_question(kind, qpayload)
                 if kind == "approval":
                     return {"decision": "continue"}
+                if kind == "needs_model":
+                    return {"decision": "skip"}
             except Exception:
                 pass
             return None
@@ -3983,14 +4003,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # Preview state survives (the browser may still stream).
             _live_pause_clear()
             if err is not None:
-                _emit({"type": "error", "error": "LLM request failed — check OPENROUTER_API_KEY and network", "detail": str(err)[:200]})
+                _emit({"type": "error", "error": "LLM request failed — connect a model in AI Models", "detail": str(err)[:200]})
             else:
                 res = box.get("res") or {}
                 if res.get("cancelled"):
                     _emit({"type": "cancelled"})
                 else:
                     final = res.get("final_answer") or ""
-                    _emit({
+                    _need_kind = res.get("needs_model_kind")
+                    _done = {
                         "type": "done",
                         "reply": str(final),
                         "events": self._extract_loop_events(res),
@@ -3999,7 +4020,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                         "images": res.get("final_images") or [],
                         "audio": res.get("final_audio") or [],
                         "elapsed": res.get("elapsed_sec", 0),
-                    })
+                    }
+                    if isinstance(_need_kind, str) and _need_kind:
+                        _done["needs_model"] = True
+                        _done["needs_kind"] = _need_kind
+                    _emit(_done)
         except Exception:
             pass
         finally:
@@ -4052,26 +4077,23 @@ class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 def _warmup_models() -> None:
-    """Best-effort background preload of heavy local models (vision + embeddings).
+    """Bundled embedding resources first, then best-effort tool warmup.
 
-    First chat/vision request would otherwise pay the full load time (~1 min).
-    Never blocks startup, never fails loudly.
+    The bundled embedding model (project/embedding_model/, offline) is
+    checked BEFORE serving; device (GPU/CPU) is detected once and cached.
+    Everything else connects through AI Models templates, so there is
+    nothing else to preload.
+    Never fails loudly: startup continues, tools refuse clearly until ready.
     """
     try:
         if str(PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(PROJECT_ROOT))
         try:
-            from models.vision.service import _load as _load_vision
+            from core.embedding.bootstrap import ensure_embedding_model
 
-            _load_vision()
-        except Exception:
-            pass
-        try:
-            from models.stt.service import _load as _load_stt
-
-            _load_stt()
-        except Exception:
-            pass
+            ensure_embedding_model()
+        except Exception as e:
+            print(f"[WARN] Embedding resources not ready: {e}", file=sys.stderr)
         try:
             from core.tools.tool_search.tool import execute as _tool_search
 

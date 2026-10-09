@@ -1,6 +1,8 @@
 """
 Trigger embedding store - per-plugin triggers, searchable via trigger_search.
-Similar to tool-discovery but for triggers. Uses Qwen3-Embedding-0.6B.
+Similar to tool-discovery but for triggers. Uses the bundled embedding
+model via core/embedding/service.py (offline). Ships with a prebuilt seed
+(trigger_embeddings.seed.json) for instant offline use when specs match.
 """
 from __future__ import annotations
 
@@ -24,6 +26,11 @@ def _resolve_store_path() -> Path:
 
 STORE_PATH = _resolve_store_path()
 _STORE_LEGACY = Path(__file__).resolve().parents[3] / "storage" / "vector" / "trigger_embeddings.json"
+# Prebuilt seed shipped with the project (committed, small JSON).
+_SEED_CANDIDATES = (
+    Path(__file__).resolve().parents[3] / "storage" / "vector" / "trigger_embeddings.seed.json",
+    Path(__file__).resolve().parent / "trigger_embeddings.seed.json",
+)
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
@@ -71,11 +78,28 @@ def _load_store() -> dict | None:
             continue
     return None
 
+def _load_seed(current_hash: str) -> dict | None:
+    """Return the shipped seed when its hash matches current specs. Never raises."""
+    for cand in _SEED_CANDIDATES:
+        try:
+            if not cand.exists():
+                continue
+            data = json.loads(cand.read_text(encoding="utf-8"))
+            if (isinstance(data, dict) and data.get("hash") == current_hash
+                    and isinstance(data.get("triggers"), list) and data["triggers"]):
+                first = data["triggers"][0]
+                if isinstance(first.get("embedding"), list) and len(first["embedding"]) > 0:
+                    return data
+        except Exception:
+            continue
+    return None
+
+
 def _save_store(hash_val: str, triggers_with_emb: list[dict]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "hash": hash_val,
-        "model_id": "Qwen3-Embedding-0.6B",
+        "model_id": "embedding-model",
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "triggers": triggers_with_emb,
         "count": len(triggers_with_emb)
@@ -105,11 +129,20 @@ def ensure_embeddings(auto_create: bool = True) -> list[dict]:
         except Exception:
             pass
         print(f"[trigger-discovery] Triggers changed ({stored.get('hash','')[:8]} -> {current_hash[:8]}), rebuilding...")
+    if stored is None:
+        seed = _load_seed(current_hash)
+        if seed is not None:
+            try:
+                _save_store(current_hash, seed["triggers"])
+            except Exception:
+                pass
+            print(f"[trigger-discovery] Prebuilt trigger embeddings loaded ({len(seed['triggers'])} triggers, hash {current_hash[:8]})")
+            return seed["triggers"]
     if not auto_create:
         return []
-    from models.embedding.service import embed_texts, is_ready
+    from core.embedding.service import embed_texts, is_ready
     if not is_ready():
-        raise FileNotFoundError("Embedding model not ready")
+        raise FileNotFoundError("Embedding model folder is missing (project/embedding_model/). Copy it with the project and restart.")
     texts = [f"{t.get('name','')} : {t.get('description','')}"[:2000] for t in triggers]
     embeddings = embed_texts(texts, normalize=True)
     with_emb = []
@@ -127,7 +160,7 @@ def search(query: str, top_k: int = 5) -> list[dict]:
     triggers = ensure_embeddings(auto_create=True)
     if not triggers:
         return []
-    from models.embedding.service import embed_query
+    from core.embedding.service import embed_query
     import numpy as np
     q_emb = np.array(embed_query(query), dtype=np.float32)
     scored = []

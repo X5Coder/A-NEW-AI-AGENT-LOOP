@@ -11,7 +11,7 @@ import { animateIn, hideChartTip } from "./ui.js?v=8";
 const BP_MOBILE = 1024;
 const COLLAPSE_KEY = "x5_sidebar";
 
-const PAGES = ["dashboard", "agent", "workspace", "gateway", "plugins", "skills", "models", "settings"];
+const PAGES = ["dashboard", "agent", "workspace", "gateway", "plugins", "skills", "ai-models", "settings"];
 
 function routeFromPath() {
   try {
@@ -33,7 +33,7 @@ const TITLES = {
   gateway: { title: "WhatsApp gateway", sub: "Connect and manage your WhatsApp agent" },
   plugins: { title: "Plugins", sub: "Extend your agent capabilities" },
   skills: { title: "Skills", sub: "Reusable instructions for your agent" },
-  models: { title: "Models", sub: "Manage model providers" },
+  "ai-models": { title: "AI Models", sub: "Connect any AI model" },
   settings: { title: "Settings", sub: "Preferences and account" },
 };
 

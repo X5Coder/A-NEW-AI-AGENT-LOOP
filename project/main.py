@@ -1,6 +1,6 @@
 """
 VPS entrypoint - zero-knowledge user: just clone and run.
-Responsibility: check space -> auto-download models -> start agent loop.
+Responsibility: download built-in resources -> start agent loop.
 """
 
 from __future__ import annotations
@@ -14,39 +14,21 @@ def main() -> int:
     print("  X5Agent - Starting")
     print("=" * 70)
 
-    # 1. Ensure models (includes disk space check  + 5GB buffer + auto-download)
+    # 1. Bundled embedding model (ships with the project, offline-first).
+    # Device (GPU/CPU) is detected once and cached. Fails clearly when the
+    # project/embedding_model/ folder is missing (copy it, no download).
     try:
-        from models.loader import are_all_models_ready, ensure_models
+        from core.embedding.bootstrap import ensure_embedding_model
     except ImportError as e:
-        print(f"[FATAL] models loader not found: {e}", file=sys.stderr)
+        print(f"[FATAL] embedding bootstrap not found: {e}", file=sys.stderr)
+        return 1
+    try:
+        ensure_embedding_model()
+    except Exception as e:
+        print(f"\n❌ Embedding model not ready: {e}", file=sys.stderr)
         return 1
 
-    if are_all_models_ready():
-        print("[OK] All 4 models ready (embedding, stt, vision, tts)")
-    else:
-        print("[INFO] Models missing - checking disk space and downloading...")
-        print("       This is first run on this VPS, will take 5-10 minutes (6.3 GB)")
-        ok = ensure_models(auto_download=True, timeout_seconds=1800)
-        if not ok:
-            print("\n❌ Model download failed - check disk space message above", file=sys.stderr)
-            print("   Fix disk space and re-run: python main.py", file=sys.stderr)
-            return 1
-        print("[OK] All models downloaded and verified")
-
-    # 2. Verify models actually load (quick sanity)
-    try:
-        from models.loader import get_model_path
-
-        for mid in ("embedding", "stt", "vision", "tts"):
-            p = get_model_path(mid)
-            print(f"  - {mid:10} -> {p}")
-            if p is None or not p.exists():
-                print(f"[ERROR] model {mid} path missing!", file=sys.stderr)
-                return 1
-    except Exception as e:
-        print(f"[WARN] verification failed: {e}", file=sys.stderr)
-
-    # 2b. Unify sandbox: ensure X5Agent dirs + one-time legacy storage -> Data migration
+    # 2. Unify sandbox: ensure X5Agent dirs + one-time legacy storage -> Data migration
     try:
         from core.paths import ensure_x5agent, migrate_legacy_to_data_once
 
@@ -75,7 +57,7 @@ def main() -> int:
         else:
             print("[WARN] could not load tool discovery store", file=sys.stderr)
     except FileNotFoundError as e:
-        print(f"[WARN] tool embeddings skipped (model missing): {e}", file=sys.stderr)
+        print(f"[WARN] tool embeddings skipped (resources missing): {e}", file=sys.stderr)
     except Exception as e:
         print(f"[WARN] tool embeddings failed: {e}", file=sys.stderr)
 
@@ -89,11 +71,7 @@ def main() -> int:
     except Exception as e:
         print(f"[FATAL] agent loop not available: {e}", file=sys.stderr)
         return 1
-    import os as _os
 
-    api_key = _os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        print("[WARN] OPENROUTER_API_KEY not set - cloud chat calls will fail.", file=sys.stderr)
     while True:
         try:
             user_input = input("\nYou: ").strip()
@@ -103,7 +81,7 @@ def main() -> int:
         if not user_input:
             break
         try:
-            result = run_loop(user_input=user_input, api_key=api_key or None)
+            result = run_loop(user_input=user_input)
             print(f"\nAgent: {result.get('final_answer', '')}")
         except KeyboardInterrupt:
             print("\nStopped.")

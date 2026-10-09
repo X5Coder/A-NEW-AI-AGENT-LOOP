@@ -57,14 +57,6 @@ def _read_prompt(path: Path) -> str:
     return ""
 
 
-def _get_api_key() -> str | None:
-    for k in ["OPENROUTER_API_KEY","OPENROUTER_KEY","OR_API_KEY"]:
-        v = os.environ.get(k)
-        if v and v.strip():
-            return v.strip()
-    return None
-
-
 def _load_conversation() -> list[dict]:
     for p in (_resolve_db("conversation.json"), _LEGACY_DB / "conversation.json"):
         if not p.exists():
@@ -116,19 +108,16 @@ MEMORY_MODEL = "deepseek/deepseek-chat"  # pinned: v4.1-flash returns empty on A
 
 
 def _call_llm(system_prompt: str, user_content: str, api_key: str | None = None) -> str:
-    from core.lm.providers.openrouter.provider import chat as provider_chat
-    api_key_val = api_key or _get_api_key()
-    if not api_key_val:
-        raise ValueError("OPENROUTER_API_KEY missing for auto memory")
+    from core.ai_models.store import require_text_model
+    from core.ai_models.engine import chat as universal_chat
+    _record = require_text_model()  # refuses clearly when no text model configured
     last_err: Exception | None = None
     for attempt in range(1, 4):
         try:
-            resp = provider_chat(
-                messages=[{"role":"system","content": system_prompt},{"role":"user","content": user_content}],
-                model=MEMORY_MODEL,
-                api_key=api_key_val,
-                temperature=0.2,
-                max_tokens=800,
+            content = universal_chat(
+                _record,
+                [{"role": "user", "content": user_content}],
+                {"system": system_prompt},
             )
         except Exception as e:
             last_err = e
@@ -136,7 +125,6 @@ def _call_llm(system_prompt: str, user_content: str, api_key: str | None = None)
                 raise
             time.sleep(attempt)
             continue
-        content = resp.get("content")
         if isinstance(content, str) and content.strip():
             return content.strip()
         last_err = RuntimeError("LLM returned empty for auto memory")

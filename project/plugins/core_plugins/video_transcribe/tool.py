@@ -1,5 +1,5 @@
 """
-video_transcribe - async extraction of audio from video via ffmpeg + transcription via whisper-medium-arabic-codeswitched.
+video_transcribe - async extraction of audio from video via ffmpeg + transcription via the connected AI Speech to Text model.
 Each operation has job_id, model polls via wait tool. Video not saved, only metadata sent.
 """
 from __future__ import annotations
@@ -153,7 +153,7 @@ def _extract_metadata(video_path: Path) -> dict:
     return meta
 
 def _extract_audio(video_path: Path, out_wav: Path) -> bool:
-    """Extract audio via ffmpeg to 16k mono wav for whisper."""
+    """Extract audio via ffmpeg to 16k mono wav for transcription."""
     try:
         cmd = ["ffmpeg","-y","-i",str(video_path),"-vn","-acodec","pcm_s16le","-ar","16000","-ac","1",str(out_wav)]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -162,18 +162,15 @@ def _extract_audio(video_path: Path, out_wav: Path) -> bool:
         return False
 
 def _transcribe_audio(wav_path: Path, language: str | None = None) -> list[dict]:
-    """Transcribe wav via faster_whisper, returns segments with timestamp."""
-    from models.loader import get_model_path
-    model_path = get_model_path("stt")
-    if model_path is None or not model_path.exists():
-        raise FileNotFoundError("STT model not found")
-    from faster_whisper import WhisperModel
-    model = WhisperModel(str(model_path), device="cpu", compute_type="int8", cpu_threads=2)
-    segments, info = model.transcribe(str(wav_path), language=language, beam_size=5, vad_filter=True)
-    results = []
-    for seg in segments:
-        results.append({"start": round(seg.start,2), "end": round(seg.end,2), "text": seg.text.strip(), "frame_note": f"From {seg.start:.1f}s to {seg.end:.1f}s said: {seg.text.strip()}"})
-    return results
+    """Transcribe wav via the connected AI Speech to Text model (one segment)."""
+    from core.ai_models.media import read_audio
+    from core.ai_models.store import require_model
+    from core.ai_models.engine import transcribe
+    record = require_model("stt")  # fixed refusal + model link when missing
+    blob, mime = read_audio(wav_path)
+    text = transcribe(record, {"audio_bytes": blob, "mime": mime})
+    text = text.strip()
+    return [{"start": 0.0, "end": 0.0, "text": text, "frame_note": f"Said: {text[:120]}"}]
 
 def _process_job_async(job_id: str, video_path: Path, language: str | None, metadata: dict):
     try:

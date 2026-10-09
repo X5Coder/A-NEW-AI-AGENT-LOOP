@@ -1,7 +1,8 @@
 """
 Chat Vector Store - per-message embeddings for conversation.
 Each message has id, content, embedding. Deleting/editing a message auto-manages its embedding.
-Uses Qwen3-Embedding-0.6B via models/embedding/service.py.
+Uses the bundled embedding model via core/embedding/service.py (offline).
+Every user message + assistant reply is embedded automatically on persist.
 Storage: storage/vector/chat_embeddings.json + storage/database/conversation.json (source of truth).
 """
 from __future__ import annotations
@@ -85,7 +86,7 @@ def _save_conversation(data: list[dict]) -> None:
 
 
 def _embed_single(text: str) -> list[float]:
-    from models.embedding.service import embed_texts
+    from core.embedding.service import embed_texts
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text must be non-empty")
     if len(text) > 4000:
@@ -229,7 +230,7 @@ def search(query: str, k: int = 5) -> list[dict]:
         return []
     conv = _load_conversation()
     # Build lookup for content
-    from models.embedding.service import embed_query
+    from core.embedding.service import embed_query
     import numpy as np
     q_emb = np.array(embed_query(query), dtype=np.float32)
     scored = []

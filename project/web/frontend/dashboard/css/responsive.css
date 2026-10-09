@@ -296,10 +296,35 @@
 
   .attach-menu,
   .mode-menu {
-    /* Fluid on phones: hug content but never pass the viewport. Fixed
-       desktop widths (248/264px) overflow a 320px screen. */
+    /* Phones: same cards, fluid width, thumb-friendly rows. Anchored to the
+       button via inset-inline-start so they never overflow a 320px screen. */
+    min-width: min(280px, calc(100vw - 32px));
+    width: max-content;
+    max-width: calc(100vw - 32px);
+    bottom: calc(100% + 12px);
+  }
+  .mode-menu {
+    /* Permission menu stays compact like desktop. */
     min-width: 0;
     width: max-content;
-    max-width: min(320px, calc(100vw - 24px));
+  }
+  .attach-menu button {
+    min-height: 56px;
+    padding: 10px;
+  }
+  .attach-menu button .opt-tile,
+  .mode-menu .mode-opt-icon {
+    width: 40px;
+    height: 40px;
+    flex-basis: 40px;
+  }
+  .composer-btn.mode-pill {
+    max-width: calc(100vw - 180px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .composer-btn.mode-pill .mode-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }

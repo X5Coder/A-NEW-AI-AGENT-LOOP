@@ -17,6 +17,39 @@ from .events import format_event
 
 MAX_TRIGGERS = 200
 ALLOWED_ACTIONS = {"create", "list", "get", "delete", "update"}
+FILESYSTEM_TRIGGERS = {"filesystem_new_file", "filesystem_file_modified"}
+
+
+def _validate_filesystem_config(trigger_name: str, config: dict) -> dict:
+    """Validate watch_path/pattern for filesystem triggers. Fail clearly, never silently."""
+    if trigger_name not in FILESYSTEM_TRIGGERS:
+        return config
+    cfg = dict(config or {})
+    raw_path = cfg.get("watch_path", "inbox/docs")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("config.watch_path must be a non-empty string (e.g. inbox/docs)")
+    raw_path = raw_path.strip()
+    if len(raw_path) > 200:
+        raise ValueError("config.watch_path too long (max 200)")
+    if ".." in raw_path.replace("\\", "/").split("/"):
+        raise ValueError("config.watch_path must not contain ..")
+    lowered = raw_path.replace("\\", "/").lower().strip("/")
+    parts = [p for p in lowered.split("/") if p]
+    for i in range(len(parts) - 1):
+        if parts[i] == "outbox" and parts[i + 1] == "done":
+            raise ValueError("outbox/done is write-only and must never be watched (loop guard)")
+    if lowered == "" or lowered == "workspace" or lowered in ("x5agent/workspace",):
+        raise ValueError("watch_path too broad: pick a subfolder like inbox/docs")
+    pat = cfg.get("pattern", "*")
+    if pat is None:
+        pat = "*"
+    if not isinstance(pat, str) or not pat.strip():
+        raise ValueError("config.pattern must be a non-empty string")
+    if len(pat) > 100:
+        raise ValueError("config.pattern too long (max 100)")
+    cfg["watch_path"] = raw_path
+    cfg["pattern"] = pat.strip()
+    return cfg
 
 def _validate_action(v: Any) -> str:
     if not isinstance(v, str):
@@ -86,14 +119,7 @@ def _load_trigger_specs() -> dict[str, dict]:
                         continue
     return specs
 
-def _get_api_key() -> str | None:
-    for k in ["OPENROUTER_API_KEY","OPENROUTER_KEY","OR_API_KEY"]:
-        v = os.environ.get(k)
-        if v and v.strip():
-            return v.strip()
-    return None
-
-def _load_chat_snippet(limit: int = 30) -> str:
+def _load_chat_snippet(limit: int = 10) -> str:
     legacy_db = Path(__file__).resolve().parents[3] / "storage" / "database"
     try:
         import sys as _sys2
@@ -124,7 +150,7 @@ def _generate_trigger_skill(trigger_name: str, task: str, config: dict | None) -
     # Find trigger spec for description
     specs = _load_trigger_specs()
     trig_desc = specs.get(trigger_name, {}).get("description", "")
-    chat_snippet = _load_chat_snippet(limit=30)
+    chat_snippet = _load_chat_snippet(limit=10)
     parts = [f"Trigger: {trigger_name} - {trig_desc}", f"Task to run when triggered: {task}"]
     if config:
         parts.append(f"Config: {json.dumps(config, ensure_ascii=False)}")
@@ -132,18 +158,16 @@ def _generate_trigger_skill(trigger_name: str, task: str, config: dict | None) -
         parts.append(f"Chat context:\n{chat_snippet[:2000]}")
     parts.append("Generate skill markdown now.")
     user_prompt = "\n\n".join(parts)
-    from core.lm.providers.openrouter.provider import chat as provider_chat
-    api_key = _get_api_key()
-    resp = provider_chat(
-        messages=[{"role":"system","content": system_prompt},{"role":"user","content": user_prompt}],
-        model=None,
-        api_key=api_key,
-        temperature=0.4,
-        max_tokens=1500,
+    from core.ai_models.store import require_text_model
+    from core.ai_models.engine import chat as universal_chat
+    _record = require_text_model()
+    content = universal_chat(
+        _record,
+        [{"role": "user", "content": user_prompt}],
+        {"system": system_prompt},
     )
-    content = resp.get("content")
     if not isinstance(content, str) or not content.strip():
-        raise RuntimeError(f"Trigger skill generation empty (model={resp.get('model_used')})")
+        raise RuntimeError("Trigger skill generation returned empty content from the configured text model.")
     return content.strip()
 
 def _save_trigger_skill(trigger_id: str, trigger_name: str, task: str, config: dict | None) -> tuple[str, str]:
@@ -226,6 +250,7 @@ def execute(action: str, trigger_name: str | None = None, task: str | None = Non
         # Basic size check
         if len(json.dumps(cfg, ensure_ascii=False)) > 2000:
             raise ValueError("config too large")
+        cfg = _validate_filesystem_config(trigger_name.strip(), cfg)
         new_id = str(uuid.uuid4())[:8]
         # Create skill via internal LLM (with whole chat + task)
         skill_ref, skill_content = _save_trigger_skill(new_id, trigger_name.strip(), task.strip(), cfg)
@@ -289,6 +314,7 @@ def execute(action: str, trigger_name: str | None = None, task: str | None = Non
         if config is not None:
             if not isinstance(config, dict):
                 raise TypeError("config must be object")
+            config = _validate_filesystem_config(triggers[idx].get("trigger_name", ""), config)
             triggers[idx]["config"] = config
         triggers[idx]["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         _save_triggers(triggers)

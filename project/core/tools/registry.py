@@ -153,12 +153,9 @@ def get_plugin_state() -> dict:
 
 
 def _model_index() -> list[dict]:
-    try:
-        from models.loader import scan_local_models
-
-        return scan_local_models()
-    except Exception:
-        return []
+    # No local models anymore: the only built-in model is the hidden embedding
+    # model (core/embedding), everything else connects via AI Models templates.
+    return []
 
 
 def _plugins_for_model(model_id: str) -> list[str]:

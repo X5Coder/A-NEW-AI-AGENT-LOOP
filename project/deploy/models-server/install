@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Thin wrapper: ONE command on Linux/macOS -> install.py (detects OS, then runs install.sh flow).
-set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$SCRIPT_DIR/install.py" "$@"

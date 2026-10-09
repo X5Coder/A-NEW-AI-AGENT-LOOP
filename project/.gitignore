@@ -1,14 +1,6 @@
-# === Models - NEVER commit to git (large binaries) ===
-/models/embedding/*
-!/models/embedding/.gitkeep
-!/models/embedding/service.py
-/models/vision/*
-!/models/vision/.gitkeep
-!/models/vision/service.py
-/models/tts/*
-!/models/tts/.gitkeep
-/models/stt/*
-!/models/stt/.gitkeep
+# === Built-in embedding resources - NEVER commit to git (large binaries) ===
+/embedding_model/*
+!/embedding_model/.gitkeep
 
 # Fallback: ignore any model weights if accidentally placed outside
 **/*.safetensors
@@ -40,6 +32,7 @@ storage/database/*
 !storage/database/.gitkeep
 storage/vector/*
 !storage/vector/.gitkeep
+!storage/vector/*.seed.json
 storage/files/*
 !storage/files/.gitkeep
 !storage/files/images/.gitkeep

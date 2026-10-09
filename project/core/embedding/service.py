@@ -1,6 +1,11 @@
 """
-Embedding service - wraps Qwen3-Embedding-0.6B via sentence-transformers.
-Single responsibility: load model lazily, produce normalized embeddings, bounded retries.
+Bundled embedding service (sentence-transformers, offline).
+
+Loads ONLY from project/embedding_model/ (the single bundled folder, ships
+with the project; never downloads at runtime). Device (GPU/CPU) is detected
+once at startup and cached, then reused for every call.
+Use core.embedding.bootstrap.ensure_embedding_model() at startup so the
+weights are always present before the first embed call.
 """
 from __future__ import annotations
 
@@ -12,51 +17,38 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = [1, 2, 4]
 
 _model = None
-_model_path_cached: Path | None = None
-
-
-def _resolve_model_path() -> Path:
-    from models.loader import get_model_path
-    p = get_model_path("embedding")
-    if p is None or not p.exists():
-        raise FileNotFoundError("Embedding model not found. Run python scripts/setup_models.py")
-    return p
 
 
 def _load_model():
-    global _model, _model_path_cached
+    global _model
     if _model is not None:
         return _model
-    model_path = _resolve_model_path()
-    # Validate path is inside project/models
-    from pathlib import Path as _P
-    project_root = _P(__file__).resolve().parents[2]
-    allowed = (project_root / "models").resolve()
+    from core.embedding.bootstrap import detect_device, embedding_dir, is_complete
+    model_path = embedding_dir()
+    if not is_complete():
+        raise FileNotFoundError(
+            "Embedding model folder is missing (project/embedding_model/). "
+            "Copy it next to the project (ships with the release zip) and restart.")
     try:
-        model_path.resolve().relative_to(allowed)
+        model_path.resolve().relative_to(Path(__file__).resolve().parents[2].resolve())
     except ValueError as exc:
-        raise ValueError(f"Model path escapes allowed directory: {model_path}") from exc
-
+        raise ValueError("Embedding path escapes the project directory") from exc
+    device = detect_device()
+    last_err: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             from sentence_transformers import SentenceTransformer
-            # sentence-transformers loads safetensors directly
-            m = SentenceTransformer(str(model_path), device="cpu", trust_remote_code=False)
-            _model = m
-            _model_path_cached = model_path
+            _model = SentenceTransformer(str(model_path), device=device, trust_remote_code=False)
             return _model
         except Exception as e:
+            last_err = e
             if attempt == MAX_RETRIES:
-                raise RuntimeError(f"Failed to load embedding model after {MAX_RETRIES} attempts: {e}") from e
+                break
             time.sleep(RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)])
-    raise RuntimeError("Unreachable embedding load")
+    raise RuntimeError(f"Failed to load built-in embedding model: {last_err}") from last_err
 
 
 def embed_texts(texts: List[str], normalize: bool = True) -> List[List[float]]:
-    """
-    Embed list of texts. Returns list of vectors (normalized by default).
-    Validates inputs, bounded retries, no secrets.
-    """
     if not isinstance(texts, list):
         raise TypeError("texts must be list[str]")
     if not texts:
@@ -70,9 +62,7 @@ def embed_texts(texts: List[str], normalize: bool = True) -> List[List[float]]:
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            # sentence-transformers encode handles batching
             embeddings = model.encode(texts, normalize_embeddings=normalize, show_progress_bar=False)
-            # convert to list
             if hasattr(embeddings, "tolist"):
                 return embeddings.tolist()
             return [list(e) for e in embeddings]
@@ -85,7 +75,6 @@ def embed_texts(texts: List[str], normalize: bool = True) -> List[List[float]]:
 
 
 def embed_query(query: str) -> List[float]:
-    """Embed single query string."""
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be non-empty string")
     if len(query) > 2000:
@@ -94,9 +83,8 @@ def embed_query(query: str) -> List[float]:
 
 
 def is_ready() -> bool:
-    """Check if embedding model files exist (without loading)."""
     try:
-        from models.loader import is_model_ready
-        return is_model_ready("embedding")
+        from core.embedding.bootstrap import is_complete
+        return is_complete()
     except Exception:
         return False

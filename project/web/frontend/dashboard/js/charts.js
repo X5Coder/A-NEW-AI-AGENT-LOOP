@@ -99,7 +99,7 @@ function renderChart(el, labels, values, unit, animate) {
 
   if (!hasData) {
     el.innerHTML = `
-      <div class="flow">
+      <div class="flow" data-anim>
         <svg class="flow-svg" viewBox="0 0 600 190" preserveAspectRatio="none" aria-hidden="true">
           <line x1="0" y1="47" x2="600" y2="47" class="flow-grid" />
           <line x1="0" y1="95" x2="600" y2="95" class="flow-grid" />
@@ -140,7 +140,7 @@ function renderChart(el, labels, values, unit, animate) {
   }
 
   el.innerHTML = `
-    <div class="flow">
+    <div class="flow" data-anim>
       <svg class="flow-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Usage flow chart">
         <defs>
           <linearGradient id="x5FlowFill-${uid}" x1="0" y1="0" x2="0" y2="1">

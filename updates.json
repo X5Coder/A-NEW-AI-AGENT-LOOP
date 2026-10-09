@@ -1,0 +1,11 @@
+{
+  "version": "0.2.0",
+  "description": "New direct update system: Settings → Updates checks updates.json on GitHub, shows what's new first, and updates only after you approve — code only, data untouched.",
+  "features": [
+    "Direct version check via updates.json — no GitHub releases needed.",
+    "Check shows the description and new features before anything updates.",
+    "Separate Update now button — nothing updates without your approval.",
+    "Code-only updates with live progress — user data is never touched.",
+    "New mandatory rule: agents update this file on every big update."
+  ]
+}

@@ -13,9 +13,9 @@
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Cairo:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/css/tokens.css?v=13" />
   <link rel="stylesheet" href="/css/base.css?v=9" />
-  <link rel="stylesheet" href="/css/layout.css?v=11" />
-  <link rel="stylesheet" href="/css/components.css?v=88" />
-  <link rel="stylesheet" href="/css/responsive.css?v=20" />
+  <link rel="stylesheet" href="/css/layout.css?v=20" />
+  <link rel="stylesheet" href="/css/components.css?v=94" />
+  <link rel="stylesheet" href="/css/responsive.css?v=22" />
 </head>
 <body>
   <div class="app">
@@ -83,13 +83,13 @@
           <span>Skills</span>
         </button>
 
-        <button class="nav-item" data-nav="models" type="button">
+        <button class="nav-item" data-nav="ai-models" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
             <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
             <path d="M15 2v2" /><path d="M15 20v2" /><path d="M2 15h2" /><path d="M2 9h2" />
             <path d="M20 15h2" /><path d="M20 9h2" /><path d="M9 2v2" /><path d="M9 20v2" />
           </svg>
-          <span>Models</span>
+          <span>AI Models</span>
         </button>
 
         <div class="nav-divider" aria-hidden="true"></div>
@@ -111,6 +111,7 @@
             <path d="m14 15-2 2 2 2"></path>
             <path d="m14 7-2 2 2 2"></path>
           </svg>
+          <span class="collapse-ver" id="sideVersion" title="Console version">v0.2.0</span>
         </button>
       </div>
     </aside>
@@ -246,20 +247,20 @@
                   </button>
                   <div class="attach-menu" id="attachMenu">
                     <button type="button" data-attach="image">
-                      <span class="opt-tile">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+                      <span class="opt-tile" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.8" /><path d="m5.5 18 5-5 3.5 3.5 2-2 3 3" /></svg>
                       </span>
                       <span class="opt-text"><b>Image</b><i>Upload a picture</i></span>
                     </button>
                     <button type="button" data-attach="video">
-                      <span class="opt-tile">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" /></svg>
+                      <span class="opt-tile" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="13.5" height="14" rx="3" /><path d="m15.5 12 5.5-3.2v6.4L15.5 12Z" /></svg>
                       </span>
                       <span class="opt-text"><b>Video</b><i>Upload a clip</i></span>
                     </button>
                     <button type="button" data-attach="document">
-                      <span class="opt-tile">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
+                      <span class="opt-tile" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2.5H6.5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8.5Z" /><path d="M13.5 2.5v6h6" /><path d="M9 13.5h6M9 17h4" /></svg>
                       </span>
                       <span class="opt-text"><b>Document</b><i>PDF, Word, Excel…</i></span>
                     </button>
@@ -332,20 +333,20 @@
                   </button>
                   <div class="attach-menu" id="schedRunAttachMenu">
                     <button type="button" data-attach="image">
-                      <span class="opt-tile">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+                      <span class="opt-tile" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.8" /><path d="m5.5 18 5-5 3.5 3.5 2-2 3 3" /></svg>
                       </span>
                       <span class="opt-text"><b>Image</b><i>Upload a picture</i></span>
                     </button>
                     <button type="button" data-attach="video">
-                      <span class="opt-tile">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" /></svg>
+                      <span class="opt-tile" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="13.5" height="14" rx="3" /><path d="m15.5 12 5.5-3.2v6.4L15.5 12Z" /></svg>
                       </span>
                       <span class="opt-text"><b>Video</b><i>Upload a clip</i></span>
                     </button>
                     <button type="button" data-attach="document">
-                      <span class="opt-tile">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
+                      <span class="opt-tile" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2.5H6.5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8.5Z" /><path d="M13.5 2.5v6h6" /><path d="M9 13.5h6M9 17h4" /></svg>
                       </span>
                       <span class="opt-text"><b>Document</b><i>PDF, Word, Excel…</i></span>
                     </button>
@@ -432,17 +433,71 @@
           <div class="grid-cards" id="skillsGrid"></div>
         </section>
 
-        <!-- ============ MODELS (real) ============ -->
-        <section class="page" data-page="models">
-          <div class="models-wrap" id="modelsWrap"></div>
+        <!-- ============ AI MODELS (universal connection engine) ============ -->
+        <section class="page" data-page="ai-models">
+          <div class="ws-head" data-anim>
+            <div>
+              <h2>AI Models</h2>
+              <p>Connect any AI model with a connection block from your assistant</p>
+            </div>
+          </div>
+          <div class="grid-cards" id="aiModelsGrid"></div>
         </section>
 
         <!-- ============ SETTINGS ============ -->
         <section class="page" data-page="settings">
           <div class="settings-stack">
             <div class="card settings-card" data-anim>
-              <h3>Security</h3>
-              <p>Update the password used to sign in to this console on this device.</p>
+              <div class="settings-head">
+                <div class="settings-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-4 1.5-4-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.6 4.6 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.6 4.6 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.5.6-.6 1-.5 2V21" /></svg>
+                </div>
+                <div class="settings-head-text">
+                  <h3>Project</h3>
+                  <p>Source repository and installed console version.</p>
+                </div>
+              </div>
+              <div class="settings-row">
+                <a class="settings-link" href="https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP" target="_blank" rel="noopener">X5Coder / A-NEW-AI-AGENT-LOOP</a>
+                <span class="settings-version" id="projVersion">v0.2.0</span>
+              </div>
+            </div>
+
+            <div class="card settings-card" data-anim>
+              <div class="settings-head">
+                <div class="settings-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                </div>
+                <div class="settings-head-text">
+                  <h3>Updates</h3>
+                  <p>Check compares updates.json with GitHub, shows what's new, and updates only after you press Update now. Code only — your data is never touched.</p>
+                </div>
+              </div>
+              <p class="settings-status" id="updateStatus">Not checked yet.</p>
+              <div class="update-notes" id="updateNotesWrap" hidden>
+                <p class="update-notes-title" id="updateNotesTitle"></p>
+                <pre class="update-notes-body" id="updateNotes"></pre>
+              </div>
+              <div class="dl-progress" id="updateProg" hidden>
+                <div class="dl-bar update-bar-running" id="updateBar"></div>
+              </div>
+              <pre class="update-log" id="updateLog" hidden></pre>
+              <div class="settings-actions">
+                <button class="glass-btn settings-btn" id="checkUpdateBtn" type="button">Check for updates</button>
+                <button class="glass-btn settings-btn" id="updateRunBtn" type="button" hidden>Update now</button>
+              </div>
+            </div>
+
+            <div class="card settings-card" data-anim>
+              <div class="settings-head">
+                <div class="settings-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+                </div>
+                <div class="settings-head-text">
+                  <h3>Security</h3>
+                  <p>Update the password used to sign in to this console on this device.</p>
+                </div>
+              </div>
               <div class="field">
                 <label for="pwOld">Current password</label>
                 <input class="input" type="password" id="pwOld" placeholder="••••••••" autocomplete="current-password" />
@@ -455,13 +510,20 @@
                 <label for="pwConfirm">Confirm new password</label>
                 <input class="input" type="password" id="pwConfirm" placeholder="••••••••" autocomplete="new-password" />
               </div>
-              <button class="btn btn-primary" id="changePwBtn" type="button" style="margin-bottom: var(--sp-4);">Change password</button>
+              <button class="btn btn-primary settings-btn" id="changePwBtn" type="button">Change password</button>
             </div>
 
             <div class="card settings-card" data-anim>
-              <h3>Account</h3>
-              <p>Sign out of the console on this device. Local preferences are cleared.</p>
-              <button class="btn btn-danger" id="logoutBtn" type="button">
+              <div class="settings-head">
+                <div class="settings-icon danger" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+                </div>
+                <div class="settings-head-text">
+                  <h3>Account</h3>
+                  <p>Sign out of the console on this device. Local preferences are cleared.</p>
+                </div>
+              </div>
+              <button class="btn btn-danger settings-btn logout-compact" id="logoutBtn" type="button">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></svg>
                 Logout
               </button>
@@ -480,7 +542,7 @@
       try {
         if (localStorage.getItem("x5_sidebar") !== "expanded") document.body.classList.add("sidebar-collapsed");
         var seg = (location.pathname || "/").replace(/\/+$/, "").split("/").pop() || "";
-        var pages = ["dashboard", "agent", "workspace", "gateway", "plugins", "skills", "models", "settings"];
+        var pages = ["dashboard", "agent", "workspace", "gateway", "plugins", "skills", "ai-models", "settings"];
         var page = seg === "" || seg === "index.html" ? "agent" : seg;
         if (pages.indexOf(page) < 0) page = "agent";
         if (page !== "agent") {
@@ -497,7 +559,7 @@
             gateway: ["WhatsApp gateway", "Connect and manage your WhatsApp agent"],
             plugins: ["Plugins", "Extend your agent capabilities"],
             skills: ["Skills", "Reusable instructions for your agent"],
-            models: ["Models", "Manage model providers"],
+            "ai-models": ["AI Models", "Connect any AI model"],
             settings: ["Settings", "Preferences and account"]
           }[page];
           if (titles) {
@@ -528,6 +590,6 @@
   <div class="chart-tip" id="chartTip"></div>
   <div class="toast-wrap" id="toastWrap"></div>
 
-  <script type="module" src="/js/app.js?v=59"></script>
+  <script type="module" src="/js/app.js?v=62"></script>
 </body>
 </html>

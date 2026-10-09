@@ -217,9 +217,16 @@ def _convert_part(part: dict) -> tuple[str, str]:
             d.mkdir(parents=True, exist_ok=True)
             p = d / f"gw_{uuid.uuid4().hex[:12]}.{ext}"
             p.write_bytes(blob)
-            from models.stt.service import transcribe_file
+            from core.ai_models.media import read_audio
+            from core.ai_models.store import get_model
+            from core.ai_models.engine import transcribe
 
-            heard = str(transcribe_file(str(p)) or "").strip()
+            from core.ai_models.store import missing_message as _missing
+            _stt = get_model("stt")
+            if _stt is None:
+                return ("[voice message — " + _missing("stt") + "]"), ""
+            _blob2, _mime2 = read_audio(p)
+            heard = str(transcribe(_stt, {"audio_bytes": _blob2, "mime": _mime2}) or "").strip()
         except Exception:
             heard = ""
         return (f"[voice message]: {heard}" if heard else "[voice message — could not transcribe]"), ""

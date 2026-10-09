@@ -143,14 +143,6 @@ def _load_chat_snippet(limit: int = 30) -> str:
     return ""
 
 
-def _get_api_key() -> str | None:
-    for k in ["OPENROUTER_API_KEY", "OPENROUTER_KEY", "OR_API_KEY"]:
-        v = os.environ.get(k)
-        if v and v.strip():
-            return v.strip()
-    return None
-
-
 def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_snippet: str) -> str:
     """Internal LLM request using scheduler_skill_system.md. Returns skill markdown or raises with actual error (per situation)."""
     system_path = Path(__file__).resolve().parents[3] / "prompts" / "scheduler_skill_system.md"
@@ -172,19 +164,17 @@ def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_
     parts.append("Generate the skill markdown now.")
     user_prompt = "\n\n".join(parts)
 
-    # Let provider handle api_key resolution and raise appropriate error per situation (missing key, network, 429, etc.)
-    from core.lm.providers.openrouter.provider import chat as provider_chat
-    api_key = _get_api_key()  # may be None - provider will raise with correct message
-    resp = provider_chat(
-        messages=[{"role":"system","content": system_prompt},{"role":"user","content": user_prompt}],
-        model=None,
-        api_key=api_key,
-        temperature=0.4,
-        max_tokens=1500,
+    # Universal text model (AI Models section); refuses clearly when none configured.
+    from core.ai_models.store import require_text_model
+    from core.ai_models.engine import chat as universal_chat
+    _record = require_text_model()
+    content = universal_chat(
+        _record,
+        [{"role": "user", "content": user_prompt}],
+        {"system": system_prompt},
     )
-    content = resp.get("content")
     if not isinstance(content, str) or not content.strip():
-        raise RuntimeError(f"Skill generation returned empty content (model={resp.get('model_used')}, finish_reason={resp.get('finish_reason')})")
+        raise RuntimeError("Skill generation returned empty content from the configured text model.")
     return content.strip()
 
 

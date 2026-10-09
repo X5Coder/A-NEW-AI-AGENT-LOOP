@@ -10,7 +10,8 @@
 git clone https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP.git
 cd A-NEW-AI-AGENT-LOOP/project
 pip install -e .
-python main.py
+python install.py              # one command: checks + updates + owner + console URL
+python -m web.server.server   # start the console (http://127.0.0.1:5173/)
 ```
 
 **Windows**
@@ -19,16 +20,8 @@ python main.py
 git clone https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP.git
 Set-Location A-NEW-AI-AGENT-LOOP/project
 pip install -e .
-python main.py
-```
-
----
-
-## Doctor
-
-```bash
-python scripts/doctor.py
-python scripts/setup_models.py --check
+python install.py              # one command: checks + updates + owner + console URL
+python -m web.server.server   # start the console (http://127.0.0.1:5173/)
 ```
 
 ---
@@ -37,18 +30,21 @@ python scripts/setup_models.py --check
 
 ```bash
 python main.py
-python scripts/doctor.py
-python scripts/setup_models.py
-python scripts/setup_models.py --check
 ```
+
+The bundled `embedding_model/` folder (~1.2 GB) ships with the project
+copy (release zip) and is used offline - nothing is downloaded on first run.
 
 ---
 
 ## Models
 
+The only built-in model is the hidden embedding model:
+
 ```
-models/embedding/Qwen3-Embedding-0.6B        1.15 GB
-models/stt/whisper-medium-arabic-codeswitched-ct2  2.94 GB
-models/vision/SmolVLM2-500M                  1.94 GB
-models/tts/supertonic-3                      0.39 GB
+embedding_model/  (bundled embedding model, ~1.2 GB, offline, GPU auto / CPU fallback)
 ```
+
+Chat, vision, image, speech-to-text and text-to-speech models are NOT
+shipped: connect any of them in the console under **AI Models**
+(5 fixed templates, same 4 fields each, universal Connection JSON).

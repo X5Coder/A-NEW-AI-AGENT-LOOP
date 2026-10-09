@@ -24,33 +24,17 @@ def _read_correction_prompt() -> str:
 
 def transcribe_audio(audio_path: str | Path, language: str | None = "ar") -> str:
     """
-    Transcribe audio file via faster_whisper (whisper-medium-arabic-codeswitched).
-    Validates path, bounded size, returns raw text.
+    Transcribe audio file via the connected AI Speech to Text model.
+    Refuses with a fixed message (+ model link) when none is connected.
+    (language is accepted for compatibility; the service's language, if any,
+    is fixed inside its Connection JSON.)
     """
-    from models.loader import get_model_path
-    p = Path(audio_path)
-    if not p.exists():
-        # try relative to project
-        proj = Path(__file__).resolve().parents[3]
-        alt = proj / str(audio_path)
-        if alt.exists():
-            p = alt
-        else:
-            raise FileNotFoundError(f"Audio not found: {audio_path}")
-    if p.stat().st_size > 20 * 1024 * 1024:
-        raise ValueError("Audio too large (max 20MB)")
-    if p.suffix.lower() not in (".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm"):
-        # allow wav mp3 etc
-        pass
-    model_path = get_model_path("stt")
-    if model_path is None or not model_path.exists():
-        raise FileNotFoundError("STT model not found")
-    from faster_whisper import WhisperModel
-    model = WhisperModel(str(model_path), device="cpu", compute_type="int8", cpu_threads=2)
-    # language auto if None
-    segments, info = model.transcribe(str(p), language=language, beam_size=5)
-    text = " ".join([s.text for s in segments]).strip()
-    return text
+    from core.ai_models.media import read_audio
+    from core.ai_models.store import require_model
+    from core.ai_models.engine import transcribe
+    record = require_model("stt")  # fixed refusal + model link when missing
+    blob, mime = read_audio(audio_path)
+    return transcribe(record, {"audio_bytes": blob, "mime": mime})
 
 
 def correct_text(raw_text: str, api_key: str | None = None) -> str:
@@ -70,20 +54,17 @@ def correct_text(raw_text: str, api_key: str | None = None) -> str:
         return t
 
     system_prompt = _read_correction_prompt()
-    api_key_val = api_key or os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY")
-    if not api_key_val:
-        return minimal_clean(raw_text)
-
     try:
-        from core.lm.providers.openrouter.provider import chat as provider_chat
-        resp = provider_chat(
-            messages=[{"role":"system","content": system_prompt},{"role":"user","content": raw_text}],
-            model=None,
-            api_key=api_key_val,
-            temperature=0.1,
-            max_tokens=800,
+        from core.ai_models.store import get_text_model
+        from core.ai_models.engine import chat as universal_chat
+        _record = get_text_model()
+        if _record is None:
+            return minimal_clean(raw_text)
+        content = universal_chat(
+            _record,
+            [{"role": "user", "content": raw_text}],
+            {"system": system_prompt},
         )
-        content = resp.get("content")
         if isinstance(content, str) and content.strip():
             # Ensure not inventing too much: if output is much longer than input, fallback
             if len(content) > len(raw_text) * 2 + 100:

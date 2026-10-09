@@ -172,8 +172,15 @@ def _vision_transcribe(image_path: Path) -> str:
         proj = Path(__file__).resolve().parents[2]
         if str(proj) not in _sys.path:
             _sys.path.insert(0, str(proj))
-        from models.vision.service import analyze_image
-        out = analyze_image(image_path=str(image_path), prompt=VISION_PAGE_PROMPT)
+        from core.ai_models.media import image_to_base64
+        from core.ai_models.store import get_model
+        from core.ai_models.engine import analyze
+        record = get_model("vision")
+        if record is None:
+            return ""
+        b64, mime = image_to_base64(image_path)
+        out = analyze(record, {"prompt": VISION_PAGE_PROMPT,
+                               "image_base64": b64, "image_mime": mime})
         return out.strip() if isinstance(out, str) else ""
     except Exception:
         return ""
@@ -313,7 +320,7 @@ def ensure_indexed(file_id: str) -> dict:
         proj = Path(__file__).resolve().parents[2]
         if str(proj) not in _sys.path:
             _sys.path.insert(0, str(proj))
-        from models.embedding.service import embed_texts
+        from core.embedding.service import embed_texts
         vectors = embed_texts(chunks)
     except FileNotFoundError as e:
         raise FileNotFoundError(str(e)) from e
@@ -400,7 +407,7 @@ def search(file_id: str, query: str, top_k: int = 3) -> dict:
         proj = Path(__file__).resolve().parents[2]
         if str(proj) not in _sys.path:
             _sys.path.insert(0, str(proj))
-        from models.embedding.service import embed_query
+        from core.embedding.service import embed_query
         import numpy as _np
         q_vec = _np.array(embed_query(q), dtype=_np.float32)
         scored = []

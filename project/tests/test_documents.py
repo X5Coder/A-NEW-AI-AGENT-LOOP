@@ -41,7 +41,7 @@ def _fake_vec(text, dim=8):
 
 
 def _patch_embeddings():
-    import models.embedding.service as _emb
+    import core.embedding.service as _emb
     _emb.embed_texts = lambda texts, normalize=True: [_fake_vec(t) for t in texts]
     _emb.embed_query = lambda q: _fake_vec(q)
 

@@ -79,6 +79,53 @@ def _is_dangerous_browser_tool(name: str) -> bool:
         return False
 
 
+def _pause_for_missing_model(name: str, args: Any, kind: str, on_question) -> dict:
+    """Pause the loop when a tool needs a model kind that is not connected.
+
+    Returns a tool-style result dict (never raises). Skip lets the loop
+    continue without this tool; activate (or expiry) stops the loop so the
+    UI can send the user to the right AI Models dialog.
+    """
+    if on_question is None:
+        return {"tool": name, "arguments": args,
+                "error": _missing_text(kind, name), "success": False,
+                "needs_model_kind": kind}
+    try:
+        decision = on_question("needs_model", {"kind": kind, "tool": name})
+    except Exception:
+        decision = None
+    if isinstance(decision, dict) and decision.get("decision") == "skip":
+        return {"tool": name, "arguments": args,
+                "output": {"event": f"Skipped {name} (no model)", "skipped": True,
+                           "needs_model_kind": kind},
+                "success": True}
+    return {"tool": name, "arguments": args,
+            "error": _missing_text(kind, name), "success": False,
+            "needs_model_kind": kind}
+
+
+def _missing_text(kind: str, name: str) -> str:
+    try:
+        from core.ai_models.store import missing_message as _missing
+        return str(_missing(kind))
+    except Exception:
+        return f"No {kind} model connected (tool {name})."
+
+
+def _missing_kind_of(result: dict) -> str | None:
+    """Extract the model kind from a failed tool result, else None."""
+    try:
+        if not isinstance(result, dict) or result.get("success"):
+            return None
+        direct = result.get("needs_model_kind")
+        if isinstance(direct, str) and direct in ("text", "vision", "image", "tts", "stt"):
+            return direct
+        from core.ai_models.store import kind_from_missing_error as _kind_of
+        return _kind_of(str(result.get("error") or ""))
+    except Exception:
+        return None
+
+
 def _is_cancelled(cancel_flag) -> bool:
     """Whether the run was cancelled (STOP / fresh answer). Never raises."""
     try:
@@ -751,6 +798,19 @@ def run_loop(
         raise ValueError("max_steps must be 1..500")
     if session_key is not None and (not isinstance(session_key, str) or not session_key.strip()):
         raise ValueError("session_key must be non-empty string")
+    # Gate FIRST: no request runs without the built-in resources, even when a
+    # template model is connected (embeddings back tool discovery + memory).
+    try:
+        from core.embedding.bootstrap import require_ready as _emb_ready
+        _emb_ready()
+    except Exception as e:
+        refusal = str(e)
+        try:
+            _persist_conversation(user_input, refusal, [], 0.0)
+        except Exception:
+            pass
+        return {"steps": 0, "final_answer": refusal, "history": [],
+                "tool_calls_log": [], "success": False, "no_embedding": True}
     mdl = model.strip() if model and isinstance(model, str) and model.strip() else "deepseek/deepseek-v4.1-flash"
     # Build initial context (isolated for large scheduled tasks)
     system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot, session_history=session_history)
@@ -758,11 +818,51 @@ def run_loop(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_context},
     ]
-    # Import provider lazily
+    # Universal text model (AI Models section). No provider-specific code here:
+    # the record carries everything the engine needs (see core/ai_models).
     try:
-        from core.lm.providers.openrouter.provider import chat as provider_chat
+        from core.ai_models.store import get_text_model as _get_text_model
+        from core.ai_models.engine import chat as _universal_chat
     except Exception as e:
-        raise RuntimeError(f"OpenRouter provider not available: {e}") from e
+        raise RuntimeError(f"AI text model engine not available: {e}") from e
+    _model_record = _get_text_model()
+    if _model_record is None:
+        try:
+            from core.ai_models.store import missing_message as _missing
+            refusal = _missing("text")
+        except Exception:
+            refusal = ("No AI Text Model connected. Open AI Models → AI Text Model (/ai-models), "
+                       "press Test, then Save.")
+        try:
+            _persist_conversation(user_input, refusal, [], 0.0)
+        except Exception:
+            pass
+        return {"steps": 0, "final_answer": refusal, "history": list(messages),
+                "tool_calls_log": [], "success": False, "no_model": True}
+    # AIP/1 path: the record carries a declarative parser — the interpreter
+    # sends messages + tools in their provider places (nothing is dropped).
+    # Legacy connection JSON keeps the old engine. Pre-compile once so a
+    # bad parser (e.g. a missing required variable) fails fast with its
+    # name instead of once per step.
+    _use_aip = False
+    _compiled = None
+    try:
+        _pdef = _model_record.get("parser_definition") or _model_record.get("config_json") or {}
+        _use_aip = isinstance(_pdef, dict) and _pdef.get("language") == "AIP/1"
+    except Exception:
+        _use_aip = False
+    if _use_aip:
+        try:
+            from core.ai_models import aip as _aip_pre
+            _compiled = _aip_pre.get_compiled(_model_record, "text")
+        except Exception as e:
+            refusal = f"AI Text Model configuration error: {e}"
+            try:
+                _persist_conversation(user_input, refusal, [], 0.0)
+            except Exception:
+                pass
+            return {"steps": 0, "final_answer": refusal, "history": list(messages),
+                    "tool_calls_log": [], "success": False, "bad_parser": True}
 
     tool_calls_log: list[dict] = []
     steps = 0
@@ -770,6 +870,7 @@ def run_loop(
     final_answer: str | None = None
     cancelled = False
     persist_ids: tuple | None = None
+    needs_model_stop: str | None = None
     # Discovered tools become directly callable once tool_search returns their specs
     known_tool_names = {t.get("function", {}).get("name") for t in core_tools}
     dynamic_tools: list[dict] = []
@@ -792,14 +893,27 @@ def run_loop(
                 pass
 
         try:
-            response = provider_chat(
-                messages=messages,
-                tools=core_tools + dynamic_tools,
-                model=mdl,
-                api_key=api_key,
-                temperature=temperature,
-                on_token=_emit_token if on_token is not None else None,
-            )
+            # NOTE (protocol v1): the provider returns text only, so the
+            # loop answers directly. Tool calling via the model returns in a
+            # future protocol version; local tools stay wired and gated below.
+            # What changed: the AIP/1 path sends messages + tools in their
+            # provider places (the legacy engine never sent tools at all).
+            def _emit_chunk(delta: str) -> None:
+                _emit_token(delta)
+            if _use_aip:
+                from core.ai_models import aip as _aip_run
+                _canonical = _aip_run.canonical_from_loop(
+                    messages, list(core_tools) + list(dynamic_tools))
+                _res = _aip_run.execute_compiled(_compiled, _canonical)
+                content_text = _res.get("text") or ""
+                _emit_token(content_text)
+            else:
+                content_text = _universal_chat(
+                    _model_record, messages,
+                    {"on_chunk": _emit_chunk if on_token is not None else None,
+                     "cancel_event": cancel_flag},
+                )
+            response = {"content": content_text, "tool_calls": []}
         except Exception as e:
             # Provider failed even after retries - treat as tool error and continue
             err_msg = f"Provider error at step {step}: {e}"
@@ -892,16 +1006,47 @@ def run_loop(
                 result = execute_tool(name, args)
             else:
                 result = execute_tool(name, args)
+            # Missing-model gate: a tool that needs an unconnected model kind
+            # pauses the loop (skip continues, activate stops) instead of
+            # spamming the same failure every step.
+            try:
+                _mkind = _missing_kind_of(result) if isinstance(result, dict) else None
+            except Exception:
+                _mkind = None
+            _needs_stop_kind: str | None = None
+            if _mkind is not None:
+                try:
+                    result = _pause_for_missing_model(name, args, _mkind, on_question)
+                except Exception:
+                    pass
+                try:
+                    if isinstance(result, dict) and not result.get("success"):
+                        _needs_stop_kind = str(result.get("needs_model_kind") or _mkind)
+                except Exception:
+                    _needs_stop_kind = _mkind
             # Fresh-answer cancel: the user answered a question as a NEW
             # request — drop this result silently and stop the whole run
             # (no events, no history append, no persist; the client starts a
             # brand-new loop with the answer). Also covers STOP pressed while
             # a question/approval/live pause was blocking in on_question.
+                try:
+                    if isinstance(result, dict) and not result.get("success"):
+                        _needs_stop_kind = str(result.get("needs_model_kind") or _mkind)
+                except Exception:
+                    _needs_stop_kind = _mkind
             if _is_cancelled(cancel_flag):
                 cancelled = True
                 break
             tool_calls_log.append({"step": step, "tool": name, "arguments": args,
                                    "result": result, "reason": call_reason})
+            # User chose "activate model": stop the loop here so the UI can
+            # send them to the right dialog. Skip already continued above.
+            if _needs_stop_kind is not None:
+                try:
+                    needs_model_stop = str(_needs_stop_kind)
+                except Exception:
+                    needs_model_stop = "text"
+                break
             # Live handoff: human_control/take_control pause the loop so the user
             # can drive the browser; the UI resumes it via on_question("live").
             # live_preview never pauses — it only shows the floating player.
@@ -1020,6 +1165,13 @@ def run_loop(
         # A mid-step cancel (fresh answer / STOP during a pause) stops now.
         if cancelled:
             break
+        # Missing-model activate: stop the whole run with a connect prompt.
+        if needs_model_stop is not None:
+            try:
+                final_answer = _missing_text(needs_model_stop, "")
+            except Exception:
+                final_answer = "Model not connected."
+            break
 
         # Loop continues - next iteration will see tool outputs
         # Optional: update todo context? Already in messages, but we also could rebuild todo block as system note?
@@ -1085,4 +1237,5 @@ def run_loop(
         "final_images": final_images,
         "final_audio": final_audio,
         "message_ids": {"user": persist_ids[0], "assistant": persist_ids[1]} if persist_ids else None,
+        "needs_model_kind": needs_model_stop,
     }

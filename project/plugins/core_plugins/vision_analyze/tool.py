@@ -1,6 +1,6 @@
 """
-vision_analyze - analyze image via SmolVLM2-500M.
-Delegates to models/vision/service.py with validation and bounded resources.
+vision_analyze - analyze image via the connected AI Vision Model.
+Refuses with a fixed message (+ model link) when no vision model is connected.
 """
 from __future__ import annotations
 
@@ -27,14 +27,20 @@ def execute(image_id: str | None = None, image_path: str | None = None, prompt: 
     pr = _validate_prompt(prompt)
     event = format_event(image_path=image_path, image_id=image_id)
 
-    # Delegate to vision service
-    from models.vision.service import analyze_image
-    # analyze_image does its own validation and path traversal checks
+    from core.ai_models.media import image_to_base64, resolve_image
+    from core.ai_models.store import require_model
+    record = require_model("vision")  # fixed refusal + model link when missing
+    resolved = resolve_image(image_id=image_id, image_path=image_path)
+    b64, mime = image_to_base64(resolved)
+    from core.ai_models.engine import analyze
     try:
-        answer = analyze_image(image_path=image_path, image_id=image_id, prompt=pr)
-    except FileNotFoundError as e:
-        raise FileNotFoundError(str(e)) from e
+        answer = analyze(record, {
+            "prompt": pr or "Describe this image in detail.",
+            "image_base64": b64, "image_mime": mime,
+        })
+    except RuntimeError:
+        raise
     except Exception as e:
-        raise RuntimeError(f"Vision analysis failed: {e}") from e
+        raise RuntimeError(f"Vision analysis failed: {e}") from None
 
     return {"event": event, "image_id": image_id, "image_path": image_path, "prompt": pr, "answer": answer}

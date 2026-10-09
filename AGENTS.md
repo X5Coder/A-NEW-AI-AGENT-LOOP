@@ -23,6 +23,21 @@ Whenever the user asks to write, design, draft, improve, or fix ANY system promp
 Project root contains:
 - `Master Code Rules.md` — the canonical rules file (source of truth)
 - `PROJECT_MAP.md` — the standard project structure blueprint (must stay in sync with disk)
+- `updates.json` — the single update source (see Updates-file rule below)
 - `project/` — physical skeleton (see map for layout)
 - `opencode.json` — enforces auto-loading via `instructions` field
 - `.opencode/plugin/enforce-master-rules.ts` — defense-in-depth plugin for mandatory loading
+
+## Updates-file rule — mandatory for every agent, every chat
+
+`updates.json` at the repo root is the single update source consumed by
+Settings → Updates (`{version, description, features}`). It is a file, not
+a folder — never wrap it in a directory.
+
+- On a **big update** (new feature, behavior change, migration, breaking
+  change) — **or whenever the user asks** — you MUST in the same session:
+  1. bump `version` (x.y.z: minor for features, patch for fixes),
+  2. write `description` (one short paragraph: what changed and why),
+  3. write `features` (bullet list, one string per user-visible change).
+- Small fixes, refactors, docs-only, or internal cleanup: do NOT touch it.
+- Never invent versions or features — document only what you actually changed.

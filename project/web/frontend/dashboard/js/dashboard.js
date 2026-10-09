@@ -59,12 +59,15 @@ function populateStats(dash, cost, models, balance) {
     setText("statHostingMeta", "remaining credits");
   } else if (balance) {
     setText("statHosting", "—");
-    setText("statHostingMeta", "connect a provider in Models");
+    setText("statHostingMeta", "connect a model in AI Models");
   }
 
   // Toolbar pill reflects the live model connection (not just the server process).
   const cloud = Array.isArray(models?.cloud) ? models.cloud : [];
-  const live = cloud.find((p) => p.active && p.routable && p.connected) || null;
+  let live = cloud.find((p) => p.active && p.routable && p.connected) || null;
+  if (!live && models?.remote?.connected) {
+    live = { name: "AI Text Model", model: models?.remote?.default_model || models?.default_model };
+  }
   const status = String(dash?.status || "unknown");
   const isOk = status === "operational";
   const pill = document.getElementById("toolbarStatus");
@@ -86,7 +89,11 @@ function populateStats(dash, cost, models, balance) {
     modelEl.textContent = live ? String(live.model || models?.default_model || "—").slice(0, 24) : "No model connected";
     modelEl.classList.add("small");
   }
-  setText("statModelMeta", live ? `${live.name} · live` : "Connect a provider in Models");
+  setText("statModelMeta", live ? `${live.name} · live` : "Connect a model in AI Models");
+
+  // Sidebar footer shows the console version (single source: server APP_VERSION).
+  const ver = typeof dash?.version === "string" ? dash.version.trim().slice(0, 24) : "";
+  if (ver) setText("sideVersion", ver.startsWith("v") ? ver : `v${ver}`);
 }
 
 export async function initDashboard() {

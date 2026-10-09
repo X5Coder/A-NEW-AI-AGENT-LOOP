@@ -72,7 +72,7 @@ def execute(query: str, k: int | None = None) -> dict:
         return {"event": event, "query": q, "results": [], "note": "no skills found"}
 
     try:
-        from models.embedding.service import embed_texts, is_ready
+        from core.embedding.service import embed_texts, is_ready
         if is_ready():
             descs = [s["description"][:1000] for s in skills]
             q_emb = embed_texts([q])[0]

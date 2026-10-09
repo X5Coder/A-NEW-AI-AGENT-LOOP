@@ -8,6 +8,8 @@
 Source of truth for structure: `PROJECT_MAP.md` (this file). `storage/` keeps legacy fallback copies; authoritative home is `X5Agent/Data`.
 
 ```
+updates.json                   # THE single update source at the repo root (one file, NO folder): {version, description, features} — bump only on big updates or on request (see AGENTS.md Updates-file rule)
+
 X5Agent/                           # runtime sandbox (auto-created on first load via core/paths.py:ensure_x5agent())
 ├── Workspace/                     # model device - ONLY place model may read/write/execute (terminal+filesystem jailed here, open inside)
 └── Data/                          # ALL user data - zip this for full backup/restore
@@ -44,7 +46,7 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   ├── paths.py                    # X5Agent resolver: workspace/data/models roots + ensure_x5agent() + resolve_inside_workspace()
 │   ├── agent/
 │   │   ├── loop/                       # 500-step loop, never fails silently
-│   │   │   ├── engine.py               # run_loop(user_input, max_steps=500, provider=openrouter) + dynamic tools + on_event stream (event/reason/media/step/live frames) + optional reason node per tool call (model `reason` stripped before execute, never synthesized; empty → step shows with no arrow unless curated detail/image) + curated per-tool step detail UNDER reason (todo steps, file names, short code/terminal preview incl. exit code, question Q+A; default reason-only, raw output never dumped; failures show one short cause, titles never raw errors) + turn elapsed_sec (persisted per message) + final_audio (text_to_speech records → standalone voice bubble, persisted as assistant audio) + restricted approvals + on_question pause (ask/approval/live) + on_live_event + cancel flag + live-URL redaction (model never sees stream links) + mid-step cancel break (STOP during a pause drops the result silently)
+│   │   │   ├── engine.py               # run_loop(user_input, max_steps=500, llm=universal-text-model via core/ai_models, text-only in v1) + dynamic tools + on_event stream (event/reason/media/step/live frames) + optional reason node per tool call (model `reason` stripped before execute, never synthesized; empty → step shows with no arrow unless curated detail/image) + curated per-tool step detail UNDER reason (todo steps, file names, short code/terminal preview incl. exit code, question Q+A; default reason-only, raw output never dumped; failures show one short cause, titles never raw errors) + turn elapsed_sec (persisted per message) + final_audio (text_to_speech records → standalone voice bubble, persisted as assistant audio) + restricted approvals + on_question pause (ask/approval/live) + on_live_event + cancel flag + live-URL redaction (model never sees stream links) + mid-step cancel break (STOP during a pause drops the result silently)
 │   │   │   ├── dispatcher.py           # maps tool name -> execute (core + discoverable)
 │   │   │   └── __init__.py
 │   │   ├── context/
@@ -58,10 +60,10 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   │       ├── chat_vector_store.py    # per-message embeddings: add/delete/update per message, sync with conversation.json
 │   │       └── __init__.py
 │   ├── lm/
-│   │   ├── usage.py                    # measured LLM accounting: log_usage() per call + get_daily() (Data/database/usage_log.json, bounded)
+│   │   ├── usage.py                    # measured accounting: log_usage() per call + get_daily() (Data/database/usage_log.json, bounded)
 │   │   └── providers/
-│   │       └── openrouter/             # OpenRouter provider for deepseek/deepseek-v4.1-flash
-│   │           ├── provider.py         # chat() with tool-calling, 3 retries, timeout, no hardcoded secrets + returns/logs real usage
+│   │       └── openrouter/             # RETIRED (unwired): superseded by core/ai_models templates; kept only because tests/test_streaming.py exercises its SSE decoder
+│   │           ├── provider.py         # (dead) old OpenRouter chat() — nothing imports it except the streaming test
 │   │           └── __init__.py
 │   ├── documents/                      # document store: MarkItDown convert -> 300-word chunks -> embeddings + vision fallback for thin PDF pages
 │   │   ├── store.py                    # SUPPORTED (pdf/docx/xls/pptx/csv/txt/md/html/json/xml) + chunk_markdown + ensure_indexed/search + delete/purge orphans (Data/vector/document_embeddings.json)
@@ -205,8 +207,6 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   │       └── filesystem_file_modified/
 │   │           └── spec.json
 ├── skills/
-│   ├── frontend-design-pro/         # design-craft skill (auto-loaded via opencode.json instructions + discoverable via skills_search/view reading SKILL.md)
-│   │   └── SKILL.md                # frontend-design-pro: method + rules + motion + RTL/Arabic + checklist
 │   ├── scheduled_skills/           # auto-generated scheduled skills (practical system: each job → skill via internal LLM)
 │   │   └── scheduled_<job_id>_<name>/ # contains skill.json + README.md, auto-deleted when job deleted
 │   ├── trigger_skills/             # one-time trigger skills (fire once, then trigger + skill deleted)
@@ -216,7 +216,7 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   └── Skill 3/
 ├── web/
 │   ├── server/                         # local dev server (127.0.0.1:5173, path-validated, console auth (first-run setup -> .env pbkdf2 hash + HttpOnly session, login.html gate), chat attachments (image/video/text/document, doc 100MB) -> Workspace mirror copy + priority block)
-│   │   ├── server.py                   # static server + SPA fallback (extensionless→index.html) + JSON APIs (dashboard/cost/balance/health/conversation/plugins/skills/models/chat/chat_stream/chat_answer/chat_cancel/message/stt/plugin_state/model_state/providers/providers/test/live_state/shot/workspace/scheduler + /api/audio TTS records) + /api/events SSE push hub (one stream/tab, hello snapshot, singleton watchers broadcast on change only) + scheduler snapshot/emit (_get_scheduler_data/_events_emit_scheduler, 15s watcher + force after chat run/skill edit) + scheduler engine ticker (60s, executing callbacks → live "يتم التنفيذ" push) + secrets: UI save→vault+Data/.env+environ, UI clear→deleted everywhere, cost measured (usage_log + live pricing), SSE live loop on chat_stream (event/reason/media/live frames + live question pause) + LIVE STATE READ FROM THE LIBRARY: live_snapshot()/live_active() take running + control/preview links straight from X5Browser (no live_state.json, no host-heal, no relay/viewer restart) + in-memory live pause (_LIVE_PAUSE: qid→tool/reason, survives refresh, dropped on answer/expire/loop-end) + /api/chat_frames (bounded run-progress frames: event_start/event/question/live/live_end, never tokens) fanned out as `run` pushes so a refreshed page rebuilds the running Working block + steps against a route that is unreachable from Windows while units answer inside WSL (fail fast, never burn the stack timeout) + done frames carry audio (final TTS voice records)
+│   │   ├── server.py                   # static server + SPA fallback (extensionless→index.html) + JSON APIs (dashboard/cost/balance/health/conversation/plugins/skills/models-compat/ai_models+ai_models/save+ai_models/test+ai_models/clear+ai_models/setup_prompt/chat/chat_stream/chat_answer/chat_cancel/message/stt/plugin_state/model_state/live_state/shot/workspace/scheduler + /api/audio TTS records; REMOVED 410-Gone: model_download/requirements*/doctor/providers*) + chat readiness + models-compat from the AI Models store (universal text model) + /api/events SSE push hub (one stream/tab, hello snapshot, singleton watchers broadcast on change only) + scheduler snapshot/emit (_get_scheduler_data/_events_emit_scheduler, 15s watcher + force after chat run/skill edit) + scheduler engine ticker (60s, executing callbacks → live "يتم التنفيذ" push) + secrets: UI save→vault+Data/.env+environ, UI clear→deleted everywhere, cost measured (usage_log + live pricing), SSE live loop on chat_stream (event/reason/media/live frames + live question pause) + LIVE STATE READ FROM THE LIBRARY: live_snapshot()/live_active() take running + control/preview links straight from X5Browser (no live_state.json, no host-heal, no relay/viewer restart) + in-memory live pause (_LIVE_PAUSE: qid→tool/reason, survives refresh, dropped on answer/expire/loop-end) + /api/chat_frames (bounded run-progress frames: event_start/event/question/live/live_end, never tokens) fanned out as `run` pushes so a refreshed page rebuilds the running Working block + steps against a route that is unreachable from Windows while units answer inside WSL (fail fast, never burn the stack timeout) + done frames carry audio (final TTS voice records)
 │   │   └── __init__.py
 │   └── frontend/
 │       └── dashboard/                  # X5Agent Console — Manus-adapted DARK-ONLY theme, modular (no inline style/script)
@@ -246,8 +246,8 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │               ├── plugins.js          # discoverable only: action=permission switches, silent save, core hidden
 │               ├── skills.js           # user skills: cards grid (unified icon copies skill, no badge) + glass +Add + glass create/edit dialog (glass fields + persistent red errors + local draft, cleared on save + glass save/cancel, locked name on edit) + view modal with Copy/Edit, searchable via skills_search
 │               ├── gateway.js          # WhatsApp-only setup: locked agent number, QR/code linking, allowed numbers, live status, disconnect
-│               ├── models.js           # Cloud provider cards only, no section title + vault (masked keys)
-│               └── settings.js         # password validation + logout (local-only)
+│               ├── ai_models.js        # AI Models page: fixed template cards (one now: AI Text Model) + 4-field dialog (model name/server URL/optional key/Connection JSON) + Test (structured copyable errors) + Save (needs a Test pass unless Override) + setup-prompt copy button
+│               └── settings.js         # project card (repo link + version) + updates card (check GitHub release, auto-update with live log, restart note) + password validation + compact darker logout (local-only)
 ├── gateway/                            # messaging channels (server-authoritative config in Data/database/gateway.json)
 │   ├── store.py                        # validated WA/TG settings (token masked on read, never logged)
 │   ├── channels.py                     # outbound text senders per channel (chunked, best-effort) + tracked send/edit for the live message (WA bridge id / TG message_id)
@@ -265,56 +265,29 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   └── discord/                          # reserved
 ├── storage/                      # LEGACY read-only fallback (authoritative home is X5Agent/Data, migrated once at startup)
 │   ├── database/                   # fallback copies (todos/scheduler/conversation/triggers + 4 memories + plugin_state + model_providers)
-│   ├── vector/                     # fallback embeddings (tool/chat/trigger)
+│   ├── vector/                     # fallback embeddings (tool/chat/trigger) + committed *.seed.json (prebuilt tool/trigger embeddings, instant offline on fresh copies)
 │   └── files/                      # fallback media (images/videos)
-├── models/                         # code only: embedding|vision|stt service.py + manifest + loader (weights live in project/models/<type>/<name>)
-│   ├── embedding/
-│   │   └── service.py              # embed_texts(), embed_query(), lazy load via loader.get_model_path(), 3 retries
-│   ├── vision/
-│   │   └── service.py              # analyze_image() (Data/files images first, legacy fallback), lazy load, 3 retries
-│   ├── stt/
-│   │   └── service.py              # QwenCleo-ASR via qwencleo-asr SDK: transcribe_file() + chunked transcribe_stream() + vLLM stream_tokens() (true token streaming, fails clearly offline), lazy load, 3 retries
-│   ├── tts/                            # TTS service: synthesize() streaming-native with the fixed project voice (Mohamed, VoiceTut-TTS built-in) only, 3 retries
-│   │   ├── service.py              # synthesize(text, voice=None→Mohamed, lang, out_path) via sentence synthesize_stream(); validation rejects unknown voices/langs (ar/en only)
-│   │   └── voices.py               # built-in speaker catalog (15 studio voices + tags, DEFAULT_SPEAKER=Mohamed) + canonical_voice_name() (no external service/model)
-│   ├── manifest.json               # single source of truth: local_dir -> models/<type>/<name>
-│   ├── loader.py                   # ensure_models() + get_model_path() (manifest primary, merged copies, never re-downloads) + scan_local_models()
-│   ├── local_models/               # user-facing registry (local_dir -> models/<type>/<name>)
-│   │   └── models.json             # index: name/desc/type/dir/used_by/plugins links (new dirs auto-appear)
-│   └── README.md
+├── embedding_model/                # THE ONLY bundled weights: embedding model (weights+tokenizer ship with release zip, offline-first, .download_complete marker, hidden from UI, name never shown)
+├── core/embedding/                 # bundled embedding code (hidden): bootstrap.py (offline-first ensure, device detected once + cached CUDA/CPU) + service.py (embed_texts/embed_query/is_ready)
 ├── scripts/
-│   ├── setup_models.py             # idempotent setup into project/models (3 retries, disk check +5GB buffer, CT2 conversion)
-│   └── doctor.py                   # environment/dependency diagnostics
-├── deploy/
-│   └── models-server/              # one-command Docker stack: 4 models loaded, offline, token+login protected (./install.sh)
-│       ├── install.py              # الأمر الواحد الموحّد (يفحص OS: ويندوز/لينكس/ماك + Docker/Python/GPU/RAM/مساحة ثم يشغّل نفس التدفق عبر install.sh)
-│       ├── install                   # غلاف رفيع Linux/macOS ينادي install.py
-│       ├── install.cmd               # غلاف رفيع Windows ينادي install.py (يحتاج Git-Bash)
-│       ├── install.sh              # التدفق الكامل (يُنادَى مباشرةً أو عبر install.py)
-│       ├── doctor.sh               # project-wide status (env + model table) + select missing/partial model and download it fully (`./doctor.sh [--check]`)
-│       ├── models.yaml             # single config: 4 repo_ids (Qwen3-Embedding-0.6B, Qwen3.5-4B, QwenCleo-ASR, VoiceTut-TTS) + reserve_gb + overhead
-│       ├── Dockerfile              # code+libs only, no weights (torch/transformers/sentence-transformers/qwencleo-asr/voicetut-tts + fastapi/python-multipart + ffmpeg)
-│       ├── docker-compose.yml      # ../../models:/models bind, offline env, restart unless-stopped, healthcheck 15m start_period
-│       ├── select_models.py        # interactive checkbox select (name+HF size+status) -> selection.json; --status / --table / --all
-│       ├── download_models.py      # download selected one-by-one with real progress bar (resume on cancel/partial) + .download_complete marker + shrinks total reserve
-│       ├── server.py               # FastAPI: preload SELECTED_MODELS only (empty=all, unknown ids fail boot loudly) + GPU plan heaviest-first w/ 1.25x VRAM margin (fp16 vision / bfloat16 asr on GPU) + `/` email+password login (random session per login, 30-day TTL, logout invalidates, Secure on https, 5 fails/min/IP -> 429) + /health (selected models only, public) + /embed (64 texts max) + /vision + /asr + /tts (Bearer token on APIs, wav tmp cleaned after send; fixed English no-local-model message when a model is not loaded)
-│       ├── verify.py               # real check for LOADED selected models only (non-loaded skipped, tone fallback diagnostic-only when tts unverified)
-│       ├── README.md               # Arabic: flow + doctor + assumptions + model update
-│       └── (no local weights dir — binds ../../models, the single project/models folder shared with the local loader)
-├── main.py                         # VPS entrypoint: X5Agent ensure + legacy->Data migrate -> auto-download Models -> auto-embed tools -> start loop
+│   ├── __init__.py
+│   └── build_embedding_seed.py     # builds committed *.seed.json (tool+trigger, --snapshot-only instant / --download opt-in)
+├── main.py                         # entrypoint: bundled embedding check (offline, GPU auto/CPU) -> X5Agent ensure + legacy->Data migrate -> seed/rebuild tool embeddings -> start loop
+├── install.py                      # THE single install/update command: env check (python/CPU/GPU/disk/deps) -> project state -> git pull --ff-only (code only, Data never touched) -> offline resources -> email+password (salted hash in Data) -> prints console URL only
 ├── tests/                          # all test files here (fixtures unified: read/write X5Agent/Data, same as runtime)
 │   ├── test_auto_memory.py
 │   ├── test_new_layers.py
 │   ├── test_scheduler_large_reliable.py
 │   └── test_workspace.py             # workspace tool jail/list/mkdir + top-level-only context
+│   └── test_triggers.py              # trigger logic: 8 approved inbox/outbox configs + forbidden guards + resolver + one-time death
 │   └── test_console_auth.py          # console auth: email/pbkdf2/cookie flags (no secrets, no I/O)
 │   └── test_documents.py             # documents: 300-word chunks + markitdown + vision fallback + delete purges embeddings + wiring
 │   └── test_streaming.py             # SSE decoding (no mojibake) + tool-delta rebuild
 │   └── test_browser_lifecycle.py     # browser close-noop (no boot) + lifecycle lock
-│   └── test_tts_voice.py             # fixed project voice (Mohamed, 15 speakers) catalog/default/reject + streaming-arg bounds + optional model synthesis (skips without weights)
-│   └── test_stt_service.py             # STT service: language map + stream-arg bounds + audio validation + vLLM-unreachable path (skips transcription without weights)
-│   └── test_gateway_no_model.py        # gateway no-model: vault readiness + Arabic reply + Models link (no secrets, no I/O)
 │   └── test_install_unified.py     # unified installer: OS report + port validation + stdlib-only (4 passed)
+│   └── test_ai_models_engine.py      # Universal Connection Engine: mock-server A/B/C/D + NDJSON + messages_map + injection + all error categories (secret-free copyable) + validation + gating + kinds vision/image/tts/stt + binary body + poll flow (V/I/T/S/P checks, all green)
+│   └── test_ai_models_engine.py      # Universal Connection Engine: mock-server A/B/C/D + NDJSON + messages_map + injection + all error categories (secret-free copyable) + validation + gating (21 checks green)
+│   │   └── test_aip.py                   # AIP/1 interpreter: ops + missing-vs-null + malicious-parser reject + URL/SSRF policy + OpenAI body build (secret never in parser) + response/tool-call normalize + bad-args skip + mock end-to-end + parts/modalities/vision/async + private-server shape/errors + auto unknown-JSON + nameless shapes + auth placements + compile-once + AIP/1 setup prompts (29 passed)
 ├── docs/
 │   └── README.md
 ├── .env
@@ -331,13 +304,17 @@ project/                           # == X5Agent/System Core (immutable engine, r
 - `core/documents/` — document store (file_id = Workspace-relative path; convert->chunk->embed; vision fallback for thin PDF pages; delete/purge orphans with Workspace)
 - `core/tools/` — 13 core tools each own folder with Event (tool_search, question, vector_chat_search, document_search, todo_list, scheduler, skills_search, skills_view, terminal, wait, workspace, trigger, trigger_search) + workspace block in context (L4 top-level only) + documents metadata block (L4) + chat-uploaded documents priority block (L8) + direct-answer rule: no summary suffix when no tools were called (general_mission.md:7, system.md:6)
 - `X5Browser/` — versioned single-folder browser layer (wrapper 1.4.0 over lib x5browser==1.4.0): catalog (39 specs: 38 library 1:1 + project `show_preview`, ALL core plugins, 4 dangerous) + service (sole browser owner, EXPLICIT lifecycle: only open/restart boot, all others fail 'browser stopped' while down, bg asyncio loop, live stack = one LiveStack.start(), LIVE LINKS READ FROM THE LIBRARY via live_links(), read-only status_report(), profile stays inside library, screenshots in Data/files/browser max 20) + tools (validation + normalized output, browser_status never boots) + events (plain-English label per tool). All 39 behind `tool_search` embedding (store scans catalog, hash auto-rebuilds). Dangerous 4 (fill_form, upload_files, export_page, console_command): restricted mode asks via question, otherwise direct.
-- `plugins/` — `core_plugins/` (14 always-on hidden tools, flat: read_file, write_file, search_files, vision_analyze, video_analyze, video_transcribe, video_download, audio_extract, embedding_memory, text_to_speech, skill_create, image_memory, important_memory, http_request) — always effective, no UI switches, still searchable via `tool_search` embedding. `plugins/` UI page is intentionally empty. Filesystem trigger types stay in `plugins/filesystem/triggers/` (trigger_search system). Models page is cloud-only (no local section).
-- `skills/` — reusable skills (frontend-design-pro auto-loaded + discoverable via SKILL.md) + scheduled_skills (auto-generated) + trigger_skills (one-time)
-- `web/` — server + frontend/dashboard (chat renders TTS voice records as standalone bubbles via /api/audio; no raw player in steps)
+- `plugins/` — `core_plugins/` (14 always-on hidden tools, flat: read_file, write_file, search_files, vision_analyze, video_analyze, video_transcribe, video_download, audio_extract, embedding_memory, text_to_speech, skill_create, image_memory, important_memory, http_request) — always effective, no UI switches, still searchable via `tool_search` embedding. `plugins/` UI page is intentionally empty. Filesystem trigger types stay in `plugins/filesystem/triggers/` (trigger_search system). There is no Models page anymore — chat models live in the AI Models section (see `core/ai_models/` + `web/`).
+- `core/ai_models/` — Universal Model Connection Engine + AIP/1 interpreter, kinds text/vision/image/tts/stt v1 (no provider-specific code): `engine.py` (legacy validate/chat/test_connection/analyze/generate_image/synthesize/transcribe + paths/vars/SSE-NDJSON/binary bodies/media outputs/submit-then-poll/errors/redaction, stdlib urllib only) + `aip.py` (AIP/1: canonical request/response contracts + declarative op engine literal/ref/object/array/map/if/coalesce/omit_if_null/rename/select/parse_json/to_string/to_number/to_boolean/merge/encode/transform_content + URL/SSRF policy + capability check + bearer/header/query/body_token auth via Secret Store only + bounded retries max 3 + normalize() never fabricates (text/tools/media + dotted names + per-call status/metadata + provider_metadata + errors.path) + typed parts text/image/audio/video + collect_media + is_list + map compact + modalities gate + async-workflow explicit refusal + execute()/test_connection() canonical-in/canonical-out + templates openai_text/vision/image_gen + auto mode (unknown JSON responses: name-based + nameless shape-based text/media extraction with low-confidence warnings, calls need name+args so plain names are never tools, explicit refusal when unrecognized; requests can never be automatic; auth token in bearer/header/query/body/none + compile-once (interpreter validates once per config, cached plan per kind, fast path still validates input + normalizes every response); Black Box uses this only) + `store.py` (one record per kind {model_name/server_url/api_url/api_key/parser_definition|config_json/kind} in Data/database/ai_models.json + key mirrored to Data/.env AI_<KIND>_API_KEY, never returned to UI, save needs a Test pass unless force; missing_message() = fixed refusal + /ai-models link) + `media.py` (image/audio resolve + base64) + `models_prompts.md` (single file, `## KIND:` sections text/vision/image/tts/stt, all English, each teaches AIP/1: 5 fields + ops + auth placements + kind mandatory refs + verification gate) + `models_prompts.py` (section reader read_all/get_prompt; server setup_prompt endpoint + tests import it) + compile_model enforces mandatory refs per kind (missing_variable names the var) + canonical_from_loop() (loop L1-L8 messages+tools to canonical; loop uses the AIP path when the record is AIP/1, legacy engine otherwise) + `__init__.py`. Loop + auto_memory + scheduler/trigger skill generation + stt_correction + vision/video/tts/stt tools all call it; server `/api/ai_models/test` routes AIP/1 parsers to `aip.test_connection`, legacy JSON to `engine.test_connection`.
+- `core/embedding/` (+ `embedding_model/` weights) — the ONLY built-in model (hidden from UI): bootstrap (offline-first ensure, device detected once + cached CUDA/CPU, download opt-in only, .download_complete marker) + service (embed_texts/embed_query/is_ready). Used by tool/chat/trigger/document embedding stores. Fresh copies load prebuilt `storage/vector/*.seed.json` instantly (hash-verified) with zero model calls.
+- `skills/` — user skills (discoverable via skills_search/view) + scheduled_skills (auto-generated) + trigger_skills (one-time)
+- `updates.json` (repo root) — the single update source `{version, description, features}`; bumped only on big updates or on request per the AGENTS.md Updates-file rule (never a folder).
+- `install.py` — the ONE install/update entry: env check → state check → `git pull --ff-only` (tracked code only, X5Agent/Data + embedding_model/ never touched) → offline embedding + tool/trigger ensure → owner email+password (pbkdf2 hash in Data/database/console_auth.json, never plaintext) → prints console URL only.
+- `web/` — server + frontend/dashboard (chat renders TTS voice records as standalone bubbles via /api/audio; no raw player in steps; /api/update_check (local updates.json at repo root vs GitHub raw main→master, version compare, description + features as notes, always 200 with local, no releases needed) + /api/update_run (background source-only pull + embedding re-ensure, in-memory live log) + /api/update_progress; pages are dashboard/agent/schedrun/workspace/gateway/plugins/skills/ai-models/settings — settings.js owns check-then-confirm updates (Check only checks, shows features + no-data-loss reassurance + one glass button visible at a time: Check → Update now after approval, progress bar + live log while updating) — ai_models.js owns the 5 fixed template cards + per-kind dialog (glass guide card on top (2 steps: Open Claude link + red underlined configuration-prompt copy words with a tiny icon (the words copy on click) + plain guiding sentence nested under step 2); glass writing fields only, no panel backgrounds; big single Configuration Protocol editor (type-to-color overlay, auto-expanded JSON, no separate preview); Connect → black log panel with copy (green borders ok / red fail + red "Copy the log and paste it into Claude") → Save (closes; reopen shows saved values, log gone; any edit restarts at Connect), transform-only anims); /api/ai_models* per kind + /api/embedding_status; old providers/requirements/doctor/model_download/model_state APIs answer 410-Gone; dead model handlers + provider vault + balance-quota code removed; _get_models_data restored as AI-store compat)
 - `gateway/` — telegram/whatsapp/discord adapters (events rendered as per Events table)
-- `storage/` — LEGACY read-only fallback only (never written by runtime; Data is authoritative; migrated once at startup)
-- `models/` — THE single weights folder (code + services + manifest; weights in project/models/<type>/<name>, gitignored, shared with deploy/models-server) — no second copy anywhere; any tool whose model is missing raises the fixed English message from loader.NO_LOCAL_MODEL_MESSAGE ("...run the doctor command")
-- `deploy/models-server/` — one-command Docker stack for the 4 models (single source: models.yaml; install.sh = checks→select→total 5GB reserve→download→doctor→up→verify→gmail+UI-password; doctor.sh = project status table + load missing/partial; server.py page = email+password cookie login, APIs = API_TOKEN; weights in the single project/models/ — no second copy, marker-compatible with scripts/setup_models.py; .env secrets + override + sizes.json/selection.json/.reserve-* generated by install.sh, never committed)
+- `storage/` — LEGACY read-only fallback only (never written by runtime; Data is authoritative; migrated once at startup) — except committed `storage/vector/*.seed.json` prebuilt embeddings (tracked by git, rebuilt via `scripts/build_embedding_seed.py`)
+- `embedding_model/` — THE single weights folder (bundled embedding model only: weights+tokenizer, gitignored, ships with release zip) — no second copy anywhere; tools needing a template model refuse with the fixed message from store.missing_message() (names the template + /ai-models link)
+- `deploy/` — removed (the 4-model Docker stack is obsolete: only the built-in embedding model ships locally; everything else connects via AI Models templates)
 - `tests/`, `docs/` — tests & documentation
 
 ## Events Contract
@@ -352,8 +329,12 @@ project/                           # == X5Agent/System Core (immutable engine, r
   - collects all discoverable specs (verbatim descriptions, now 14 core_plugins + 39 browser)
   - computes SHA256 hash
   - if hash matches stored `storage/vector/tool_embeddings.json` -> reuse
-  - else delete old, embed all descriptions via `models/embedding/service.py` (Qwen3-Embedding-0.6B, 3 retries), save new hash+embeddings
+  - else if runtime store is missing and the shipped `storage/vector/tool_embeddings.seed.json` hash matches -> load seed instantly (zero model calls, fully offline)
+  - else delete old, embed all descriptions via `core/embedding/service.py` (bundled embedding model, 3 retries), save new hash+embeddings
 - If user edits any description in spec.json and reruns code, change is detected automatically and old embeddings are purged + rebuilt.
+- Every user message + assistant reply is embedded automatically on persist (`core/agent/loop/engine.py:_persist_conversation` -> `chat_vector_store.add_message`).
+- Device (GPU/CPU) is detected once at startup and cached (`core/embedding/bootstrap.py:detect_device`).
+- Rebuild seeds after spec changes: `python scripts/build_embedding_seed.py` (or `--snapshot-only` when the runtime store is fresh).
 
 ## Update Protocol
 When structure changes:

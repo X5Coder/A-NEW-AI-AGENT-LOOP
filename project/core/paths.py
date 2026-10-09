@@ -59,6 +59,11 @@ def ensure_x5agent() -> dict[str, str]:
     try:
         dirs = [
             workspace_root(),
+            workspace_root() / "inbox" / "docs",
+            workspace_root() / "inbox" / "tts",
+            workspace_root() / "inbox" / "media",
+            workspace_root() / "outbox" / "done",
+            workspace_root() / "outbox" / "ready_upload",
             data_root(),
             data_root() / "database",
             data_root() / "vector",

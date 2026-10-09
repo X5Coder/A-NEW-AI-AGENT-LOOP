@@ -1,7 +1,9 @@
 """
 Embedding store for discoverable tools.
 Responsibility: maintain embeddings for tool descriptions, auto-create on startup, detect changes and rebuild.
-Uses Qwen3-Embedding-0.6B via models/embedding/service.py
+Uses the bundled embedding model via core/embedding/service.py (offline).
+Ships with a prebuilt seed (tool_embeddings.seed.json) so a fresh copy
+works instantly when tool specs are unchanged - no embedding needed.
 """
 from __future__ import annotations
 
@@ -26,6 +28,12 @@ def _resolve_store_path() -> Path:
 
 STORE_PATH = _resolve_store_path()
 _STORE_LEGACY = Path(__file__).resolve().parents[3] / "storage" / "vector" / "tool_embeddings.json"
+# Prebuilt seed shipped with the project (committed, small JSON). Used when
+# the runtime store is missing and specs are unchanged - instant, offline.
+_SEED_CANDIDATES = (
+    Path(__file__).resolve().parents[3] / "storage" / "vector" / "tool_embeddings.seed.json",
+    Path(__file__).resolve().parent / "tool_embeddings.seed.json",
+)
 # Also keep hash file separately for quick check? Stored inside JSON.
 
 
@@ -114,12 +122,29 @@ def _load_store() -> dict | None:
     return None
 
 
+def _load_seed(current_hash: str) -> dict | None:
+    """Return the shipped seed when its hash matches current specs. Never raises."""
+    for cand in _SEED_CANDIDATES:
+        try:
+            if not cand.exists():
+                continue
+            data = json.loads(cand.read_text(encoding="utf-8"))
+            if (isinstance(data, dict) and data.get("hash") == current_hash
+                    and isinstance(data.get("tools"), list) and data["tools"]):
+                first = data["tools"][0]
+                if isinstance(first.get("embedding"), list) and len(first["embedding"]) > 0:
+                    return data
+        except Exception:
+            continue
+    return None
+
+
 def _save_store(hash_val: str, tools_with_embeddings: list[dict]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "hash": hash_val,
-        "model_id": "Qwen3-Embedding-0.6B",
-        "model_path": "models/embedding/Qwen3-Embedding-0.6B",
+        "model_id": "embedding-model",
+        "model_path": "embedding_model",
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tools": tools_with_embeddings,
         "count": len(tools_with_embeddings),
@@ -154,6 +179,18 @@ def ensure_embeddings(auto_create: bool = True) -> list[dict]:
         if isinstance(first.get("embedding"), list) and len(first["embedding"]) > 0:
             return stored["tools"]
 
+    # Fresh copy: use the shipped prebuilt seed when specs are unchanged
+    # (instant, fully offline - no embedding model call needed).
+    if stored is None:
+        seed = _load_seed(current_hash)
+        if seed is not None:
+            try:
+                _save_store(current_hash, seed["tools"])
+            except Exception:
+                pass
+            print(f"[tool-discovery] Prebuilt tool embeddings loaded ({len(seed['tools'])} tools, hash {current_hash[:8]})")
+            return seed["tools"]
+
     # Hash mismatch or no store - rebuild
     if stored is not None and stored.get("hash") != current_hash:
         # Delete old embeddings: remove file (will be overwritten)
@@ -169,13 +206,13 @@ def ensure_embeddings(auto_create: bool = True) -> list[dict]:
     # Need embedding model
     # Validate model ready
     try:
-        from models.embedding.service import embed_texts, is_ready
+        from core.embedding.service import embed_texts, is_ready
     except Exception as e:
         raise RuntimeError(f"Embedding service not available: {e}") from e
 
     if not is_ready():
         # Try to ensure models? Will raise with clear message
-        raise FileNotFoundError("Embedding model not ready. Run python scripts/setup_models.py or python main.py")
+        raise FileNotFoundError("Embedding model folder is missing (project/embedding_model/). Copy it with the project and restart.")
 
     # Prepare texts: description is the primary semantic signal, combine name + description for better retrieval
     texts = []
@@ -221,7 +258,7 @@ def search(query: str, top_k: int = 5) -> list[dict]:
     if not tools:
         return []
 
-    from models.embedding.service import embed_query
+    from core.embedding.service import embed_query
     import numpy as np
 
     q_emb = np.array(embed_query(query), dtype=np.float32)
