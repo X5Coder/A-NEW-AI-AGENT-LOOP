@@ -1,25 +1,25 @@
 """
-Embedding bootstrap - offline-first bundled model loader.
+Embedding bootstrap - automatic bundled model loader.
 
-- Single dedicated folder: project/embedding_model/ (weights + tokenizer
-  ship WITH the project copy; normal runs NEVER touch the network).
+- Single dedicated folder: project/embedding_model/.
+- First run downloads the model automatically from HuggingFace: no prompt,
+  no opt-in flag, no manual copy. ~1.2GB once, with resume + progress.
+- Smart check first on every run: complete folder -> ready instantly with
+  zero network. Missing or incomplete -> only the gaps are fetched.
+- Install/update runs sync against HuggingFace: current files are skipped,
+  only deltas download (re-installs cost ~zero traffic).
 - Device is detected ONCE at startup (cached): CUDA when an NVIDIA GPU is
   usable, else CPU. Reported in the status dict and startup log.
-- Idempotent: a .download_complete marker means ready, never re-checks.
+- Idempotent: a .download_complete marker + essential files means ready.
 - get_status() is pollable by the UI (progress bar while preparing).
-- First-install download is OPT-IN only (scripts/build_embedding_seed.py
-  --download or X5_ALLOW_EMBEDDING_DOWNLOAD=1); normal startup refuses
-  clearly with copy instructions when the folder is missing.
 """
 from __future__ import annotations
 
-import os
 import threading
 import time
 from pathlib import Path
 
-# Internal source used ONLY by the opt-in first-install download.
-# Never shown in user-visible strings (UI/logs use "embedding model" only).
+# HuggingFace source of the bundled embedding model (auto-fetch, first run).
 _SOURCE_REPO = "Qwen/Qwen3-Embedding-0.6B"
 MARKER = ".download_complete"
 # Essential files only: weights + configs + tokenizer. Skips docs, git
@@ -27,6 +27,9 @@ MARKER = ".download_complete"
 ALLOW_PATTERNS = [
     "*.json", "merges.txt", "vocab.json", "*.safetensors", "1_Pooling/*",
 ]
+# A folder counts as usable only with configs + tokenizer + real weights.
+ESSENTIAL_FILES = ("config.json", "tokenizer.json")
+MAX_DOWNLOAD_ATTEMPTS = 3
 
 _lock = threading.Lock()
 _progress: dict = {"state": "unknown", "downloaded_mb": 0.0, "device": "cpu", "detail": ""}
@@ -66,13 +69,30 @@ def is_complete() -> bool:
         return False
 
 
+def _local_state(folder=None) -> str:
+    """Classify the bundled folder: 'ready' | 'incomplete' | 'missing'. Never raises."""
+    try:
+        d = Path(folder) if folder else embedding_dir()
+        if not d.exists():
+            return "missing"
+        has_weights = any(d.glob("*.safetensors"))
+        has_essentials = all((d / name).is_file() for name in ESSENTIAL_FILES)
+        if has_weights and has_essentials and (d / MARKER).is_file():
+            return "ready"
+        if has_weights or has_essentials or any(d.iterdir()):
+            return "incomplete"
+        return "missing"
+    except Exception:
+        return "missing"
+
+
 def require_ready() -> None:
-    """Refuse when the bundled resources are missing (every request gates on this)."""
-    if not is_complete():
+    """Refuse when the bundled resources are unusable (every request gates on this)."""
+    if _local_state() != "ready":
         raise RuntimeError(
-            "Embedding model folder is missing (project/embedding_model/). "
-            "Copy it next to the project (it ships with the release zip) and restart - "
-            "no download happens automatically.")
+            "Embedding model is not ready (project/embedding_model/ incomplete). "
+            "Start the console or run install.py - the model downloads "
+            "automatically on first run.")
 
 
 def get_status() -> dict:
@@ -100,49 +120,60 @@ def _set_state(state: str, detail: str = "") -> None:
         pass
 
 
-def ensure_embedding_model(timeout_seconds: int = 3600) -> Path:
-    """Use the bundled embedding model (offline-first, never downloads by default).
+def ensure_embedding_model(sync: bool = False, timeout_seconds: int = 3600) -> Path:
+    """Check-first loader for the bundled embedding model.
 
-    Device (GPU/CPU) is detected once and cached. When the folder is missing,
-    fails clearly with copy instructions; download happens ONLY when the
-    opt-in flag is set (env X5_ALLOW_EMBEDDING_DOWNLOAD=1, used by the
-    first-install script).
+    - ready + sync=False -> return instantly, zero network (normal startup).
+    - missing/incomplete, or sync=True (install/update) -> verify against
+      HuggingFace and fetch ONLY missing/changed files (resume, progress,
+      max 3 attempts). Re-installs cost ~zero traffic when files are current.
     """
-    _ = timeout_seconds  # kept for signature compatibility; offline check is instant.
+    _ = timeout_seconds  # kept for signature compatibility; checks are fast.
     target = embedding_dir()
-    if is_complete():
+    if not sync and _local_state(target) == "ready":
         _set_state("ready")
         print(f"[OK] Embedding model ready. Device: {detect_device()} (auto).")
         return target
-    if os.environ.get("X5_ALLOW_EMBEDDING_DOWNLOAD") != "1":
-        _set_state("error", "bundled embedding model folder is missing")
-        raise RuntimeError(
-            "Embedding model folder is missing (project/embedding_model/). "
-            "Copy it next to the project (it ships with the release zip) and restart - "
-            "no download happens automatically.")
-    _set_state("downloading", "Downloading resources…")
-    print("=" * 70)
-    print("  Downloading resources… (bundled embedding model, first install only)")
-    print(f"  Device: {detect_device()} (GPU used automatically when available)")
-    print("=" * 70)
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-        from huggingface_hub import snapshot_download
-        # Built-in console progress bar from huggingface_hub (tqdm).
-        snapshot_download(repo_id=_SOURCE_REPO, local_dir=str(target),
-                          local_dir_use_symlinks=False, resume_download=True,
-                          max_workers=4, allow_patterns=ALLOW_PATTERNS)
-        (target / MARKER).write_text("complete\n", encoding="utf-8")
-    except Exception as e:
-        _set_state("error", str(e)[:200])
-        print(f"[ERROR] Resource download failed: {e}", flush=True)
+    if sync:
+        print("[..] Checking embedding model (current files are skipped, only deltas download)…")
+    else:
+        print("=" * 70)
+        print("  First run: downloading the embedding model (~1.2GB, once only)…")
+        print(f"  Device: {detect_device()} (GPU used automatically when available)")
+        print("  Interrupted? Just restart - the download resumes where it stopped.")
+        print("=" * 70)
+    _set_state("downloading", "Fetching embedding model (deltas only)…")
+    last_error = None
+    for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            from huggingface_hub import snapshot_download
+            # Built-in console progress bar from huggingface_hub (tqdm).
+            # Files already current are skipped, so this is instant on re-runs.
+            snapshot_download(repo_id=_SOURCE_REPO, local_dir=str(target),
+                              local_dir_use_symlinks=False, resume_download=True,
+                              max_workers=4, allow_patterns=ALLOW_PATTERNS)
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            print(f"[WARN] Model fetch attempt {attempt}/{MAX_DOWNLOAD_ATTEMPTS} failed: "
+                  f"{e} - retrying…", flush=True)
+            _set_state("downloading", f"Retrying ({attempt}/{MAX_DOWNLOAD_ATTEMPTS})…")
+    if last_error is not None:
+        _set_state("error", str(last_error)[:200])
+        print(f"[ERROR] Embedding model fetch failed: {last_error}", flush=True)
         print("  Check your connection and restart: the download resumes automatically.", flush=True)
-        raise RuntimeError(f"Embedding model download failed: {e}") from e
-    if not is_complete():
-        _set_state("error", "download finished but files are missing")
-        raise RuntimeError("Embedding model download finished but files are missing.")
+        raise RuntimeError(f"Embedding model download failed: {last_error}") from last_error
+    try:
+        (target / MARKER).write_text("complete\n", encoding="utf-8")
+    except Exception:
+        pass
+    if _local_state(target) != "ready":
+        _set_state("error", "download finished but essential files are unusable")
+        raise RuntimeError("Embedding model download finished but essential files are missing.")
     _set_state("ready")
-    print("[OK] Resources ready.")
+    print("[OK] Embedding model ready.")
     return target
 
 

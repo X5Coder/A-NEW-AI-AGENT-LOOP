@@ -14,9 +14,9 @@ def main() -> int:
     print("  X5Agent - Starting")
     print("=" * 70)
 
-    # 1. Bundled embedding model (ships with the project, offline-first).
-    # Device (GPU/CPU) is detected once and cached. Fails clearly when the
-    # project/embedding_model/ folder is missing (copy it, no download).
+    # 1. Bundled embedding model (auto-download on first run, instant after).
+    # Device (GPU/CPU) is detected once and cached. Missing/incomplete files
+    # are fetched automatically (deltas only, resume on restart).
     try:
         from core.embedding.bootstrap import ensure_embedding_model
     except ImportError as e:

@@ -109,7 +109,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml). Served via /api/dashboard.
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 UPDATE_REPO = "X5Coder/A-NEW-AI-AGENT-LOOP"
 
@@ -1629,6 +1629,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/embedding_status":
             self._handle_embedding_status_get()
             return
+        if parsed.path == "/api/public_share":
+            self._handle_public_share_get()
+            return
         if parsed.path == "/api/update_check":
             self._handle_update_check_get()
             return
@@ -3082,6 +3085,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json({"state": "unknown", "detail": str(e)[:200]}, status=500)
 
+    def _handle_public_share_get(self):
+        """GET /api/public_share — Tailscale Funnel snapshot (read-only, never enables)."""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from web.server.tailscale_share import status as _ts_status
+            self._send_json(_ts_status(port=DEFAULT_PORT))
+        except Exception as e:
+            self._send_json({"installed": False, "error": str(e)[:200]}, status=500)
+
     def _handle_update_check_get(self):
         """GET /api/update_check — local vs remote state + notes (never raises, always 200)."""
         try:
@@ -4107,7 +4120,32 @@ def _warmup_models() -> None:
 threading.Thread(target=_warmup_models, daemon=True).start()
 
 
-def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> int:
+def _enable_public_share_bg(port: int) -> None:
+    """Background Funnel enable after the port answers (best-effort, never raises)."""
+    import socket as _socket
+
+    for _ in range(30):
+        try:
+            probe = _socket.create_connection(("127.0.0.1", port), timeout=2.0)
+            try:
+                probe.close()
+            except Exception:
+                pass
+            break
+        except Exception:
+            time.sleep(1)
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from web.server.tailscale_share import ensure_public
+        snap = ensure_public(port=port, open_browser=False)
+        if snap.get("public_url"):
+            print(f"  PUBLIC console (anyone can open): {snap['public_url']}")
+    except Exception as e:
+        print(f"[WARN] Public share failed: {e}", file=sys.stderr)
+
+
+def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False) -> int:
     if not DASHBOARD_ROOT.exists():
         print(f"[ERROR] Dashboard root not found: {DASHBOARD_ROOT}", file=sys.stderr)
         return 1
@@ -4161,6 +4199,10 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> int:
             print(f"  {DashboardHandler.SERVER_DESCRIPTION}")
             print(f"  Serving: {DASHBOARD_ROOT}")
             print(f"  URL:     {url}")
+            if public:
+                print(f"  Public:  enabling Tailscale Funnel ...")
+                threading.Thread(target=_enable_public_share_bg, args=(port,),
+                                 name="x5-public-share", daemon=True).start()
             print(f"  Press Ctrl+C to stop")
             print("=" * 70)
             try:
@@ -4190,10 +4232,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="X5Agent local server")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Host to bind (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port to bind (default 5173)")
+    parser.add_argument("--public", action="store_true",
+                        help="Also expose via Tailscale Funnel (permanent public https URL)")
     args = parser.parse_args()
 
     # Validate host is loopback for safety (no 0.0.0.0 exposure by default)
     if args.host not in ("127.0.0.1", "localhost"):
         print(f"[WARN] Binding to non-loopback host {args.host} — ensure firewall", file=sys.stderr)
 
-    raise SystemExit(run(host=args.host, port=args.port))
+    raise SystemExit(run(host=args.host, port=args.port, public=args.public))

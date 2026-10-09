@@ -4,21 +4,19 @@ Reads the runtime stores (X5Agent/Data/vector) and copies them as
 *.seed.json into project/storage/vector/ (committed, small JSON), so a
 fresh copy gets instant tool/trigger search when specs are unchanged.
 
-- Offline by default: the bundled project/embedding_model/ folder is used,
-  nothing is downloaded.
-- --download : opt-in first-install download of the bundled folder, then build.
+- Fully automatic: a missing/incomplete project/embedding_model/ folder
+  downloads on its own (deltas only, resume on restart).
 - --snapshot-only : skip the model entirely; snapshot the current runtime
   stores as seeds after verifying their hash matches current specs
   (instant, used when embeddings are already built).
 
 Usage (from project/):
-    python scripts/build_embedding_seed.py [--download] [--snapshot-only]
+    python scripts/build_embedding_seed.py [--snapshot-only]
 """
 from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -69,9 +67,6 @@ def _snapshot_one(label: str, store_mod, live_name: str, seed_name: str) -> bool
 
 
 def main(argv: list[str]) -> int:
-    if "--download" in argv:
-        os.environ["X5_ALLOW_EMBEDDING_DOWNLOAD"] = "1"
-
     tool_store = _load_store_module("plugins/tool-discovery/search/store.py", "seed_tool_store")
     trigger_store = _load_store_module(
         "plugins/trigger-discovery/search/store.py", "seed_trigger_store")

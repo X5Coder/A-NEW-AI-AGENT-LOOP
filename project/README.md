@@ -32,8 +32,8 @@ python -m web.server.server   # start the console (http://127.0.0.1:5173/)
 python main.py
 ```
 
-The bundled `embedding_model/` folder (~1.2 GB) ships with the project
-copy (release zip) and is used offline - nothing is downloaded on first run.
+The bundled `embedding_model/` folder (~1.2 GB) downloads automatically
+on first run (deltas only, resume on restart) and is used offline after.
 
 ---
 

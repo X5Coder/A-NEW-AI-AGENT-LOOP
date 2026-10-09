@@ -27,8 +27,9 @@ def _load_model():
     model_path = embedding_dir()
     if not is_complete():
         raise FileNotFoundError(
-            "Embedding model folder is missing (project/embedding_model/). "
-            "Copy it next to the project (ships with the release zip) and restart.")
+            "Embedding model folder is incomplete (project/embedding_model/). "
+            "Start the console or run install.py - the model downloads "
+            "automatically on first run.")
     try:
         model_path.resolve().relative_to(Path(__file__).resolve().parents[2].resolve())
     except ValueError as exc:

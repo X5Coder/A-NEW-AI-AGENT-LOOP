@@ -1,11 +1,13 @@
 {
-  "version": "0.2.0",
-  "description": "New direct update system: Settings → Updates checks updates.json on GitHub, shows what's new first, and updates only after you approve — code only, data untouched.",
+  "version": "0.3.0",
+  "description": "Two upgrades in one: a permanent public console link via Tailscale Funnel (install step 6/6 shows and opens the registration link, then prints the public URL), and the embedding model now downloads automatically on first run with a check-first delta sync — no prompt and no manual copy needed.",
   "features": [
-    "Direct version check via updates.json — no GitHub releases needed.",
-    "Check shows the description and new features before anything updates.",
-    "Separate Update now button — nothing updates without your approval.",
-    "Code-only updates with live progress — user data is never touched.",
-    "New mandatory rule: agents update this file on every big update."
+    "Install step 6/6: Tailscale check, registration link shown and opened, Funnel enabled, permanent public URL printed.",
+    "New command: python -m web.server.server --public for the public link on any machine.",
+    "New /api/public_share endpoint with read-only share status for the dashboard.",
+    "First run fetches the embedding model automatically (~1.2GB once, resume on restart).",
+    "Smart check first: complete setups run instantly with zero network; updates sync only changed files.",
+    "Removed the manual download prompt and the release-zip copy steps.",
+    "Works on Windows and Linux with stdlib only; the local console works even when sharing is skipped."
   ]
 }

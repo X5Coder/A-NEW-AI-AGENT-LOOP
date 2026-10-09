@@ -1,0 +1,273 @@
+"""Tailscale public sharing — single owner for the console public link.
+
+Responsibility: expose the local console (127.0.0.1:5173) on a permanent
+public URL that anyone can open, using Tailscale Funnel:
+  https://<machine>.<tailnet>.ts.net  (stable while machine + tailnet names stay)
+
+Why Funnel and not Serve: `tailscale serve` is tailnet-only (your devices),
+`tailscale funnel` is the public internet link the user asked for.
+
+Cross-platform: Windows + Linux, stdlib only (subprocess + json + webbrowser).
+No secrets, no hardcoded tokens, bounded retries (max 3), bounded timeouts.
+
+Lifecycle (explicit, owned here):
+  ensure_public(port) -> create/login/funnel -> save Data/database/tailscale.json
+  status()            -> read-only snapshot (never boots anything)
+  stop()              -> `tailscale funnel --https=443 off` (best-effort)
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+import webbrowser
+from pathlib import Path
+
+TAILNET_INSTALL_URL = "https://tailscale.com/download"
+LOGIN_URL_RE = re.compile(r"https://login\.tailscale\.com/[^\s'\"]+")
+MAX_RETRIES = 3
+CMD_TIMEOUT = 30
+LOGIN_WAIT_SEC = 180
+FUNNEL_PORT = 443
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _data_file() -> Path:
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from core.paths import data_db_file
+
+        return data_db_file("tailscale.json")
+    except Exception:
+        fallback = PROJECT_ROOT.parents[0] / "X5Agent" / "Data" / "database" / "tailscale.json"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def find_tailscale() -> str | None:
+    """Locate the tailscale binary (PATH + Windows default location)."""
+    found = shutil.which("tailscale")
+    if found:
+        return found
+    if sys.platform.startswith("win"):
+        for candidate in (
+            Path(r"C:\Program Files\Tailscale\tailscale.exe"),
+            Path(r"C:\Program Files (x86)\Tailscale\tailscale.exe"),
+        ):
+            if candidate.exists():
+                return str(candidate)
+    return None
+
+
+def _run(args: list[str], timeout: int = CMD_TIMEOUT) -> subprocess.CompletedProcess:
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+
+def _run_retry(args: list[str]) -> subprocess.CompletedProcess | None:
+    last = None
+    for _ in range(MAX_RETRIES):
+        try:
+            last = _run(args)
+            return last
+        except (subprocess.TimeoutExpired, OSError):
+            last = None
+            time.sleep(1)
+    return last
+
+
+def is_installed() -> tuple[bool, str | None]:
+    path = find_tailscale()
+    return (path is not None, path)
+
+
+def login_status(bin_path: str) -> dict:
+    """Read-only status: logged in? + tailnet DNS name. Never boots anything."""
+    try:
+        proc = _run([bin_path, "status", "--json"], timeout=15)
+        if proc is None or proc.returncode != 0:
+            return {"logged_in": False, "dns": None}
+        data = json.loads(proc.stdout or "{}")
+        backend = str(data.get("BackendState") or "")
+        self_node = data.get("Self") or {}
+        dns = str(self_node.get("DNSName") or "").rstrip(".")
+        logged_in = backend == "Running" and bool(dns)
+        return {"logged_in": logged_in, "dns": dns or None}
+    except Exception:
+        return {"logged_in": False, "dns": None}
+
+
+def funnel_status(bin_path: str) -> dict:
+    """Read-only funnel/serve snapshot (never enables anything)."""
+    try:
+        proc = _run([bin_path, "funnel", "status", "--json"], timeout=15)
+        if proc is not None and proc.returncode == 0 and (proc.stdout or "").strip():
+            try:
+                return {"raw": json.loads(proc.stdout)}
+            except Exception:
+                return {"raw": (proc.stdout or "")[:500]}
+    except Exception:
+        pass
+    return {"raw": None}
+
+
+def status(port: int = 5173) -> dict:
+    """Public-share snapshot for UI/API: installed/logged_in/dns/public_url."""
+    installed, bin_path = is_installed()
+    out: dict = {"installed": installed, "logged_in": False, "dns": None,
+                 "public_url": None, "local": f"http://127.0.0.1:{port}/"}
+    if not installed or not bin_path:
+        out["install_url"] = TAILNET_INSTALL_URL
+        try:
+            saved = json.loads(_data_file().read_text(encoding="utf-8"))
+            if isinstance(saved, dict) and saved.get("public_url"):
+                out["public_url"] = str(saved["public_url"])[:200]
+        except Exception:
+            pass
+        return out
+    info = login_status(bin_path)
+    out.update(info)
+    try:
+        saved = json.loads(_data_file().read_text(encoding="utf-8"))
+        if isinstance(saved, dict) and saved.get("public_url"):
+            out["public_url"] = str(saved["public_url"])[:200]
+    except Exception:
+        pass
+    if not out["public_url"] and info.get("dns"):
+        out["public_url"] = f"https://{info['dns']}"
+    return out
+
+
+def _extract_login_url(text: str) -> str | None:
+    match = LOGIN_URL_RE.search(text or "")
+    return match.group(0) if match else None
+
+
+def login_interactive(bin_path: str) -> bool:
+    """Run `tailscale login`, print + open the registration URL, wait for login.
+
+    Returns True when `tailscale status --json` reports Running.
+    Never raises; bounded wait (LOGIN_WAIT_SEC).
+    """
+    print("  opening Tailscale registration — sign in once in your browser ...")
+    try:
+        proc = subprocess.Popen(
+            [bin_path, "login"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+    except OSError as e:
+        print(f"  ERROR: cannot start tailscale login ({e})", file=sys.stderr)
+        return False
+    opened = False
+    start = time.time()
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                print(f"  tailscale: {line[:200]}")
+            url = _extract_login_url(line)
+            if url and not opened:
+                opened = True
+                print(f"  >>> register here: {url}")
+                try:
+                    webbrowser.open(url)
+                except Exception:
+                    pass
+            if login_status(bin_path).get("logged_in"):
+                break
+            if time.time() - start > LOGIN_WAIT_SEC:
+                break
+    except Exception:
+        pass
+    finally:
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+        except Exception:
+            pass
+    ok = bool(login_status(bin_path).get("logged_in"))
+    print("  OK: Tailscale logged in" if ok else "  WARN: login not completed (run `tailscale login` manually)")
+    return ok
+
+
+def enable_funnel(bin_path: str, port: int = 5173) -> str | None:
+    """Enable Funnel on the console port, return the public URL (or None).
+
+    Tries the modern syntax first, falls back to older variants.
+    Funnel needs HTTPS + MagicDNS + funnel allowed in the admin ACL; when the
+    admin blocks it, falls back to tailnet-only `serve` and returns its URL.
+    """
+    target = f"http://127.0.0.1:{port}"
+    variants = [
+        [bin_path, "funnel", "--bg", target],
+        [bin_path, "funnel", "--bg", str(port)],
+        [bin_path, "funnel", str(port)],
+    ]
+    for args in variants:
+        proc = _run_retry(args)
+        if proc is not None and proc.returncode == 0:
+            break
+    else:
+        # Funnel blocked (ACL/plan) -> tailnet-only serve, still useful.
+        _run_retry([bin_path, "serve", "--bg", target])
+        print("  WARN: funnel refused (check admin: HTTPS + funnel in ACL) — using tailnet-only serve")
+    info = login_status(bin_path)
+    dns = info.get("dns")
+    public_url = f"https://{dns}" if dns else None
+    try:
+        record = {"public_url": public_url, "dns": dns, "port": port,
+                  "mode": "funnel",
+                  "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        _data_file().write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return public_url
+
+
+def ensure_public(port: int = 5173, open_browser: bool = True) -> dict:
+    """Full flow: install check -> login (URL shown + opened) -> funnel on.
+
+    Never raises; returns status() snapshot. Safe to call from install or server.
+    """
+    installed, bin_path = is_installed()
+    if not installed or not bin_path:
+        print("  Tailscale is not installed (needed for the public link).")
+        print(f"  1) install: {TAILNET_INSTALL_URL}  (Windows .exe / Linux package, 1 minute)")
+        print("  2) re-run this step after installing — the local console works meanwhile.")
+        try:
+            if open_browser:
+                webbrowser.open(TAILNET_INSTALL_URL)
+        except Exception:
+            pass
+        return status(port)
+    info = login_status(bin_path)
+    if not info.get("logged_in"):
+        if not login_interactive(bin_path):
+            return status(port)
+    public_url = enable_funnel(bin_path, port)
+    if public_url:
+        print(f"  >>> PUBLIC console (anyone can open): {public_url}")
+        try:
+            if open_browser:
+                webbrowser.open(public_url)
+        except Exception:
+            pass
+    else:
+        print("  WARN: could not determine the public URL — open admin: https://login.tailscale.com/admin/machines")
+    return status(port)
+
+
+def stop() -> None:
+    """Best-effort funnel off (cleanup path, never raises)."""
+    try:
+        installed, bin_path = is_installed()
+        if installed and bin_path:
+            _run([bin_path, "funnel", f"--https={FUNNEL_PORT}", "off"], timeout=15)
+    except Exception:
+        pass

@@ -8,7 +8,9 @@ Flow (exactly, nothing else):
      NEVER touches X5Agent/Data, embedding_model/, or any user data)
   5. bundled embedding check (offline) + tool/trigger embeddings ready
   6. email + password prompt (stored as salted hash only, never plaintext)
-  7. prints the console URL only
+  7. public link via Tailscale Funnel (install check -> login URL
+     shown + opened -> funnel on -> permanent public URL printed)
+  8. opens the console in the browser + prints local and public URLs
 
 Run from the project/ directory:  python install.py
 Start the console after:          python -m web.server.server
@@ -55,7 +57,7 @@ def _fail(msg: str) -> int:
 
 def check_environment() -> bool:
     """Python version, CPU/GPU (once), disk, required packages. Returns True when ready."""
-    _step("1/5 environment check")
+    _step("1/6 environment check")
     if sys.version_info < MIN_PYTHON:
         print(f"  ERROR: python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required, got {sys.version.split()[0]}",
               file=sys.stderr)
@@ -120,7 +122,7 @@ def _latest_version() -> str | None:
 
 def check_project_state() -> dict:
     """Missing / complete / has live data. Never modifies anything."""
-    _step("2/5 project state check")
+    _step("2/6 project state check")
     sys.path.insert(0, str(PROJECT_ROOT))
     from core.embedding.bootstrap import is_complete as _emb_ok
 
@@ -150,7 +152,7 @@ def check_project_state() -> dict:
 
 def update_source() -> None:
     """Source-only update: tracked code via git fast-forward. Never deletes data."""
-    _step("3/5 source update (code only, data untouched)")
+    _step("3/6 source update (code only, data untouched)")
     if not (shutil.which("git") and GIT_ROOT is not None):
         _warn("no git checkout - skipping update (download the release zip instead)")
         return
@@ -171,28 +173,17 @@ def update_source() -> None:
 
 
 def ensure_resources() -> bool:
-    """Bundled embedding (offline) + prebuilt tool/trigger embeddings."""
-    _step("4/5 resources (offline, bundled)")
+    """Embedding model (auto-download on first run, delta check on updates) + prebuilt tool/trigger embeddings."""
+    _step("4/6 resources (embedding auto-fetch + prebuilt embeddings)")
     sys.path.insert(0, str(PROJECT_ROOT))
     from core.embedding.bootstrap import ensure_embedding_model
 
     try:
-        ensure_embedding_model()
-    except RuntimeError as e:
-        print(f"  {e}")
-        try:
-            ans = input("  Download the bundled embedding model now? [y/N]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            return False
-        if ans != "y":
-            return False
-        os.environ["X5_ALLOW_EMBEDDING_DOWNLOAD"] = "1"
-        try:
-            ensure_embedding_model()
-        except Exception as e2:
-            print(f"  ERROR: download failed: {e2}", file=sys.stderr)
-            return False
+        # sync=True: check first - current files are skipped, only deltas download.
+        ensure_embedding_model(sync=True)
+    except Exception as e:
+        print(f"  ERROR: embedding model not ready: {e}", file=sys.stderr)
+        return False
     _ok("embedding model ready")
     try:
         import importlib.util
@@ -213,7 +204,7 @@ def ensure_resources() -> bool:
 
 def ask_credentials() -> bool:
     """Email + hidden password prompt. Stores salted hash only. Returns True on success."""
-    _step("5/5 console owner")
+    _step("5/6 console owner")
     try:
         email = input("  email: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -248,6 +239,41 @@ def ask_credentials() -> bool:
         return False
 
 
+def setup_public_share() -> None:
+    """Step 6/6: Tailscale Funnel public link (anyone can open).
+
+    Flow: install check -> login URL shown + opened in browser ->
+    funnel on -> permanent https://<machine>.<tailnet>.ts.net printed.
+    Never fatal: the local console works even when this is skipped.
+    """
+    _step("6/6 public link (Tailscale Funnel — anyone can open)")
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from web.server.tailscale_share import ensure_public, status
+    except Exception as e:
+        _warn(f"public link skipped ({str(e)[:120]}) - local console still works")
+        return
+    try:
+        ans = input("  Enable the public internet link? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print(file=sys.stderr)
+        return
+    if ans == "n":
+        _ok("skipped - local console only")
+        return
+    try:
+        snap = ensure_public(port=5173, open_browser=True)
+    except Exception as e:
+        _warn(f"public link failed ({str(e)[:120]}) - local console still works")
+        return
+    if snap.get("public_url"):
+        _ok(f"public console: {snap['public_url']}")
+    elif not snap.get("installed"):
+        _warn("install Tailscale, then: python -m web.server.server --public")
+    else:
+        _warn("login not completed - re-run: python -m web.server.server --public")
+
+
 def main() -> int:
     print("=" * 70)
     print("  X5Agent install / update (one command)")
@@ -260,8 +286,16 @@ def main() -> int:
         return 1
     if not ask_credentials():
         return 1
+    setup_public_share()
+    try:
+        import webbrowser
+
+        webbrowser.open(UI_URL)
+    except Exception:
+        pass
     print("\n" + "=" * 70)
-    print(f"  Console: {UI_URL}")
+    print(f"  Console (local):  {UI_URL}")
+    print("  Console (public): python -m web.server.server --public  (from project/)")
     print("  Start it: python -m web.server.server  (from project/)")
     print("=" * 70)
     return 0
