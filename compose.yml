@@ -1,0 +1,35 @@
+# X5Agent — the ONE command for install + update on any machine:
+#
+#   docker compose up --build
+#
+# What it does:
+#   1. builds the image (code + python dependencies, no data, no secrets)
+#   2. on every start the entrypoint pulls the newest source from GitHub
+#      (git pull --ff-only — source only, offline continues with baked code)
+#   3. serves the console on http://localhost:5173/
+#
+# Data safety: local data lives ONLY in the named volumes below. Rebuilding,
+# re-pulling, or re-running NEVER deletes them. To wipe data explicitly:
+#   docker compose down -v   (deletes the volumes on purpose — data is gone)
+
+name: x5agent
+
+services:
+  x5agent:
+    build: .
+    image: x5agent:latest
+    ports:
+      - "5173:5173"
+    volumes:
+      - x5-data:/app/X5Agent/Data
+      - x5-models:/app/project/embedding_model
+    environment:
+      # X5_PUBLIC=1 also enables the Tailscale Funnel public link (needs a
+      # logged-in tailscale client; without it the server only warns and the
+      # local console keeps working). Default 0: local console only.
+      X5_PUBLIC: "0"
+    restart: unless-stopped
+
+volumes:
+  x5-data:
+  x5-models:

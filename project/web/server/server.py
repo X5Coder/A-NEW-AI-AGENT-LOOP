@@ -109,7 +109,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml). Served via /api/dashboard.
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 
 UPDATE_REPO = "X5Coder/A-NEW-AI-AGENT-LOOP"
 

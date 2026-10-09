@@ -1,13 +1,11 @@
 {
-  "version": "0.3.0",
-  "description": "Two upgrades in one: a permanent public console link via Tailscale Funnel (install step 6/6 shows and opens the registration link, then prints the public URL), and the embedding model now downloads automatically on first run with a check-first delta sync — no prompt and no manual copy needed.",
+  "version": "0.4.0",
+  "description": "One-command Docker deployment: docker compose up --build installs everything, pulls the newest source from GitHub on every start (code only), and keeps all local data in named volumes so updates never lose anything.",
   "features": [
-    "Install step 6/6: Tailscale check, registration link shown and opened, Funnel enabled, permanent public URL printed.",
-    "New command: python -m web.server.server --public for the public link on any machine.",
-    "New /api/public_share endpoint with read-only share status for the dashboard.",
-    "First run fetches the embedding model automatically (~1.2GB once, resume on restart).",
-    "Smart check first: complete setups run instantly with zero network; updates sync only changed files.",
-    "Removed the manual download prompt and the release-zip copy steps.",
-    "Works on Windows and Linux with stdlib only; the local console works even when sharing is skipped."
+    "Single command on any machine: docker compose up --build, console on http://localhost:5173/.",
+    "All local data lives in named volumes (x5-data, x5-models) — rebuilds and updates never delete them.",
+    "Every start refreshes source from GitHub (git pull --ff-only); offline continues with the baked code.",
+    "Embedding weights download once into the models volume, then persist across rebuilds.",
+    "Image holds code only — live data, weights binaries and secrets are excluded by .dockerignore."
   ]
 }

@@ -1,0 +1,24 @@
+# Live user data — NEVER baked into the image (lives in named volumes).
+X5Agent/
+# Model weights — downloaded once at runtime into the x5-models volume.
+**/*.safetensors
+**/*.bin
+**/*.onnx
+**/*.pt
+**/*.ct2
+**/*.engine
+# Secrets — never in the image.
+.env
+.env.local
+# Build junk.
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.opencode/
+seed_build.err
+seed_build.log
+.DS_Store
+# NOTE: .git is intentionally KEPT — the entrypoint refreshes source
+# from GitHub with `git pull --ff-only` on every container start.
