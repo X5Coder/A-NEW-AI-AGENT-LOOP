@@ -33,14 +33,19 @@ COPY . /app
 # Baked data for single-room binds: the manager copies the FRESH image dirs
 # /app/data + /data into the new binds on first deploy (then they persist).
 # The entrypoint claims /app/data/x5store and funnels live data there.
+# This must NOT bake weights (1.1GB *.safetensors): the manager stores the
+# whole source tree, and baking them doubles the ~5MB code into gigabytes.
 RUN mkdir -p /app/data/x5store /data \
- && cp -r /app/project/embedding_model/. /app/data/x5store/ 2>/dev/null || true \
- && cp -r /app/project/embedding_model/. /data/x5store-seed/ 2>/dev/null || true
+ && (cp -r /app/project/embedding_model/. /app/data/x5store/ 2>/dev/null || true) \
+ && (cp -r /app/project/embedding_model/. /data/x5store-seed/ 2>/dev/null || true) \
+ && (find /app/data/x5store /data/x5store-seed -name '*.safetensors' -delete 2>/dev/null || true)
 # Seed copy of the tracked embedding configs: at runtime a named volume
 # shadows /app/project/embedding_model, so the entrypoint re-seeds the
 # volume from here when it is empty (weights download once, then persist).
+# Same rule: configs only, never the 1.1GB weights (see .dockerignore).
 RUN mkdir -p /app/.seed-embedding \
- && cp -r /app/project/embedding_model/. /app/.seed-embedding/ 2>/dev/null || true
+ && (cp -r /app/project/embedding_model/. /app/.seed-embedding/ 2>/dev/null || true) \
+ && (find /app/.seed-embedding -name '*.safetensors' -delete 2>/dev/null || true)
 
 RUN pip install --quiet ./project
 

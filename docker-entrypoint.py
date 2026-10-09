@@ -161,14 +161,16 @@ def persist_data() -> None:
         _log("store unavailable — data stays ephemeral")
         return
     _log(f"persistent store: {store}")
-    try:  # claim marker first: even an empty claim routes reads here
-        marker = os.path.join(store, ".x5store")
-        if not os.path.isfile(marker):
-            with open(marker, "w", encoding="utf-8") as f:
-                f.write("x5agent persistent store")
-    except Exception:
-        pass
-    _copy_seed_into(store)  # baked configs persist via the fresh-bind copy
+    # Claim marker LAST (after seeding): data_root() + embedding_dir() route
+    # reads to the store only when the marker exists — claiming an empty
+    # store first would blind the bootstrap to the bundled model next to it.
+    for seed_src in (SEED_DIR, "/data/x5store-seed"):
+        try:
+            if os.path.isdir(seed_src) and not os.path.islink(seed_src):
+                shutil.copytree(seed_src, store, dirs_exist_ok=True)
+                _log(f"seed configs copied: {seed_src} -> store")
+        except Exception as e:
+            _log(f"seed copy skipped ({seed_src}: {str(e)[:100]})")
     moved = 0
     for baked in (os.path.join(APP_ROOT, "X5Agent", "Data"), MODELS_DIR):
         try:
@@ -178,6 +180,13 @@ def persist_data() -> None:
             pass
     if moved:
         _log(f"moved {moved} baked entries into the store")
+    try:
+        marker = os.path.join(store, ".x5store")
+        if not os.path.isfile(marker):
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write("x5agent persistent store")
+    except Exception:
+        pass
 
 
 def ensure_dirs() -> None:
