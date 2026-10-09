@@ -1,0 +1,31 @@
+# ============================================================
+# تشغيل سيرفر النماذج الأربعة — إقلاع تلقائي وفحص صحة.
+# - الأوزان في فولدر models الوحيد للمشروع (project/models) — لا تُحذف مع rebuild ولا مع down.
+# - HF_HUB_OFFLINE=1 : بعد التنزيل لا يوجد أي تنزيل وقت التشغيل.
+# - ملاحظة GPU: هذا الملف بدون حجز GPU ليعمل على أي جهاز.
+#   install.sh يولّد docker-compose.override.yml تلقائياً لو وجد
+#   NVIDIA Container Toolkit (ويحذفه لو غير موجود -> وضع CPU).
+# ============================================================
+services:
+  models-server:
+    build: .
+    image: x5-models-server
+    container_name: x5-models-server
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - ../../models:/models
+    env_file:
+      - .env
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    restart: unless-stopped
+    healthcheck:
+      # تحميل النماذج الأربعة يأخذ وقتاً طويلاً (خصوصاً CPU) -> مهلة بدء كبيرة.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15m

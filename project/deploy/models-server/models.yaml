@@ -1,0 +1,53 @@
+# ============================================================
+# إعدادات النماذج الأربعة — ملف واحد لتبديل أي نموذج بسهولة
+# ============================================================
+# لتغيير نموذج: عدّل repo_id فقط، ثم أعد تشغيل:  ./install.sh
+# الأحجام التقريبية (approx_size_mb) للعرض فقط.
+# الحجم الفعلي يُسأل عنه Hugging Face وقت التشغيل (install.sh)
+# ولا يُستخدم أي حجم ثابت في حساب المساحة.
+#
+# الأوزان تُنزَّل خارج الـ image في فولدر models الوحيد للمشروع:
+#   project/models/<subdir>/  على المضيف  ==  /models/<subdir>/  داخل الحاوية
+# كل مجلد يحتوي ملفات المستودع كما هي (snapshot) بدون ضغط ولا تعديل.
+
+port: 8000
+
+models:
+  - id: embedding
+    repo_id: Qwen/Qwen3-Embedding-0.6B
+    subdir: embedding/Qwen3-Embedding-0.6B
+    type: embedding
+    loader: sentence-transformers
+    approx_size_mb: 1240
+    note: فهم ومعنى النصوص (عربي/إنجليزي)
+
+  - id: vision
+    repo_id: Qwen/Qwen3.5-4B
+    subdir: vision/Qwen3.5-4B
+    type: vision
+    loader: transformers (AutoProcessor + AutoModelForMultimodalLM)
+    approx_size_mb: 9570
+    note: تحليل صور وفيديو + OCR
+
+  - id: asr
+    repo_id: mohammedaly22/QwenCleo-ASR
+    subdir: stt/QwenCleo-ASR
+    type: asr
+    loader: pip install qwencleo-asr (حسب صفحة النموذج)
+    approx_size_mb: 3990
+    note: صوت إلى نص
+
+  - id: tts
+    repo_id: mohammedaly22/VoiceTut-TTS
+    subdir: tts/VoiceTut-TTS
+    type: tts
+    loader: pip install voicetut-tts (حسب صفحة النموذج)
+    approx_size_mb: 2400
+    note: نص إلى صوت
+
+# هوامش:
+# - reserve_gb: يُضاف دائماً (5GB) فوق حجم مجموع النماذج المطلوبة، ويُحجَز فعلياً
+#   في النهاية (ملف .reserve-buffer) حتى يبقى الفولدر آمناً دائماً.
+# - runtime_overhead_mb: تقدير ذاكرة تشغيل إضافية (activations + نظام) لتحذير RAM.
+reserve_gb: 5
+runtime_overhead_mb: 4096

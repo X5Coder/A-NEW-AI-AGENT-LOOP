@@ -51,7 +51,7 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   │   │   ├── builder.py              # build_context(): system + memories + last30 + env + todo + core tools (browser state = owner read from X5Browser live_links, no URL)
 │   │   │   └── __init__.py
 │   │   ├── filters/                  # filter layers (audio)
-│   │   │   ├── stt_correction.py       # audio -> whisper -> correction via stt_correction_system.md (no invention)
+│   │   │   ├── stt_correction.py       # audio -> QwenCleo-ASR (via models/stt/service.py, single owner) -> correction via stt_correction_system.md (no invention)
 │   │   │   ├── pipeline.py             # unified: audio→STT→main loop (direct)
 │   │   │   └── __init__.py
 │   │   └── memory/
@@ -215,28 +215,24 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   ├── Skill 2/
 │   └── Skill 3/
 ├── web/
-│   ├── server/                         # local dev server (127.0.0.1:5173, path-validated, chat attachments (image/video/text/document, doc 100MB) -> Workspace mirror copy + priority block)
+│   ├── server/                         # local dev server (127.0.0.1:5173, path-validated, console auth (first-run setup -> .env pbkdf2 hash + HttpOnly session, login.html gate), chat attachments (image/video/text/document, doc 100MB) -> Workspace mirror copy + priority block)
 │   │   ├── server.py                   # static server + SPA fallback (extensionless→index.html) + JSON APIs (dashboard/cost/balance/health/conversation/plugins/skills/models/chat/chat_stream/chat_answer/chat_cancel/message/stt/plugin_state/model_state/providers/providers/test/live_state/shot/workspace/scheduler + /api/audio TTS records) + /api/events SSE push hub (one stream/tab, hello snapshot, singleton watchers broadcast on change only) + scheduler snapshot/emit (_get_scheduler_data/_events_emit_scheduler, 15s watcher + force after chat run/skill edit) + scheduler engine ticker (60s, executing callbacks → live "يتم التنفيذ" push) + secrets: UI save→vault+Data/.env+environ, UI clear→deleted everywhere, cost measured (usage_log + live pricing), SSE live loop on chat_stream (event/reason/media/live frames + live question pause) + LIVE STATE READ FROM THE LIBRARY: live_snapshot()/live_active() take running + control/preview links straight from X5Browser (no live_state.json, no host-heal, no relay/viewer restart) + in-memory live pause (_LIVE_PAUSE: qid→tool/reason, survives refresh, dropped on answer/expire/loop-end) + /api/chat_frames (bounded run-progress frames: event_start/event/question/live/live_end, never tokens) fanned out as `run` pushes so a refreshed page rebuilds the running Working block + steps against a route that is unreachable from Windows while units answer inside WSL (fail fast, never burn the stack timeout) + done frames carry audio (final TTS voice records)
 │   │   └── __init__.py
 │   └── frontend/
 │       └── dashboard/                  # X5Agent Console — Manus-adapted DARK-ONLY theme, modular (no inline style/script)
 │           ├── index.html              # semantic structure only + skills page (cards grid + glass +Add button, nav under plugins, no inner title)
-│           ├── index.backup-before-manus.html # pre-Manus backup (restore to revert)
+│           ├── login.html              # RTL full-page sign-in (no card): email+password only, Gmail-only; form right + visual left (desktop), visual display:none on phone; first-run setup then login
+│           ├── login.css               # self-contained glass tokens (public, no auth needed) + responsive banner
+│           ├── login.js                # setup/login POST + Arabic errors + autoredirect when already signed in
 │           ├── img/
 │           │   ├── providers/            # lobe-icons static-png (MIT, trimmed): openai/anthropic/openrouter/deepseek/gemini
 │           │   └── icons/                # lobe-icons static-png (MIT, trimmed): vllm (local models) + mcp (plugins)
 │           ├── css/
 │           │   ├── tokens.css          # Manus DARK-ONLY neutrals + bright blue accent + light primary, red danger-only
-│           │   ├── tokens.backup-before-lighten.css # older workshop backup (pre-2026-09-28 lighten)
-│           │   ├── tokens.backup-before-manus.css # pre-Manus backup (restore to revert)
 │           │   ├── base.css            # reset, system+Cairo type, blue progress bar, transform-only keyframes, no-select only on agent chat output, no tap highlight
-│           │   ├── base.backup-before-manus.css
 │   │   ├── layout.css          # 308px nav / 56px toolbar / gray canvas + RTL drawer + icon rail with transform slide + hidden nav scrollbar
-│           │   ├── layout.backup-before-manus.css
 │           │   ├── components.css      # white cards, pills, black send, blue charts, thinking-block (dot-square ring wave + wave Working + per-step arrow → reason/curated-detail/image, pre-wrap), red errors only + msg-voice bubble styles
-│           │   ├── components.backup-before-manus.css
 │           │   ├── responsive.css      # breakpoints 1024/640 (logical drawer side + slide)
-│           │   └── responsive.backup-before-manus.css
 │           └── js/
 │               ├── app.js              # entry: wires all modules + copy guard (agent page only)
 │               ├── ui.js               # shared: animateIn + modal shell (drag-safe backdrop close + unified slow transform open/close) + toast + chart tooltip
@@ -277,11 +273,10 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   ├── vision/
 │   │   └── service.py              # analyze_image() (Data/files images first, legacy fallback), lazy load, 3 retries
 │   ├── stt/
-│   │   └── service.py              # transcribe_file(), lazy load, raw text (no correction layer)
-│   ├── tts/                            # TTS service: synthesize() with the fixed project voice (nova) via the integrated model only, 3 retries
-│   │   ├── service.py              # synthesize(text, voice=None→nova, lang, out_path): custom-voice blend + FFmpeg shaping; presets raw; validation rejects unknown voices
-│   │   ├── voices.py               # custom voice catalog (nova: M3/M4/M2 blend + pace/steps + shaping profile) + build_style() cached (no external service/model)
-│   │   └── postprocess.py          # FFmpeg voice shaping: rubberband pitch (formant preserved) + EQ + room + compression + loudnorm, atomic replace, 2 attempts
+│   │   └── service.py              # QwenCleo-ASR via qwencleo-asr SDK: transcribe_file() + chunked transcribe_stream() + vLLM stream_tokens() (true token streaming, fails clearly offline), lazy load, 3 retries
+│   ├── tts/                            # TTS service: synthesize() streaming-native with the fixed project voice (Mohamed, VoiceTut-TTS built-in) only, 3 retries
+│   │   ├── service.py              # synthesize(text, voice=None→Mohamed, lang, out_path) via sentence synthesize_stream(); validation rejects unknown voices/langs (ar/en only)
+│   │   └── voices.py               # built-in speaker catalog (15 studio voices + tags, DEFAULT_SPEAKER=Mohamed) + canonical_voice_name() (no external service/model)
 │   ├── manifest.json               # single source of truth: local_dir -> models/<type>/<name>
 │   ├── loader.py                   # ensure_models() + get_model_path() (manifest primary, merged copies, never re-downloads) + scan_local_models()
 │   ├── local_models/               # user-facing registry (local_dir -> models/<type>/<name>)
@@ -290,16 +285,36 @@ project/                           # == X5Agent/System Core (immutable engine, r
 ├── scripts/
 │   ├── setup_models.py             # idempotent setup into project/models (3 retries, disk check +5GB buffer, CT2 conversion)
 │   └── doctor.py                   # environment/dependency diagnostics
+├── deploy/
+│   └── models-server/              # one-command Docker stack: 4 models loaded, offline, token+login protected (./install.sh)
+│       ├── install.py              # الأمر الواحد الموحّد (يفحص OS: ويندوز/لينكس/ماك + Docker/Python/GPU/RAM/مساحة ثم يشغّل نفس التدفق عبر install.sh)
+│       ├── install                   # غلاف رفيع Linux/macOS ينادي install.py
+│       ├── install.cmd               # غلاف رفيع Windows ينادي install.py (يحتاج Git-Bash)
+│       ├── install.sh              # التدفق الكامل (يُنادَى مباشرةً أو عبر install.py)
+│       ├── doctor.sh               # project-wide status (env + model table) + select missing/partial model and download it fully (`./doctor.sh [--check]`)
+│       ├── models.yaml             # single config: 4 repo_ids (Qwen3-Embedding-0.6B, Qwen3.5-4B, QwenCleo-ASR, VoiceTut-TTS) + reserve_gb + overhead
+│       ├── Dockerfile              # code+libs only, no weights (torch/transformers/sentence-transformers/qwencleo-asr/voicetut-tts + fastapi/python-multipart + ffmpeg)
+│       ├── docker-compose.yml      # ../../models:/models bind, offline env, restart unless-stopped, healthcheck 15m start_period
+│       ├── select_models.py        # interactive checkbox select (name+HF size+status) -> selection.json; --status / --table / --all
+│       ├── download_models.py      # download selected one-by-one with real progress bar (resume on cancel/partial) + .download_complete marker + shrinks total reserve
+│       ├── server.py               # FastAPI: preload SELECTED_MODELS only (empty=all, unknown ids fail boot loudly) + GPU plan heaviest-first w/ 1.25x VRAM margin (fp16 vision / bfloat16 asr on GPU) + `/` email+password login (random session per login, 30-day TTL, logout invalidates, Secure on https, 5 fails/min/IP -> 429) + /health (selected models only, public) + /embed (64 texts max) + /vision + /asr + /tts (Bearer token on APIs, wav tmp cleaned after send; fixed English no-local-model message when a model is not loaded)
+│       ├── verify.py               # real check for LOADED selected models only (non-loaded skipped, tone fallback diagnostic-only when tts unverified)
+│       ├── README.md               # Arabic: flow + doctor + assumptions + model update
+│       └── (no local weights dir — binds ../../models, the single project/models folder shared with the local loader)
 ├── main.py                         # VPS entrypoint: X5Agent ensure + legacy->Data migrate -> auto-download Models -> auto-embed tools -> start loop
 ├── tests/                          # all test files here (fixtures unified: read/write X5Agent/Data, same as runtime)
 │   ├── test_auto_memory.py
 │   ├── test_new_layers.py
 │   ├── test_scheduler_large_reliable.py
 │   └── test_workspace.py             # workspace tool jail/list/mkdir + top-level-only context
+│   └── test_console_auth.py          # console auth: email/pbkdf2/cookie flags (no secrets, no I/O)
 │   └── test_documents.py             # documents: 300-word chunks + markitdown + vision fallback + delete purges embeddings + wiring
 │   └── test_streaming.py             # SSE decoding (no mojibake) + tool-delta rebuild
 │   └── test_browser_lifecycle.py     # browser close-noop (no boot) + lifecycle lock
-│   └── test_tts_voice.py             # fixed custom voice catalog/default/reject + shaping filter + optional model synthesis (skips without weights/ffmpeg)
+│   └── test_tts_voice.py             # fixed project voice (Mohamed, 15 speakers) catalog/default/reject + streaming-arg bounds + optional model synthesis (skips without weights)
+│   └── test_stt_service.py             # STT service: language map + stream-arg bounds + audio validation + vLLM-unreachable path (skips transcription without weights)
+│   └── test_gateway_no_model.py        # gateway no-model: vault readiness + Arabic reply + Models link (no secrets, no I/O)
+│   └── test_install_unified.py     # unified installer: OS report + port validation + stdlib-only (4 passed)
 ├── docs/
 │   └── README.md
 ├── .env
@@ -321,7 +336,8 @@ project/                           # == X5Agent/System Core (immutable engine, r
 - `web/` — server + frontend/dashboard (chat renders TTS voice records as standalone bubbles via /api/audio; no raw player in steps)
 - `gateway/` — telegram/whatsapp/discord adapters (events rendered as per Events table)
 - `storage/` — LEGACY read-only fallback only (never written by runtime; Data is authoritative; migrated once at startup)
-- `models/` — code only (services + manifest -> project/models/<type>; weights gitignored via project/models rule)
+- `models/` — THE single weights folder (code + services + manifest; weights in project/models/<type>/<name>, gitignored, shared with deploy/models-server) — no second copy anywhere; any tool whose model is missing raises the fixed English message from loader.NO_LOCAL_MODEL_MESSAGE ("...run the doctor command")
+- `deploy/models-server/` — one-command Docker stack for the 4 models (single source: models.yaml; install.sh = checks→select→total 5GB reserve→download→doctor→up→verify→gmail+UI-password; doctor.sh = project status table + load missing/partial; server.py page = email+password cookie login, APIs = API_TOKEN; weights in the single project/models/ — no second copy, marker-compatible with scripts/setup_models.py; .env secrets + override + sizes.json/selection.json/.reserve-* generated by install.sh, never committed)
 - `tests/`, `docs/` — tests & documentation
 
 ## Events Contract
@@ -358,3 +374,10 @@ When structure changes:
 - DELIBERATE DEVIATION: `js/gateway.js` keeps the integrated opencode version (exports `initGateway`, used by `app.js`); the Codex rewrite was dropped after it caused a blank-template regression — only compatible Codex hunks were kept.
 - DEFERRED (no breakage, verified): `dispatch.py` helpers `_reply_to`/`_notify_main_chat_changed`, `channels.py` `mark_read`/status check (zero callers), `chat.js` duplicate `highlightCode` (last-wins, syntax valid), `components.css` variant rules (CSS never breaks).
 - debt: `_an.py/_an2.py/_c.py/out.txt` debug junk deleted; hardcoded test API keys replaced by env `setdefault` + live-API skip guards.
+
+## Speech-model swap — 2026-10-08 (Egyptian stack, code-only, no weights downloaded)
+- `manifest.json` stt → `mohammedaly22/QwenCleo-ASR` (`models/stt/QwenCleo-ASR`, ~4000MB, ignores `assets/*`+`training_args.bin`); tts → `mohammedaly22/VoiceTut-TTS` (`models/tts/VoiceTut-TTS`, ~2500MB, ignores `optimizer.bin`+`scheduler.bin`+`random_states_*.pkl`+`train_config.json`); vision → `Qwen/Qwen3.5-4B` (`models/vision/Qwen3.5-4B`, ~9570MB, `AutoModelForMultimodalLM` + `AutoProcessor`, matching deploy stack). Total fresh download ≈ 20.5GB (1.2 emb + 9.6 vision + 4 asr + 6.9 tts, HF real sizes).
+- NEW `models/stt/service.py` (was missing entirely - old `dispatch.py`/`server.py` imports would have crashed): `transcribe_file()` + chunked `transcribe_stream()` + vLLM `stream_tokens()` (fails clearly offline). Single STT owner; `stt_correction.py` + `video_transcribe` delegate to it (faster-whisper removed).
+- `models/tts/service.py` rewritten on VoiceTut-TTS SDK (streaming-native `synthesize()` over sentence `synthesize_stream()`); `voices.py` = 15 built-in speakers, fixed `DEFAULT_SPEAKER=Mohamed`; `postprocess.py` (supertonic-only shaping) deleted.
+- contracts preserved: `dispatch.py`, `server.py` (`/api/stt` + preload `_load`), `text_to_speech` tool unchanged. `pyproject.toml` deps: +torch/torchaudio/soundfile/qwencleo-asr/qwen-asr/voicetut-tts, −supertonic/faster-whisper/ctranslate2. OmniVoice backbone stays GitHub-only (see `models/README.md`). `project/.gitignore` now tracks `models/stt/service.py` + `models/tts/{service,voices}.py`.
+- verified: `py_compile` all touched files, `test_tts_voice.py` + `test_stt_service.py` PASS (weight paths skip cleanly), `setup_models.py --check` resolves the 4 new entries (all MISSING, no download run).
