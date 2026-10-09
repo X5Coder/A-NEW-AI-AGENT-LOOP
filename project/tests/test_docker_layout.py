@@ -75,3 +75,13 @@ def test_entrypoint_source_only_bounded():
     assert "rm -rf" not in entry
     assert "shutil.rmtree" not in entry
     assert "config.json" in entry  # seed marker for the models volume
+
+
+def test_entrypoint_pins_data_to_binds():
+    """Single-room survival: live Data + weights link onto manager binds."""
+    entry = _read("docker-entrypoint.py")
+    assert "def persist_data" in entry
+    assert "/app/data" in entry and "/data" in entry
+    assert "os.symlink" in entry
+    assert "shutil.move" in entry  # move (not copy) baked data onto binds
+    assert "persist_data()" in entry  # wired before seeding

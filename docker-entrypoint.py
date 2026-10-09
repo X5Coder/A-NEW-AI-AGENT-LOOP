@@ -4,9 +4,11 @@ Flow (exactly, nothing else):
   1. `git pull --ff-only` — source code only. Named volumes (Data, models)
      are never touched, so no local data can be lost by an update.
      Offline or no .git: warn and continue with the baked code.
-  2. Seed the models volume when empty (tracked configs from the image;
+  2. Pin data onto the manager binds (/app/data, /data) via symlinks so
+     single-room updates (fresh container layers) never wipe user data.
+  3. Seed the models volume when empty (tracked configs from the image;
      the 1.1GB weights download once via the embedding bootstrap, then persist).
-  3. Ensure X5Agent dirs exist inside the data volume (idempotent).
+  4. Ensure X5Agent dirs exist inside the data volume (idempotent).
   4. Browser engine check: headless chromium smoke test (bounded, warn-only —
      proves the X5Browser engine can run on this headless server).
   5. exec() the console server on 0.0.0.0:7777 (port mapping needs a
@@ -104,6 +106,73 @@ def check_browser_engine() -> None:
         _log(f"browser engine check skipped ({str(e)[:120]})")
 
 
+def persist_data() -> None:
+    """Pin local data onto the manager's bind mounts so updates never wipe it.
+
+    Single rooms have no named volumes; the manager binds the LIVE container
+    dirs `/app/data` and `/data` to the host (survives rebuilds). Point the
+    live X5Agent/Data + embedding weights at them via symlinks:
+      /app/data/x5agent_data  -> X5Agent/Data contents (all user data)
+      /app/data/x5models      -> embedding weights (1.1GB, downloads once)
+      /data/x5agent_seed      -> seed configs only (image copy, read cache)
+    First start: real dirs are MOVED (not copied) onto the binds, then linked
+    back — so pre-existing baked data is preserved, never duplicated.
+    Refuses to link when the bind is missing (warn-only, console still boots).
+    """
+    binds = [p for p in ("/app/data", "/data") if os.path.isdir(p)]
+    if not binds:
+        _log("no manager binds found (/app/data, /data) — data stays ephemeral")
+        return
+    primary = "/app/data" if os.path.isdir("/app/data") else binds[0]
+    targets = {
+        os.path.join(APP_ROOT, "X5Agent", "Data"): os.path.join(primary, "x5agent_data"),
+        MODELS_DIR: os.path.join(primary, "x5models"),
+        SEED_DIR: os.path.join("/data" if os.path.isdir("/data") else primary, "x5agent_seed"),
+    }
+    for live, store in targets.items():
+        try:
+            if os.path.islink(live):
+                continue  # already pinned from a previous start
+            try:
+                os.makedirs(store, exist_ok=True)
+            except Exception:
+                pass
+            if not os.path.isdir(store):
+                continue
+            if os.path.isdir(live) and not os.path.islink(live):
+                try:
+                    entries = os.listdir(live)
+                except Exception:
+                    entries = []
+                moved = 0
+                for name in entries:
+                    src = os.path.join(live, name)
+                    dst = os.path.join(store, name)
+                    if os.path.lexists(dst):
+                        continue
+                    try:
+                        shutil.move(src, dst)
+                        moved += 1
+                    except Exception:
+                        pass
+                _log(f"moved {moved} entries: {live} -> {store}")
+                try:
+                    os.rmdir(live)  # only succeeds when fully drained
+                except Exception:
+                    pass
+                if os.path.isdir(live) and not os.path.islink(live):
+                    _log(f"keep live dir (in use): {live} — data stays ephemeral there")
+                    continue
+            if not os.path.lexists(live):
+                try:
+                    os.symlink(store, live)
+                    _log(f"pinned: {live} -> {store}")
+                except Exception as e:
+                    _log(f"pin skipped ({live}: {str(e)[:100]})")
+        except Exception as e:
+            _log(f"persist skipped ({live}: {str(e)[:100]})")
+
+
 def ensure_dirs() -> None:
     """Create X5Agent dirs inside the data volume (idempotent)."""
     try:
@@ -120,6 +189,7 @@ def main() -> None:
     _log("starting (volumes: x5-data -> /app/X5Agent/Data, "
          "x5-models -> /app/project/embedding_model)")
     refresh_source()
+    persist_data()
     seed_models_volume()
     ensure_dirs()
     check_browser_engine()
