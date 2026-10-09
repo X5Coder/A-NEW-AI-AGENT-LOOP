@@ -17,9 +17,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# git only: entrypoint refreshes source via `git pull --ff-only` on every start.
+# git: entrypoint refreshes source via `git pull --ff-only` on every start.
+# chromium: the X5Browser engine (headless fallback on servers without a
+# display; the library finds it as `chromium` on PATH by itself).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git \
+ && apt-get install -y --no-install-recommends git chromium \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

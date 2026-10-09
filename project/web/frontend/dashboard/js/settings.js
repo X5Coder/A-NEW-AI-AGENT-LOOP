@@ -208,20 +208,34 @@ export function initSettings() {
       toast("Passwords do not match");
       return;
     }
+    fetch("/api/auth/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ old_password: oldPw.value, new_password: newPw.value }),
+    }).then((r) => r.json().then((d) => ({ s: r.status, d }))).then(({ s, d }) => {
+      if (s === 200 && d && d.ok) {
+        toast("Password updated");
+      } else if (s === 401) {
+        location.href = "/login.html";
+      } else {
+        toast((d && d.error) || "Password change failed");
+      }
+    }).catch(() => toast("Password change failed"));
     oldPw.value = "";
     newPw.value = "";
     confirmPw.value = "";
-    toast("Password updated");
   });
 
   document.getElementById("logoutBtn")?.addEventListener("click", () => {
     openLogoutConfirm(() => {
-      try {
-        ["x5-gateway-whatsapp", "x5-gateway-telegram"].forEach((k) => localStorage.removeItem(k));
-      } catch (_) {
-        // ignore
-      }
-      toast("Signed out");
+      fetch("/api/auth/logout", { method: "POST" }).catch(() => {}).finally(() => {
+        try {
+          ["x5-gateway-whatsapp", "x5-gateway-telegram"].forEach((k) => localStorage.removeItem(k));
+        } catch (_) {
+          // ignore
+        }
+        location.href = "/login.html";
+      });
     });
   });
 }

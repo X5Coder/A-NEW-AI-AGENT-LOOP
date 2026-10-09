@@ -56,6 +56,11 @@ function emit(type, data) {
 
 function connect() {
   let es = null;
+  // Owner gate: a 401 here means the session died (or logged out elsewhere)
+  // — take the whole console back to login instead of retrying forever.
+  fetch("/api/dashboard", { cache: "no-store" }).then((r) => {
+    if (r.status === 401) location.href = "/login.html";
+  }).catch(() => {});
   try {
     es = new EventSource("/api/events");
   } catch (_) {

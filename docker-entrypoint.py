@@ -7,7 +7,9 @@ Flow (exactly, nothing else):
   2. Seed the models volume when empty (tracked configs from the image;
      the 1.1GB weights download once via the embedding bootstrap, then persist).
   3. Ensure X5Agent dirs exist inside the data volume (idempotent).
-  4. exec() the console server on 0.0.0.0:7777 (port mapping needs a
+  4. Browser engine check: headless chromium smoke test (bounded, warn-only —
+     proves the X5Browser engine can run on this headless server).
+  5. exec() the console server on 0.0.0.0:7777 (port mapping needs a
      non-loopback bind; the funnel public link stays opt-in via X5_PUBLIC=1).
 
 Stdlib only. Never raises past step 1: the console always boots.
@@ -26,6 +28,10 @@ MODELS_DIR = "/app/project/embedding_model"
 SEED_DIR = "/app/.seed-embedding"
 CONFIG_MARKER = "config.json"
 PULL_TIMEOUT = 300
+BROWSER_TIMEOUT = 90
+# Same lookup order as the x5browser library's own launcher.
+BROWSER_BINARIES = ("google-chrome", "google-chrome-stable", "chromium",
+                    "chromium-browser", "chrome")
 
 
 def _log(msg: str) -> None:
@@ -71,6 +77,33 @@ def seed_models_volume() -> None:
         _log(f"models seed skipped ({str(e)[:120]})")
 
 
+def check_browser_engine() -> None:
+    """Headless smoke test: proves a browser engine runs on this server.
+
+    Runs `<binary> --headless --dump-dom about:blank` (bounded, read-only).
+    Warn-only: a missing/broken engine never blocks the console — the agent's
+    browser tools fail clearly at use time instead.
+    """
+    binary = next((b for b in BROWSER_BINARIES if shutil.which(b)), None)
+    if binary is None:
+        _log("browser engine MISSING (no chrome/chromium on PATH) — "
+             "browser tools will fail until one is installed")
+        return
+    try:
+        proc = subprocess.run(
+            [binary, "--headless=new", "--no-sandbox", "--disable-gpu",
+             "--dump-dom", "about:blank"],
+            capture_output=True, text=True, timeout=BROWSER_TIMEOUT,
+        )
+        if proc.returncode == 0 and "<html" in (proc.stdout or "").lower():
+            _log(f"browser engine OK ({binary} headless)")
+        else:
+            _log(f"browser engine FAILED ({binary} exit {proc.returncode}) — "
+                 "browser tools will fail until it is fixed")
+    except Exception as e:
+        _log(f"browser engine check skipped ({str(e)[:120]})")
+
+
 def ensure_dirs() -> None:
     """Create X5Agent dirs inside the data volume (idempotent)."""
     try:
@@ -89,11 +122,17 @@ def main() -> None:
     refresh_source()
     seed_models_volume()
     ensure_dirs()
+    check_browser_engine()
     os.chdir(PROJECT_ROOT)
     cmd = [sys.executable, "-m", "web.server.server",
            "--host", "0.0.0.0", "--port", "7777"]
     if os.environ.get("X5_PUBLIC") == "1":
         cmd.append("--public")
+    else:
+        # Explicit skip note: funnel needs an interactive logged-in tailscale
+        # client, which a container does not have — the console stays reachable
+        # directly (local port / VPS IP) instead of failing silently.
+        _log("public link off (X5_PUBLIC=0) — Tailscale funnel skipped")
     _log("console: http://localhost:7777/ (exec server, signals pass through)")
     os.execv(sys.executable, cmd)
 

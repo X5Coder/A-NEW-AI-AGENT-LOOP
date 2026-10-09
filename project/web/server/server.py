@@ -109,7 +109,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml). Served via /api/dashboard.
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 
 UPDATE_REPO = "X5Coder/A-NEW-AI-AGENT-LOOP"
 
@@ -1596,6 +1596,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if self._auth_gate(is_post=False):
+            return
+        if parsed.path == "/api/auth/status":
+            self._handle_auth_status_get()
+            return
         if parsed.path == "/api/dashboard":
             self._handle_dashboard_api()
             return
@@ -1702,6 +1707,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if self._auth_gate(is_post=True):
+            return
+        if parsed.path == "/api/auth/setup":
+            self._handle_auth_setup_post()
+            return
+        if parsed.path == "/api/auth/login":
+            self._handle_auth_login_post()
+            return
+        if parsed.path == "/api/auth/logout":
+            self._handle_auth_logout_post()
+            return
+        if parsed.path == "/api/auth/password":
+            self._handle_auth_password_post()
+            return
         if parsed.path == "/api/chat":
             self._handle_chat_post()
             return
@@ -2157,6 +2176,26 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json({"error": "failed to load live state", "detail": str(e)}, status=500)
 
+    def _check_events_auth(self) -> bool:
+        """SSE guard: EventSource sends cookies, so the gate normally passes.
+
+        A cookie-less browser tab sees the gate first (302 → ES follows to
+        login.html as TEXT, never JSON). Emit a 401 JSON instead so the UI
+        can redirect to login.html itself. Returns True when answered.
+        """
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from web.server import console_auth as _ca
+            if not _ca.is_setup():
+                return False
+            if _ca.session_valid(_ca.session_from_cookie(self.headers.get("Cookie"))):
+                return False
+            self._send_json({"error": "login required"}, status=401)
+            return True
+        except Exception:
+            return False
+
     def _handle_events_api(self):
         """Realtime push channel (SSE) — replaces all client polling.
 
@@ -2167,6 +2206,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         Server cost is O(1): singleton watchers broadcast only on change no
         matter how many tabs listen — the SaaS-safe shape.
         """
+        if self._check_events_auth():
+            return
         import queue as _queue
         sub: dict = {}
         try:
@@ -3769,6 +3810,17 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         gw = str(payload.get("source") or "").strip().lower() in ("whatsapp", "telegram", "gateway")
         if gw:
+            # Gateway runs arrive on loopback only (same container, cookie-less):
+            # refuse them from any remote peer — the owner gate already exempted
+            # loopback above, and anything else claiming gateway is spoofed.
+            try:
+                peer = self.client_address[0] if self.client_address else ""
+            except Exception:
+                peer = ""
+            if peer not in ("127.0.0.1", "::1"):
+                self._cleanup_paths(saved_paths)
+                self._send_json({"error": "login required"}, status=401)
+                return
             try:
                 with _RUN_LOCK:
                     busy = "event" in _ACTIVE_RUN
@@ -4043,7 +4095,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         finally:
             self._cleanup_paths(saved_paths)
 
-    def _send_json(self, obj, status=200):
+    def _send_json(self, obj, status=200, headers=None):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -4051,8 +4103,170 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Access-Control-Allow-Origin", "*")
+        try:
+            for key, value in (headers or {}).items():
+                self.send_header(str(key), str(value))
+        except Exception:
+            pass
         self.end_headers()
         self.wfile.write(body)
+
+    # ---------- console owner gate (first-run setup, then cookie sessions) ----------
+    # Always public (no owner needed to reach them):
+    _AUTH_PUBLIC_GET = frozenset({
+        "/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/setup",
+        "/login.html",
+    })
+    _AUTH_PUBLIC_POST = frozenset({
+        "/api/auth/login", "/api/auth/setup",
+    })
+
+    def _auth_gate(self, is_post: bool) -> bool:
+        """Enforce the owner gate. Returns True when the request was answered.
+
+        No owner yet: pages go to the setup screen, APIs stay open (first-run
+        window — set the owner immediately). Owner set: everything except the
+        small public list needs a valid session cookie (APIs 401, pages 302).
+        """
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            public = self._AUTH_PUBLIC_POST if is_post else self._AUTH_PUBLIC_GET
+            if path in public:
+                return False
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from web.server import console_auth as _ca
+            if not _ca.is_setup():
+                if is_post or path.startswith("/api/"):
+                    return False
+                try:
+                    peer = self.client_address[0] if self.client_address else ""
+                except Exception:
+                    peer = ""
+                if peer in ("127.0.0.1", "::1"):
+                    return False  # internal loopback (gateway dispatcher)
+                self.send_response(302)
+                self.send_header("Location", "/login.html")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return True
+            if _ca.session_valid(_ca.session_from_cookie(self.headers.get("Cookie"))):
+                return False
+            try:
+                peer = self.client_address[0] if self.client_address else ""
+            except Exception:
+                peer = ""
+            if peer in ("127.0.0.1", "::1"):
+                return False  # internal loopback (gateway dispatcher)
+            if path.startswith("/api/"):
+                self._send_json({"error": "login required"}, status=401)
+            else:
+                self.send_response(302)
+                self.send_header("Location", "/login.html")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+            return True
+        except Exception:
+            return False
+
+    def _read_json_body(self, max_bytes=65536):
+        """Read a small JSON body (auth forms only). Returns {} on any failure."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > max_bytes:
+                return {}
+            raw = self.rfile.read(length)
+            data = json.loads(raw.decode("utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _handle_auth_status_get(self):
+        """GET /api/auth/status — always public: is first-run setup needed?"""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from web.server import console_auth as _ca
+            self._send_json({"setup_needed": not _ca.is_setup(),
+                             "email": _ca.owner_email()})
+        except Exception as e:
+            self._send_json({"error": str(e)[:200]}, status=500)
+
+    def _handle_auth_setup_post(self):
+        """POST /api/auth/setup {email,password} — once only, then signs in."""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from web.server import console_auth as _ca
+            data = self._read_json_body()
+            try:
+                email = _ca.setup_owner(str(data.get("email") or ""),
+                                        str(data.get("password") or ""))
+            except RuntimeError:
+                self._send_json({"error": "owner already set"}, status=409)
+                return
+            except ValueError as e:
+                self._send_json({"error": str(e)[:200]}, status=400)
+                return
+            token = _ca.create_session()
+            self._send_json({"ok": True, "email": email}, headers={
+                "Set-Cookie": f"{_ca.COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Lax"})
+        except Exception as e:
+            self._send_json({"error": str(e)[:200]}, status=500)
+
+    def _handle_auth_login_post(self):
+        """POST /api/auth/login {email,password} — verifies, then signs in."""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from web.server import console_auth as _ca
+            if not _ca.is_setup():
+                self._send_json({"error": "no owner yet — create it first"}, status=409)
+                return
+            data = self._read_json_body()
+            if not _ca.verify_owner(str(data.get("email") or ""),
+                                    str(data.get("password") or "")):
+                self._send_json({"error": "wrong email or password"}, status=401)
+                return
+            token = _ca.create_session()
+            self._send_json({"ok": True}, headers={
+                "Set-Cookie": f"{_ca.COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Lax"})
+        except Exception as e:
+            self._send_json({"error": str(e)[:200]}, status=500)
+
+    def _handle_auth_logout_post(self):
+        """POST /api/auth/logout — drops this session (always ok)."""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from web.server import console_auth as _ca
+            _ca.drop_session(_ca.session_from_cookie(self.headers.get("Cookie")))
+            self._send_json({"ok": True}, headers={
+                "Set-Cookie": f"{_ca.COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"})
+        except Exception as e:
+            self._send_json({"error": str(e)[:200]}, status=500)
+
+    def _handle_auth_password_post(self):
+        """POST /api/auth/password {old_password,new_password} — authed only."""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from web.server import console_auth as _ca
+            email = _ca.owner_email()
+            if not email:
+                self._send_json({"error": "no owner yet"}, status=409)
+                return
+            data = self._read_json_body()
+            try:
+                _ca.change_password(email, str(data.get("old_password") or ""),
+                                    str(data.get("new_password") or ""))
+            except ValueError as e:
+                self._send_json({"error": str(e)[:200]}, status=400)
+                return
+            self._send_json({"ok": True})
+        except Exception as e:
+            self._send_json({"error": str(e)[:200]}, status=500)
 
     def translate_path(self, path: str) -> str:
         # Use parent logic then validate inside DASHBOARD_ROOT

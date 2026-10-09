@@ -791,6 +791,9 @@ def _stream_dashboard_run(body: str, channel: str, chat: str, seen: dict, cancel
             return False
 
     def _open_stream():
+        # Internal loopback call (same container, cookie-less): the console
+        # gate exempts 127.0.0.1 callers, so gateway runs work with the
+        # owner lock on. Must stay loopback — never expose this exemption.
         req = _urlreq.Request(
             _dashboard_url + "api/chat_stream",
             data=_json.dumps({"message": body, "mode": "free", "source": channel}).encode("utf-8"),

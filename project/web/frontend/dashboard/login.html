@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<!-- X5Agent console gate: first run creates the owner, later runs sign in.
+     Self-contained (no extra css/js files) so the auth gate needs no exemptions. -->
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>X5Agent — تسجيل الدخول</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0b0e14; color: #e6e9f0; font-family: system-ui, "Segoe UI", Tahoma, sans-serif; }
+  .card { width: min(92vw, 380px); background: #141926; border: 1px solid #263049;
+    border-radius: 14px; padding: 28px 26px; box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  p.sub { color: #8b94a7; font-size: 13px; margin-bottom: 18px; }
+  label { display: block; font-size: 13px; color: #aab3c5; margin: 12px 0 6px; }
+  input { width: 100%; padding: 11px 12px; border-radius: 9px; border: 1px solid #2c3650;
+    background: #0e1320; color: #e6e9f0; font-size: 15px; direction: ltr; text-align: left; }
+  input:focus { outline: none; border-color: #3b82f6; }
+  button { width: 100%; margin-top: 18px; padding: 12px; border: 0; border-radius: 9px;
+    background: #2563eb; color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: default; }
+  #err { display: none; margin-top: 12px; padding: 10px; border-radius: 8px; font-size: 13px;
+    background: #3a1420; color: #fda4af; border: 1px solid #7f1d2d; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1 id="title">X5Agent</h1>
+    <p class="sub" id="sub">…</p>
+    <form id="form">
+      <label for="email">البريد الإلكتروني</label>
+      <input id="email" type="email" autocomplete="username" required>
+      <label for="pw">كلمة المرور</label>
+      <input id="pw" type="password" autocomplete="current-password" required>
+      <div id="confirmWrap" style="display:none">
+        <label for="pw2">تأكيد كلمة المرور</label>
+        <input id="pw2" type="password" autocomplete="new-password">
+      </div>
+      <div id="err"></div>
+      <button id="go" type="submit">دخول</button>
+    </form>
+  </div>
+<script>
+(function () {
+  var setupMode = false;
+  var err = document.getElementById("err");
+  function fail(msg) { err.textContent = msg; err.style.display = "block"; }
+  fetch("/api/auth/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
+    setupMode = !!(d && d.setup_needed);
+    document.getElementById("sub").textContent = setupMode
+      ? "أول تشغيل: أنشئ حساب المالك (يُحفظ تجزئة فقط)"
+      : "سجّل الدخول للوصول إلى الكونسول";
+    document.getElementById("go").textContent = setupMode ? "إنشاء الحساب" : "دخول";
+    document.getElementById("confirmWrap").style.display = setupMode ? "block" : "none";
+  }).catch(function () { fail("تعذر الوصول إلى السيرفر"); });
+  document.getElementById("form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    err.style.display = "none";
+    var email = document.getElementById("email").value.trim();
+    var pw = document.getElementById("pw").value;
+    if (setupMode) {
+      var pw2 = document.getElementById("pw2").value;
+      if (pw.length < 8) { fail("كلمة المرور قصيرة (8 أحرف على الأقل)"); return; }
+      if (pw !== pw2) { fail("كلمتا المرور غير متطابقتين"); return; }
+    }
+    var btn = document.getElementById("go");
+    btn.disabled = true;
+    fetch(setupMode ? "/api/auth/setup" : "/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email, password: pw })
+    }).then(function (r) { return r.json().then(function (d) { return { s: r.status, d: d }; }); }).then(function (x) {
+      if (x.s === 200 && x.d && x.d.ok) { location.href = "/"; return; }
+      fail((x.d && x.d.error) || "فشل الدخول");
+      btn.disabled = false;
+    }).catch(function () { fail("تعذر الوصول إلى السيرفر"); btn.disabled = false; });
+  });
+})();
+</script>
+</body>
+</html>

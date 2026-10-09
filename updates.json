@@ -1,11 +1,12 @@
 {
-  "version": "0.4.0",
-  "description": "One-command Docker deployment: docker compose up --build installs everything, pulls the newest source from GitHub on every start (code only), and keeps all local data in named volumes so updates never lose anything.",
+  "version": "0.5.0",
+  "description": "Console lock: first run asks for owner email+password in the browser, then every page and API needs a signed-in session (change password and sign out from Settings). Docker also ships headless Chromium with a boot-time engine check.",
   "features": [
-    "Single command on any machine: docker compose up --build, console on http://localhost:7777/.",
-    "All local data lives in named volumes (x5-data, x5-models) — rebuilds and updates never delete them.",
-    "Every start refreshes source from GitHub (git pull --ff-only); offline continues with the baked code.",
-    "Embedding weights download once into the models volume, then persist across rebuilds.",
-    "Image holds code only — live data, weights binaries and secrets are excluded by .dockerignore."
+    "First run redirects to a setup screen asking for owner email+password (hash only, never plaintext).",
+    "Signed-in sessions via HttpOnly cookie; strangers get login-required instead of the console.",
+    "Settings can change the password and sign out for real (previously local-only).",
+    "install.py owners keep working — same record format on both paths.",
+    "Docker image includes headless Chromium; each start logs a browser-engine OK/FAIL line.",
+    "Public-link skip is now explicit in container logs (needs X5_PUBLIC=1 plus a logged-in client)."
   ]
 }
