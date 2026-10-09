@@ -37,6 +37,24 @@ _DEVICE_CACHE: str | None = None
 
 
 def embedding_dir() -> Path:
+    """Bundled path, unless the entrypoint pinned a persistent store.
+
+    The container entrypoint copies baked weights into the manager's bind
+    (/app/data/x5store) which survives single-room rebuilds while bundled
+    paths do not — so the store wins whenever it holds a usable model.
+    Env override (explicit, documented): X5_EMBEDDING_DIR.
+    """
+    try:
+        import os as _os
+
+        forced = (_os.environ.get("X5_EMBEDDING_DIR") or "").strip()
+        if forced:
+            return Path(forced)
+        store = Path("/app/data/x5store")
+        if store.is_dir() and (store / MARKER).is_file():
+            return store
+    except Exception:
+        pass
     return Path(__file__).resolve().parents[2] / "embedding_model"
 
 

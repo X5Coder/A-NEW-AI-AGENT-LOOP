@@ -22,6 +22,9 @@ def _read(name: str) -> str:
     return (REPO_ROOT / name).read_text(encoding="utf-8")
 
 
+import os as _os  # noqa: E402  (test helper, after path setup)
+
+
 def test_compose_data_volume_matches_code_paths():
     from core.paths import data_root
 
@@ -78,10 +81,27 @@ def test_entrypoint_source_only_bounded():
 
 
 def test_entrypoint_pins_data_to_binds():
-    """Single-room survival: live Data + weights link onto manager binds."""
+    """Single-room survival: the store lives ON the manager binds.
+
+    Symlinks alone do not survive a rebuild (fresh container layer), so the
+    entrypoint claims /app/data/x5store (a real dir on the bind) and the
+    code reads the store first via its marker — file-by-file persistence.
+    """
     entry = _read("docker-entrypoint.py")
     assert "def persist_data" in entry
-    assert "/app/data" in entry and "/data" in entry
-    assert "os.symlink" in entry
-    assert "shutil.move" in entry  # move (not copy) baked data onto binds
+    assert "/app/data" in entry
+    assert "x5store" in entry
+    assert ".x5store" in entry  # claim marker routes reads to the store
     assert "persist_data()" in entry  # wired before seeding
+
+
+def test_code_reads_store_first():
+    """data_root() + embedding_dir() prefer the persistent store when claimed."""
+    import core.paths as _paths
+
+    src = (PROJECT_ROOT / "core" / "paths.py").read_text(encoding="utf-8")
+    assert "x5store" in src and ".x5store" in src
+    # Local dev (no /app/data): falls back to the normal X5Agent/Data.
+      assert str(_paths.data_root()).endswith(_os.path.join("X5Agent", "Data"))
+    emb = (PROJECT_ROOT / "core" / "embedding" / "bootstrap.py").read_text(encoding="utf-8")
+    assert "x5store" in emb

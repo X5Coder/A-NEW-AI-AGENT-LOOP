@@ -106,71 +106,78 @@ def check_browser_engine() -> None:
         _log(f"browser engine check skipped ({str(e)[:120]})")
 
 
+def _move_into(src_dir: str, store_dir: str) -> int:
+    """Move baked entries into the persistent store. Returns moved count."""
+    try:
+        entries = os.listdir(src_dir)
+    except Exception:
+        return 0
+    moved = 0
+    for name in entries:
+        src = os.path.join(src_dir, name)
+        dst = os.path.join(store_dir, name)
+        if os.path.lexists(dst):
+            continue
+        try:
+            shutil.move(src, dst)
+            moved += 1
+        except Exception:
+            pass
+    return moved
+
+
+def _copy_seed_into(store_dir: str) -> None:
+    """Copy (never move) the baked seed configs onto the persistent store."""
+    try:
+        if os.path.isdir(SEED_DIR) and not os.path.islink(SEED_DIR):
+            shutil.copytree(SEED_DIR, store_dir, dirs_exist_ok=True)
+    except Exception as e:
+        _log(f"seed copy skipped ({str(e)[:100]})")
+
+
 def persist_data() -> None:
     """Pin local data onto the manager's bind mounts so updates never wipe it.
 
-    Single rooms have no named volumes; the manager binds the LIVE container
-    dirs `/app/data` and `/data` to the host (survives rebuilds). Point the
-    live X5Agent/Data + embedding weights at them via symlinks:
-      /app/data/x5agent_data  -> X5Agent/Data contents (all user data)
-      /app/data/x5models      -> embedding weights (1.1GB, downloads once)
-      /data/x5agent_seed      -> seed configs only (image copy, read cache)
-    First start: real dirs are MOVED (not copied) onto the binds, then linked
-    back — so pre-existing baked data is preserved, never duplicated.
-    Refuses to link when the bind is missing (warn-only, console still boots).
+    Single rooms have no named volumes; the manager binds the FRESH container
+    dirs `/app/data` and `/data` to the host (survives rebuilds, but only for
+    paths BAKED into the image). So persistence works file-by-file:
+      store = /app/data/x5store  (all live data: owner, chat, embeddings,
+               weights — files written here survive; symlinks do NOT)
+    First start (fresh binds): the manager copies the image's /app/data and
+    /data content into the NEW binds, so whatever we baked for them persists.
+    Every start: seed copies + baked moves land here, and the bootstrap reads
+    the store FIRST (env override) before the bundled path.
     """
-    binds = [p for p in ("/app/data", "/data") if os.path.isdir(p)]
-    if not binds:
-        _log("no manager binds found (/app/data, /data) — data stays ephemeral")
+    primary = "/app/data" if os.path.isdir("/app/data") else None
+    if primary is None:
+        _log("no manager binds found (/app/data) — data stays ephemeral")
         return
-    primary = "/app/data" if os.path.isdir("/app/data") else binds[0]
-    targets = {
-        os.path.join(APP_ROOT, "X5Agent", "Data"): os.path.join(primary, "x5agent_data"),
-        MODELS_DIR: os.path.join(primary, "x5models"),
-        SEED_DIR: os.path.join("/data" if os.path.isdir("/data") else primary, "x5agent_seed"),
-    }
-    for live, store in targets.items():
+    store = os.path.join(primary, "x5store")
+    try:
+        os.makedirs(store, exist_ok=True)
+    except Exception:
+        pass
+    if not os.path.isdir(store):
+        _log("store unavailable — data stays ephemeral")
+        return
+    _log(f"persistent store: {store}")
+    try:  # claim marker first: even an empty claim routes reads here
+        marker = os.path.join(store, ".x5store")
+        if not os.path.isfile(marker):
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write("x5agent persistent store")
+    except Exception:
+        pass
+    _copy_seed_into(store)  # baked configs persist via the fresh-bind copy
+    moved = 0
+    for baked in (os.path.join(APP_ROOT, "X5Agent", "Data"), MODELS_DIR):
         try:
-            if os.path.islink(live):
-                continue  # already pinned from a previous start
-            try:
-                os.makedirs(store, exist_ok=True)
-            except Exception:
-                pass
-            if not os.path.isdir(store):
-                continue
-            if os.path.isdir(live) and not os.path.islink(live):
-                try:
-                    entries = os.listdir(live)
-                except Exception:
-                    entries = []
-                moved = 0
-                for name in entries:
-                    src = os.path.join(live, name)
-                    dst = os.path.join(store, name)
-                    if os.path.lexists(dst):
-                        continue
-                    try:
-                        shutil.move(src, dst)
-                        moved += 1
-                    except Exception:
-                        pass
-                _log(f"moved {moved} entries: {live} -> {store}")
-                try:
-                    os.rmdir(live)  # only succeeds when fully drained
-                except Exception:
-                    pass
-                if os.path.isdir(live) and not os.path.islink(live):
-                    _log(f"keep live dir (in use): {live} — data stays ephemeral there")
-                    continue
-            if not os.path.lexists(live):
-                try:
-                    os.symlink(store, live)
-                    _log(f"pinned: {live} -> {store}")
-                except Exception as e:
-                    _log(f"pin skipped ({live}: {str(e)[:100]})")
-        except Exception as e:
-            _log(f"persist skipped ({live}: {str(e)[:100]})")
+            if os.path.isdir(baked) and not os.path.islink(baked):
+                moved += _move_into(baked, store)
+        except Exception:
+            pass
+    if moved:
+        _log(f"moved {moved} baked entries into the store")
 
 
 def ensure_dirs() -> None:

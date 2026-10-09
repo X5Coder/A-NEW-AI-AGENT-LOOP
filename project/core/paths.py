@@ -36,6 +36,32 @@ def workspace_root() -> Path:
 
 
 def data_root() -> Path:
+    """X5Agent/Data — unless the container entrypoint pinned a persistent store.
+
+    The entrypoint writes ALL live data into the manager's bind
+    (/app/data/x5store) which survives single-room rebuilds while bundled
+    paths do not — so the store wins whenever its marker file exists.
+    Local dev (no /app/data): falls back to the normal X5Agent/Data.
+    """
+    try:
+        import os as _os
+
+        store = Path("/app/data/x5store")
+        marker = store / ".x5store"
+        if store.is_dir() and marker.is_file():
+            return store
+        # First touch: claim the store layout (marker lives on the bind, so it
+        # survives rebuilds; local dev without binds never reaches here).
+        if Path("/app/data").is_dir():
+            try:
+                store.mkdir(parents=True, exist_ok=True)
+                if store.is_dir():
+                    marker.write_text("x5agent persistent store", encoding="utf-8")
+                    return store
+            except Exception:
+                pass
+    except Exception:
+        pass
     return x5agent_root() / "Data"
 
 
