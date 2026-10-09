@@ -36,6 +36,6 @@ RUN mkdir -p /app/.seed-embedding \
 
 RUN pip install --quiet ./project
 
-EXPOSE 5173
+EXPOSE 7777
 
 ENTRYPOINT ["python", "docker-entrypoint.py"]

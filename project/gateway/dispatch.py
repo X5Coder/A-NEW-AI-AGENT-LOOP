@@ -43,7 +43,7 @@ _ContinueWord = "continue"
 
 _states: dict[tuple[str, str], dict] = {}
 _states_lock = threading.Lock()
-_dashboard_url = "http://127.0.0.1:5173/"
+_dashboard_url = "http://127.0.0.1:7777/"
 
 # Bounded diagnostics ring (last 100 gateway events, no secrets).
 _glog: list[dict] = []

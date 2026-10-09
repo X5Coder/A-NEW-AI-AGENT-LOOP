@@ -30,7 +30,7 @@ def start(dashboard_url: str = "") -> bool:
         from gateway.telegram import poller as _tg
         from gateway.whatsapp import adapter as _wa_adapter
 
-        base = (dashboard_url or "http://127.0.0.1:5173/").rstrip("/") + "/"
+        base = (dashboard_url or "http://127.0.0.1:7777/").rstrip("/") + "/"
         _dispatch.configure(base)
         _wa_adapter.configure_push(base + "api/gateway/whatsapp/push")
         # Single owner: drop orphan bridges, then silently resume a saved link.

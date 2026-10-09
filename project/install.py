@@ -33,7 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 GIT_ROOT = next((p for p in (PROJECT_ROOT, PROJECT_ROOT.parents[0])
                  if (p / ".git").exists()), None)
 REPO_URL = "https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP"
-UI_URL = "http://127.0.0.1:5173/"
+UI_URL = "http://127.0.0.1:7777/"
 MIN_PYTHON = (3, 10)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -262,7 +262,7 @@ def setup_public_share() -> None:
         _ok("skipped - local console only")
         return
     try:
-        snap = ensure_public(port=5173, open_browser=True)
+        snap = ensure_public(port=7777, open_browser=True)
     except Exception as e:
         _warn(f"public link failed ({str(e)[:120]}) - local console still works")
         return

@@ -6,7 +6,7 @@
 #   1. builds the image (code + python dependencies, no data, no secrets)
 #   2. on every start the entrypoint pulls the newest source from GitHub
 #      (git pull --ff-only — source only, offline continues with baked code)
-#   3. serves the console on http://localhost:5173/
+#   3. serves the console on http://localhost:7777/
 #
 # Data safety: local data lives ONLY in the named volumes below. Rebuilding,
 # re-pulling, or re-running NEVER deletes them. To wipe data explicitly:
@@ -19,7 +19,7 @@ services:
     build: .
     image: x5agent:latest
     ports:
-      - "5173:5173"
+      - "7777:7777"
     volumes:
       - x5-data:/app/X5Agent/Data
       - x5-models:/app/project/embedding_model

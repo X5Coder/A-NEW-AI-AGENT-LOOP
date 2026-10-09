@@ -1,6 +1,6 @@
 """Tailscale public sharing — single owner for the console public link.
 
-Responsibility: expose the local console (127.0.0.1:5173) on a permanent
+Responsibility: expose the local console (127.0.0.1:7777) on a permanent
 public URL that anyone can open, using Tailscale Funnel:
   https://<machine>.<tailnet>.ts.net  (stable while machine + tailnet names stay)
 
@@ -115,7 +115,7 @@ def funnel_status(bin_path: str) -> dict:
     return {"raw": None}
 
 
-def status(port: int = 5173) -> dict:
+def status(port: int = 7777) -> dict:
     """Public-share snapshot for UI/API: installed/logged_in/dns/public_url."""
     installed, bin_path = is_installed()
     out: dict = {"installed": installed, "logged_in": False, "dns": None,
@@ -196,7 +196,7 @@ def login_interactive(bin_path: str) -> bool:
     return ok
 
 
-def enable_funnel(bin_path: str, port: int = 5173) -> str | None:
+def enable_funnel(bin_path: str, port: int = 7777) -> str | None:
     """Enable Funnel on the console port, return the public URL (or None).
 
     Tries the modern syntax first, falls back to older variants.
@@ -230,7 +230,7 @@ def enable_funnel(bin_path: str, port: int = 5173) -> str | None:
     return public_url
 
 
-def ensure_public(port: int = 5173, open_browser: bool = True) -> dict:
+def ensure_public(port: int = 7777, open_browser: bool = True) -> dict:
     """Full flow: install check -> login (URL shown + opened) -> funnel on.
 
     Never raises; returns status() snapshot. Safe to call from install or server.

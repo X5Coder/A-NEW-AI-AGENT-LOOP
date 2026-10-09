@@ -11,7 +11,7 @@ git clone https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP.git
 cd A-NEW-AI-AGENT-LOOP/project
 pip install -e .
 python install.py              # one command: checks + updates + owner + console URL
-python -m web.server.server   # start the console (http://127.0.0.1:5173/)
+python -m web.server.server   # start the console (http://127.0.0.1:7777/)
 ```
 
 **Windows**
@@ -21,7 +21,7 @@ git clone https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP.git
 Set-Location A-NEW-AI-AGENT-LOOP/project
 pip install -e .
 python install.py              # one command: checks + updates + owner + console URL
-python -m web.server.server   # start the console (http://127.0.0.1:5173/)
+python -m web.server.server   # start the console (http://127.0.0.1:7777/)
 ```
 
 ---

@@ -21,9 +21,9 @@ def test_login_url_extract():
 def test_status_offline_shape(monkeypatch, tmp_path):
     monkeypatch.setattr(ts, "find_tailscale", lambda: None)
     monkeypatch.setattr(ts, "_data_file", lambda: tmp_path / "tailscale.json")
-    snap = ts.status(port=5173)
+    snap = ts.status(port=7777)
     assert snap["installed"] is False
-    assert snap["local"] == "http://127.0.0.1:5173/"
+    assert snap["local"] == "http://127.0.0.1:7777/"
     assert "install_url" in snap
 
 
@@ -62,6 +62,6 @@ def test_enable_funnel_saves_record(monkeypatch, tmp_path):
                         lambda b: {"logged_in": True, "dns": "desk.example.ts.net"})
     saved = tmp_path / "tailscale.json"
     monkeypatch.setattr(ts, "_data_file", lambda: saved)
-    assert ts.enable_funnel("tailscale", 5173) == "https://desk.example.ts.net"
+    assert ts.enable_funnel("tailscale", 7777) == "https://desk.example.ts.net"
     assert json.loads(saved.read_text(encoding="utf-8"))["public_url"] == \
         "https://desk.example.ts.net"

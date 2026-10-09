@@ -41,7 +41,7 @@ def test_compose_has_no_data_bind_mounts():
         if stripped.startswith("- "):
             assert "./X5Agent" not in stripped, line
             assert ":~/ " not in stripped and ":~/" not in stripped, line
-    assert "5173:5173" in compose  # console port mapping
+    assert "7777:7777" in compose  # console port mapping
     assert "unless-stopped" in compose
 
 
@@ -49,7 +49,7 @@ def test_dockerfile_code_only_no_secrets():
     dockerfile = _read("Dockerfile")
     assert "FROM python:3.12" in dockerfile
     assert "git" in dockerfile  # entrypoint refreshes source via git
-    assert "EXPOSE 5173" in dockerfile
+    assert "EXPOSE 7777" in dockerfile
     assert 'ENTRYPOINT ["python", "docker-entrypoint.py"]' in dockerfile
     for banned in ("tskey-", "sk-", "password=", "API_KEY=", "ADD http"):
         assert banned not in dockerfile, banned
@@ -69,7 +69,7 @@ def test_entrypoint_source_only_bounded():
     entry = _read("docker-entrypoint.py")
     assert "git" in entry and "--ff-only" in entry
     assert "300" in entry  # bounded pull timeout
-    assert "0.0.0.0" in entry and "5173" in entry
+    assert "0.0.0.0" in entry and "7777" in entry
     assert "os.execv" in entry  # signals reach the server
     # Never deletes user data: no recursive remove of the data root.
     assert "rm -rf" not in entry

@@ -2,7 +2,7 @@
   "version": "0.4.0",
   "description": "One-command Docker deployment: docker compose up --build installs everything, pulls the newest source from GitHub on every start (code only), and keeps all local data in named volumes so updates never lose anything.",
   "features": [
-    "Single command on any machine: docker compose up --build, console on http://localhost:5173/.",
+    "Single command on any machine: docker compose up --build, console on http://localhost:7777/.",
     "All local data lives in named volumes (x5-data, x5-models) — rebuilds and updates never delete them.",
     "Every start refreshes source from GitHub (git pull --ff-only); offline continues with the baked code.",
     "Embedding weights download once into the models volume, then persist across rebuilds.",

@@ -50,7 +50,7 @@ _load_env()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DASHBOARD_ROOT = PROJECT_ROOT / "web" / "frontend" / "dashboard"
 
-DEFAULT_PORT = 5173
+DEFAULT_PORT = 7777
 DEFAULT_HOST = "127.0.0.1"
 
 SERVER_START = time.time()
@@ -4220,7 +4220,7 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
                     pass
     except OSError as e:
         print(f"[ERROR] Failed to bind {host}:{port} — {e}", file=sys.stderr)
-        print("  Try: python -m web.server.server --port 5174", file=sys.stderr)
+        print("  Try: python -m web.server.server --port 7778", file=sys.stderr)
         return 1
 
     return 0
@@ -4231,7 +4231,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="X5Agent local server")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Host to bind (default 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port to bind (default 5173)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port to bind (default 7777)")
     parser.add_argument("--public", action="store_true",
                         help="Also expose via Tailscale Funnel (permanent public https URL)")
     args = parser.parse_args()
