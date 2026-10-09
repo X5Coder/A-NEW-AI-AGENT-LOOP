@@ -29,6 +29,9 @@ PROJECT_ROOT = "/app/project"
 MODELS_DIR = "/app/project/embedding_model"
 SEED_DIR = "/app/.seed-embedding"
 CONFIG_MARKER = "config.json"
+# Manager binds (single rooms): FRESH container dirs, host-persisted.
+# /app/data <- live, survives rebuilds. /data <- seed cache, same.
+BINDS = ("/app/data", "/data")
 PULL_TIMEOUT = 300
 BROWSER_TIMEOUT = 90
 # Same lookup order as the x5browser library's own launcher.
@@ -64,17 +67,31 @@ def refresh_source() -> None:
         _log(f"update skipped ({str(e)[:120]}) — running with baked code")
 
 
-def seed_models_volume() -> None:
-    """Copy tracked embedding configs into an empty models volume (once)."""
+def seed_models_volume(live_binds: list[str] | None = None) -> None:
+    """Copy tracked embedding configs into an empty models dir (once).
+
+    Extra sources on single rooms: the manager replays the Dockerfile on the
+    STORED source tree, so files the image baked under /app/data + /data may
+    ALSO exist in the live binds — copy those configs into the store too.
+    """
     try:
         marker = os.path.join(MODELS_DIR, CONFIG_MARKER)
         if os.path.isfile(marker):
-            return  # volume already seeded (weights persist here too)
-        if not os.path.isdir(SEED_DIR):
-            _log("no seed configs in image — bootstrap will fetch on first run")
+            return  # already seeded (weights persist here too)
+        if os.path.isdir(SEED_DIR):
+            shutil.copytree(SEED_DIR, MODELS_DIR, dirs_exist_ok=True)
+            _log("models dir seeded from image (weights download once on first run)")
             return
-        shutil.copytree(SEED_DIR, MODELS_DIR, dirs_exist_ok=True)
-        _log("models volume seeded (weights download once on first run)")
+        for bind in live_binds or []:
+            for cand in (os.path.join(bind, "x5store-seed"), os.path.join(bind, "x5store")):
+                try:
+                    if os.path.isfile(os.path.join(cand, CONFIG_MARKER)):
+                        shutil.copytree(cand, MODELS_DIR, dirs_exist_ok=True)
+                        _log(f"models dir seeded from bind cache ({cand})")
+                        return
+                except Exception:
+                    pass
+        _log("no seed configs anywhere — bootstrap will fetch on first run")
     except Exception as e:
         _log(f"models seed skipped ({str(e)[:120]})")
 
@@ -135,23 +152,20 @@ def _copy_seed_into(store_dir: str) -> None:
         _log(f"seed copy skipped ({str(e)[:100]})")
 
 
-def persist_data() -> None:
-    """Pin local data onto the manager's bind mounts so updates never wipe it.
+def persist_data() -> list[str]:
+    """Claim the persistent store on the manager binds (returns live binds).
 
     Single rooms have no named volumes; the manager binds the FRESH container
-    dirs `/app/data` and `/data` to the host (survives rebuilds, but only for
-    paths BAKED into the image). So persistence works file-by-file:
-      store = /app/data/x5store  (all live data: owner, chat, embeddings,
-               weights — files written here survive; symlinks do NOT)
-    First start (fresh binds): the manager copies the image's /app/data and
-    /data content into the NEW binds, so whatever we baked for them persists.
-    Every start: seed copies + baked moves land here, and the bootstrap reads
-    the store FIRST (env override) before the bundled path.
+    dirs `/app/data` and `/data` to the host (survives rebuilds). The store
+    is a REAL dir on the live bind: /app/data/x5store when present, else
+    /data/x5store. Files here survive; symlinks alone do NOT.
+    Returns the binds that exist right now (for the seed step below).
     """
-    primary = "/app/data" if os.path.isdir("/app/data") else None
-    if primary is None:
-        _log("no manager binds found (/app/data) — data stays ephemeral")
-        return
+    live_binds = [b for b in BINDS if os.path.isdir(b)]
+    if not live_binds:
+        _log("no manager binds found (/app/data, /data) — data stays ephemeral")
+        return []
+    primary = "/app/data" if "/app/data" in live_binds else live_binds[0]
     store = os.path.join(primary, "x5store")
     try:
         os.makedirs(store, exist_ok=True)
@@ -187,6 +201,7 @@ def persist_data() -> None:
                 f.write("x5agent persistent store")
     except Exception:
         pass
+    return live_binds
 
 
 def ensure_dirs() -> None:
@@ -205,8 +220,8 @@ def main() -> None:
     _log("starting (volumes: x5-data -> /app/X5Agent/Data, "
          "x5-models -> /app/project/embedding_model)")
     refresh_source()
-    persist_data()
-    seed_models_volume()
+    live_binds = persist_data()
+    seed_models_volume(live_binds)
     ensure_dirs()
     check_browser_engine()
     os.chdir(PROJECT_ROOT)

@@ -30,15 +30,15 @@ WORKDIR /app
 # secrets (.env) OUT of the image. .git stays: the entrypoint pulls updates.
 COPY . /app
 
-# Baked data for single-room binds: the manager copies the FRESH image dirs
-# /app/data + /data into the new binds on first deploy (then they persist).
-# The entrypoint claims /app/data/x5store and funnels live data there.
-# This must NOT bake weights (1.1GB *.safetensors): the manager stores the
-# whole source tree, and baking them doubles the ~5MB code into gigabytes.
-RUN mkdir -p /app/data/x5store /data \
- && (cp -r /app/project/embedding_model/. /app/data/x5store/ 2>/dev/null || true) \
- && (cp -r /app/project/embedding_model/. /data/x5store-seed/ 2>/dev/null || true) \
- && (find /app/data/x5store /data/x5store-seed -name '*.safetensors' -delete 2>/dev/null || true)
+# X5Agent/Data bootstrap: the manager builds single rooms from the STORED
+# SOURCE TREE (not from this image) and replays the Dockerfile build steps
+# there — so baking live paths here is what seeds the persistent binds.
+# This must NOT bake weights (1.1GB *.safetensors): the stored tree would
+# double the ~5MB code into gigabytes. Configs only; the bootstrap fetches
+# weights once at runtime into the persistent store.
+RUN mkdir -p X5Agent/Data/database X5Agent/Data/vector \
+ && (cp -r project/embedding_model/. X5Agent/Data/.seed/ 2>/dev/null || true) \
+ && (find X5Agent -name '*.safetensors' -delete 2>/dev/null || true)
 # Seed copy of the tracked embedding configs: at runtime a named volume
 # shadows /app/project/embedding_model, so the entrypoint re-seeds the
 # volume from here when it is empty (weights download once, then persist).
