@@ -7,10 +7,11 @@ Flow (exactly, nothing else):
   4. source-only update (git pull --ff-only: tracked code only,
      NEVER touches X5Agent/Data, embedding_model/, or any user data)
   5. bundled embedding check (offline) + tool/trigger embeddings ready
-  6. email + password prompt (stored as salted hash only, never plaintext)
-  7. public link via Tailscale Funnel (install check -> login URL
+  6. browser check (X5Browser doctor: Chrome + environment, offers --fix)
+  7. email + password prompt (stored as salted hash only, never plaintext)
+  8. public link via Tailscale Funnel (install check -> login URL
      shown + opened -> funnel on -> permanent public URL printed)
-  8. opens the console in the browser + prints local and public URLs
+  9. opens the console in the browser + prints local and public URLs
 
 Run from the project/ directory:  python install.py
 Start the console after:          python -m web.server.server
@@ -57,7 +58,7 @@ def _fail(msg: str) -> int:
 
 def check_environment() -> bool:
     """Python version, CPU/GPU (once), disk, required packages. Returns True when ready."""
-    _step("1/6 environment check")
+    _step("1/7 environment check")
     if sys.version_info < MIN_PYTHON:
         print(f"  ERROR: python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required, got {sys.version.split()[0]}",
               file=sys.stderr)
@@ -122,7 +123,7 @@ def _latest_version() -> str | None:
 
 def check_project_state() -> dict:
     """Missing / complete / has live data. Never modifies anything."""
-    _step("2/6 project state check")
+    _step("2/7 project state check")
     sys.path.insert(0, str(PROJECT_ROOT))
     from core.embedding.bootstrap import is_complete as _emb_ok
 
@@ -152,7 +153,7 @@ def check_project_state() -> dict:
 
 def update_source() -> None:
     """Source-only update: tracked code via git fast-forward. Never deletes data."""
-    _step("3/6 source update (code only, data untouched)")
+    _step("3/7 source update (code only, data untouched)")
     if not (shutil.which("git") and GIT_ROOT is not None):
         _warn("no git checkout - skipping update (download the release zip instead)")
         return
@@ -174,7 +175,7 @@ def update_source() -> None:
 
 def ensure_resources() -> bool:
     """Embedding model (auto-download on first run, delta check on updates) + prebuilt tool/trigger embeddings."""
-    _step("4/6 resources (embedding auto-fetch + prebuilt embeddings)")
+    _step("4/7 resources (embedding auto-fetch + prebuilt embeddings)")
     sys.path.insert(0, str(PROJECT_ROOT))
     from core.embedding.bootstrap import ensure_embedding_model
 
@@ -202,9 +203,82 @@ def ensure_resources() -> bool:
     return True
 
 
+def check_browser() -> bool:
+    """Browser check via the X5Browser doctor (inspect only, offers --fix).
+
+    Runs BEFORE the owner email step: answers "can this machine run the
+    browser right now?" (OS, official Chrome, network, elevation, port,
+    profile, display). Never fatal: problems only warn, the install
+    continues so the console still works without the browser.
+    """
+    _step("5/7 browser check (X5Browser doctor: Chrome + environment)")
+    try:
+        from x5browser import run_doctor
+    except Exception as e:
+        _warn(f"browser check skipped (x5browser not installed: {str(e)[:100]})")
+        return True
+    try:
+        report = run_doctor()
+    except Exception as e:
+        _warn(f"browser check failed ({str(e)[:120]}) - continuing anyway")
+        return True
+    try:
+        checks = list(getattr(report, "checks", []) or [])
+    except Exception:
+        checks = []
+    for item in checks:
+        try:
+            mark = "ok  " if getattr(item, "ok", False) else "FAIL"
+            print(f"  [{mark}] {getattr(item, 'id', '?')}: {getattr(item, 'message', '')}"[:200])
+            hint = str(getattr(item, "hint", "") or "")
+            if not getattr(item, "ok", False) and hint:
+                print(f"         fix: {hint}"[:220])
+        except Exception:
+            continue
+    if bool(getattr(report, "ok", False)):
+        _ok("browser ready (official Chrome + environment)")
+        return True
+    chrome_ok = True
+    for item in checks:
+        try:
+            if getattr(item, "id", "") == "chrome":
+                chrome_ok = bool(getattr(item, "ok", False))
+        except Exception:
+            continue
+    if not chrome_ok:
+        try:
+            ans = input("  Official Chrome is missing. Install it now? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            _warn("Chrome install skipped (non-interactive) - install it later, then re-run")
+            return True
+        if ans not in ("n", "no"):
+            print("  installing official Chrome (one system prompt may appear)...")
+            try:
+                fixed = run_doctor(fix=True)
+            except Exception as e:
+                _warn(f"Chrome install failed ({str(e)[:120]}) - install manually from https://www.google.com/chrome/")
+                return True
+            fixed_ok = bool(getattr(fixed, "ok", False))
+            for item in list(getattr(fixed, "checks", []) or []):
+                try:
+                    if getattr(item, "id", "") == "chrome":
+                        mark = "ok  " if getattr(item, "ok", False) else "FAIL"
+                        print(f"  [{mark}] chrome: {getattr(item, 'message', '')}"[:200])
+                except Exception:
+                    continue
+            if fixed_ok:
+                _ok("browser ready after Chrome install")
+            else:
+                _warn("browser still not ready (see fixes above) - continuing, console still works")
+            return True
+    _warn("browser not ready (see fixes above) - continuing, console still works")
+    return True
+
+
 def ask_credentials() -> bool:
     """Email + hidden password prompt. Stores salted hash only. Returns True on success."""
-    _step("5/6 console owner")
+    _step("6/7 console owner")
     try:
         email = input("  email: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -246,7 +320,7 @@ def setup_public_share() -> None:
     funnel on -> permanent https://<machine>.<tailnet>.ts.net printed.
     Never fatal: the local console works even when this is skipped.
     """
-    _step("6/6 public link (Tailscale Funnel — anyone can open)")
+    _step("7/7 public link (Tailscale Funnel — anyone can open)")
     try:
         sys.path.insert(0, str(PROJECT_ROOT))
         from web.server.tailscale_share import ensure_public, status
@@ -284,6 +358,7 @@ def main() -> int:
     update_source()
     if not ensure_resources():
         return 1
+    check_browser()
     if not ask_credentials():
         return 1
     setup_public_share()

@@ -36,6 +36,12 @@ _BOUNDS = {
     ("*", "timeout"): (1, 300),
     ("*", "hold_ms"): (0, 60000),
     ("*", "delay_ms"): (0, 10000),
+    ("quick_search", "pages"): (1, 20),
+    ("fetch_pages", "max_chars"): (500, 50000),
+    ("read_markdown", "max_chars"): None,
+    ("extract_image", "max_bytes"): (1024, 8388608),
+    ("manage_triggers", "check_interval_s"): (1, 30),
+    ("manage_triggers", "timeout_s"): None,
     ("verify_state", "checks"): None,
 }
 
@@ -205,6 +211,65 @@ def validate_args(name: str, args: Any) -> dict:
             raise ValueError(f"{name}: checks must not be empty")
         if len(clean["checks"]) > MAX_CHECKS:
             raise ValueError(f"{name}: at most {MAX_CHECKS} checks")
+    if name == "quick_search" and "query" in clean:
+        if not clean["query"].strip():
+            raise ValueError(f"{name}: query must not be empty")
+        if len(clean["query"]) > 500:
+            raise ValueError(f"{name}: query too long (max 500)")
+    if name == "fetch_pages" and "urls" in clean:
+        urls = clean["urls"]
+        if not urls:
+            raise ValueError(f"{name}: urls must not be empty")
+        if len(urls) > 5:
+            raise ValueError(f"{name}: at most 5 urls")
+        checked = []
+        for item in urls:
+            if not isinstance(item, str):
+                raise TypeError(f"{name}: each url must be string")
+            low = item.strip().lower()
+            if not (low.startswith("http://") or low.startswith("https://")):
+                raise ValueError(f"{name}: each url must be http(s)")
+            if len(item.strip()) > MAX_TEXT:
+                raise ValueError(f"{name}: each url too long (max {MAX_TEXT})")
+            checked.append(item.strip())
+        clean["urls"] = checked
+    if name == "read_markdown" and "max_chars" in clean:
+        value = clean["max_chars"]
+        if value != 0 and not 500 <= value <= 200000:
+            raise ValueError(f"{name}: max_chars must be 0 (= full) or 500..200000")
+    if name == "extract_image":
+        ref = clean.get("ref")
+        src = clean.get("src")
+        if (ref is None) == (src is None or not str(src).strip()):
+            raise ValueError(f"{name}: exactly one of ref|src is required")
+        if isinstance(src, str):
+            text = src.strip()
+            if text.startswith("data:"):
+                clean["src"] = text[:MAX_STR] if len(text) <= MAX_STR else text[:MAX_STR]
+            else:
+                low = text.lower()
+                if not (low.startswith("http://") or low.startswith("https://")):
+                    raise ValueError(f"{name}: src must be an http(s) or data: URL")
+                if len(text) > MAX_TEXT:
+                    raise ValueError(f"{name}: src too long (max {MAX_TEXT})")
+                clean["src"] = text
+    if name == "manage_triggers":
+        action = str(clean.get("action") or "").strip()
+        if action not in ("list", "start", "update", "stop"):
+            raise ValueError(f"{name}: action must be list|start|update|stop")
+        if action in ("update", "stop") and not str(clean.get("trigger_id") or "").strip():
+            raise ValueError(f"{name}: trigger_id is required with {action}")
+        if action == "start":
+            if not str(clean.get("url") or "").strip():
+                raise ValueError(f"{name}: url is required with start")
+            clean["url"] = _validate_url(str(clean["url"]).strip(), name, "url")
+            if not clean.get("kind") and not clean.get("conditions"):
+                raise ValueError(f"{name}: kind or conditions is required with start")
+        if "url" in clean and clean["url"]:
+            clean["url"] = _validate_url(str(clean["url"]).strip(), name, "url")
+        timeout = clean.get("timeout_s")
+        if timeout is not None and (not _is_num(timeout) or float(timeout) < 0):
+            raise ValueError(f"{name}: timeout_s must be 0 or more")
     if name == "screenshot" and clean.get("format") == "jpeg":
         # Max quality: screenshots are always lossless PNG.
         clean["format"] = "png"

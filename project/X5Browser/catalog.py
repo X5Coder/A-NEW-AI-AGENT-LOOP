@@ -1,9 +1,9 @@
 """
-X5Browser tool catalog — single source of truth for all 39 browser tools.
+X5Browser tool catalog — single source of truth for all 44 browser tools.
 
-38 mirror the library's TOOL_SCHEMAS 1:1; `show_preview` is a small project
+43 mirror the library's TOOL_SCHEMAS 1:1; `show_preview` is a small project
 wrapper over the library's live_preview (floating watch-only window for the UI).
-All 39 are CORE PLUGINS: always on, hidden from the UI, found via tool_search.
+All 44 are CORE PLUGINS: always on, hidden from the UI, found via tool_search.
 4 DANGEROUS tools: fill_form, upload_files, export_page, console_command.
 In restricted mode the loop asks the user (via question) before running them;
 otherwise they run directly.
@@ -116,6 +116,32 @@ SPECS: list[dict] = [
         },
     },
     {
+        "name": "quick_search",
+        "core": False,
+        "description": (
+            "Fast Google search as organized JSON (title, url, snippet per result). "
+            "Reads up to 5 live result pages in a hidden tab that is closed afterwards; "
+            "your tabs, refs and map stay untouched. For opening a result use navigate or manage_tabs."
+        ),
+        "inputs": {
+            "query": {"type": "string", "required": True, "description": "Search query, max 500 chars."},
+            "pages": {"type": "integer", "required": False, "description": "How many result pages, 1..20. Default 1."},
+        },
+    },
+    {
+        "name": "fetch_pages",
+        "core": False,
+        "description": (
+            "Fetch 1..5 page URLs as clean organized Markdown (title plus text, links resolved). "
+            "Really visits each page, scrolls for lazy content, then filters nav/cookie/footer noise. "
+            "One hidden tab per URL, all at once, each closed afterwards; failures come back per URL."
+        ),
+        "inputs": {
+            "urls": {"type": "list", "required": True, "description": "1..5 http(s) URLs to fetch."},
+            "max_chars": {"type": "integer", "required": False, "description": "Markdown cap per page, 500..50000. Default 8000."},
+        },
+    },
+    {
         "name": "find_elements",
         "core": False,
         "description": (
@@ -156,6 +182,32 @@ SPECS: list[dict] = [
             "full_page": {"type": "boolean", "required": False, "description": "Capture the full page. Default false."},
             "annotate": {"type": "boolean", "required": False, "description": "Draw ref numbers on the image. Default false."},
             "format": {"type": "string", "required": False, "description": "png or jpeg. Default png."},
+        },
+    },
+    {
+        "name": "read_markdown",
+        "core": False,
+        "description": (
+            "Full page or element text as organized Markdown (headings, lists, tables, links, form labels). "
+            "Text only, no markup; uncapped by default whatever its size."
+        ),
+        "inputs": {
+            "ref": {"type": "integer", "required": False, "description": "One element only; omit for the whole page."},
+            "max_chars": {"type": "integer", "required": False, "description": "Cap, 0 = full text, or 500..200000. Default 0."},
+        },
+    },
+    {
+        "name": "extract_image",
+        "core": False,
+        "description": (
+            "Original image bytes by element ref or URL (QR codes, photos): the resource itself, "
+            "not a re-render. Find the URL with extract_data(kind=\"images\") or read_markdown first. "
+            "For on-screen views use screenshot."
+        ),
+        "inputs": {
+            "ref": {"type": "integer", "required": False, "description": "Element ref (exactly one of ref|src)."},
+            "src": {"type": "string", "required": False, "description": "Image http(s) or data: URL (exactly one of ref|src)."},
+            "max_bytes": {"type": "integer", "required": False, "description": "Max bytes, 1024..8388608. Default 8388608."},
         },
     },
     {
@@ -460,6 +512,29 @@ SPECS: list[dict] = [
         "inputs": {
             "actions": {"type": "list", "required": True, "description": "Max 20 steps: each {tool, args} with a known browser tool name."},
             "stop_on_error": {"type": "boolean", "required": False, "description": "Stop at first error. Default true."},
+        },
+    },
+    {
+        "name": "manage_triggers",
+        "core": False,
+        "description": (
+            "List, start, update, or stop page-monitor triggers. Each trigger watches its own "
+            "hidden tab on its own cadence while you work; it fires once and dies. "
+            "list shows every running trigger; update edits one."
+        ),
+        "inputs": {
+            "action": {"type": "string", "required": True, "description": "list, start, update or stop."},
+            "trigger_id": {"type": "string", "required": False, "description": "Trigger id (required with update/stop)."},
+            "url": {"type": "string", "required": False, "description": "http(s) site to watch (required with start)."},
+            "kind": {"type": "string", "required": False, "description": "Single condition kind (with start)."},
+            "value": {"type": "string", "required": False, "description": "Single condition value (with start)."},
+            "match": {"type": "string", "required": False, "description": "contains or exact (with start)."},
+            "conditions": {"type": "list", "required": False, "description": "OR conditions [{kind, value}] (with start)."},
+            "add_conditions": {"type": "list", "required": False, "description": "More OR events (with update)."},
+            "timeout_s": {"type": "number", "required": False, "description": "Seconds, 0 = persist."},
+            "check_interval_s": {"type": "number", "required": False, "description": "Checks cadence 1..30. Default 5."},
+            "refresh_each_cycle": {"type": "boolean", "required": False, "description": "Reload before each check."},
+            "reason": {"type": "string", "required": False, "description": "Why this trigger."},
         },
     },
     {

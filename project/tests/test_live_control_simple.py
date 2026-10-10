@@ -45,10 +45,14 @@ for needed in ("_live_snapshot", "_live_active", "_live_pause_entry",
     assert hasattr(srv, needed), f"missing new server helper: {needed}"
 print("old server live_state/heal helpers removed OK")
 
-# ---- catalog surface (library 1.4.0 = 38 tools + our show_preview wrapper) ----
-assert len(catalog.ALL_TOOLS) == 39, len(catalog.ALL_TOOLS)
+# ---- catalog surface (library 1.5.0 = 43 tools + our show_preview wrapper) ----
+assert len(catalog.ALL_TOOLS) == 44, len(catalog.ALL_TOOLS)
 assert "browser_status" in catalog.ALL_TOOLS
 assert "show_preview" in catalog.ALL_TOOLS
+for _new in ("quick_search", "fetch_pages", "read_markdown", "extract_image",
+             "manage_triggers"):
+    assert _new in catalog.ALL_TOOLS, _new
+    assert catalog.get_spec(_new) is not None, _new
 assert catalog.get_spec("browser_status") is not None
 assert catalog.get_spec("show_preview") is not None
 assert format_event("browser_status") == "Checking the browser"
@@ -59,7 +63,7 @@ for tool, param in (("choose_option", "multiple"), ("read_console", "since"),
                     ("click_verify", "modifiers"), ("click_verify", "hold_ms")):
     spec = catalog.get_spec(tool) or {}
     assert param in (spec.get("inputs") or {}), f"{tool}.{param} missing"
-print("catalog updated to 38 tools (+browser_status, new params) OK")
+print("catalog updated to 43 tools (+browser_status, new params) OK")
 
 # ---- stopped browser, simulated deterministically ------------------------
 _real_probe = svc._endpoint_alive_now

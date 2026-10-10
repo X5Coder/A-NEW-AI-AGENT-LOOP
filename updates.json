@@ -1,12 +1,9 @@
 {
-  "version": "0.5.0",
-  "description": "Console lock: first run asks for owner email+password in the browser, then every page and API needs a signed-in session (change password and sign out from Settings). Docker also ships headless Chromium with a boot-time engine check.",
+  "version": "0.6.0",
+  "description": "X5Browser updated to 1.5.0 with 5 new tools (Google search, page fetch, Markdown read, image extract, page triggers), and install.py now checks the browser (official Chrome + environment via the library doctor) before asking for the owner email.",
   "features": [
-    "First run redirects to a setup screen asking for owner email+password (hash only, never plaintext).",
-    "Signed-in sessions via HttpOnly cookie; strangers get login-required instead of the console.",
-    "Settings can change the password and sign out for real (previously local-only).",
-    "install.py owners keep working — same record format on both paths.",
-    "Docker image includes headless Chromium; each start logs a browser-engine OK/FAIL line.",
-    "Public-link skip is now explicit in container logs (needs X5_PUBLIC=1 plus a logged-in client)."
+    "Browser library updated from 1.4.0 to 1.5.0 (44 tools: 43 library + show_preview).",
+    "New: quick_search (Google results as JSON), fetch_pages (URLs as clean Markdown), read_markdown, extract_image, manage_triggers.",
+    "Install runs the X5Browser doctor before the owner email and offers to install official Chrome when missing (never blocks the install)."
   ]
 }
