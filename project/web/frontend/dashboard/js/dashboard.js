@@ -97,6 +97,23 @@ function populateStats(dash, cost, models, balance) {
 }
 
 export async function initDashboard() {
+  await refreshDashboard();
+
+  // Push replaces the old 30s poll: the server fans one dashboard snapshot
+  // to all tabs only when due (O(1) total, SaaS-safe).
+  onPush("dashboard", (d) => {
+    if (!d) return;
+    populateStats(d.dashboard, d.cost, d.models, d.balance);
+  });
+
+  // A model connected/disconnected on the AI Models page: re-read status
+  // now instead of waiting for a reload.
+  window.addEventListener("x5:models-changed", () => {
+    refreshDashboard();
+  });
+}
+
+export async function refreshDashboard() {
   if (!document.getElementById("statRequests")) return;
 
   const [dash, cost, models, balance] = await Promise.all([
@@ -106,11 +123,4 @@ export async function initDashboard() {
     fetchJson("/api/balance"),
   ]);
   if (dash || cost || models || balance) populateStats(dash, cost, models, balance);
-
-  // Push replaces the old 30s poll: the server fans one dashboard snapshot
-  // to all tabs only when due (O(1) total, SaaS-safe).
-  onPush("dashboard", (d) => {
-    if (!d) return;
-    populateStats(d.dashboard, d.cost, d.models, d.balance);
-  });
 }

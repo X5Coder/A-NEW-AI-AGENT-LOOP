@@ -455,6 +455,7 @@ function openTemplateDialog(tpl, saved) {
         toast("Saved");
         closeModal();
         await refresh();
+        window.dispatchEvent(new CustomEvent("x5:models-changed"));
       } else {
         const m = res.data?.error || `HTTP ${res.res.status}`;
         logLines = [...logLines, `Save: FAIL — ${String(m).slice(0, 300)}`];

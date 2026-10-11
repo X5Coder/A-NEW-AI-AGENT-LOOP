@@ -4328,6 +4328,21 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             pass
 
+    def handle_error(self, request, client_address):
+        # A vanished client (cancelled fetch, closed tab, dead scanner probe)
+        # is routine noise, not a server bug: stay silent instead of dumping
+        # a traceback for their disconnect. Real errors still print.
+        try:
+            exc_type = sys.exc_info()[0]
+            if exc_type is not None and issubclass(exc_type, (BrokenPipeError, ConnectionResetError)):
+                return
+        except Exception:
+            pass
+        try:
+            super().handle_error(request, client_address)
+        except Exception:
+            pass
+
 
 class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
