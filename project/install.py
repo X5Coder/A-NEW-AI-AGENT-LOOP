@@ -129,9 +129,11 @@ def ensure_dependencies() -> bool:
             __import__(pkg)
         except Exception:
             missing.append(pkg)
-    if not missing:
+    want_cmd = shutil.which("x5agent") is None
+    if not missing and not want_cmd:
         return True
-    print(f"  installing missing packages: {', '.join(missing)} (pip install -e .)...")
+    what = ", ".join(missing) if missing else "x5agent command"
+    print(f"  installing missing packages: {what} (pip install -e .)...")
     try:
         tool = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-U",
@@ -493,6 +495,25 @@ def ensure_firewall(port: int = CONSOLE_PORT) -> None:
           f"if port {port} is filtered, run manually: sudo ufw allow {port}/tcp")
 
 
+def _owner_exists() -> bool:
+    """True when the owner was already registered once (local only).
+
+    Prints the skip note. Explicit --email/--password flags bypass this
+    check so the owner can still be changed on purpose.
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from web.server.console_auth import is_setup, owner_email
+
+        if is_setup():
+            print(f"  OK: owner already set ({owner_email()}) - skipping "
+                  "(pass --email/--password to change it)")
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _clear_screen() -> None:
     """Best-effort terminal clear before the owner prompt (fresh screen).
 
@@ -535,6 +556,8 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
     """
     _clear_screen()
     _step("6/7 console owner")
+    if not email and not password and _owner_exists():
+        return True
     email = (email or "").strip().lower()
     while True:
         if not email:

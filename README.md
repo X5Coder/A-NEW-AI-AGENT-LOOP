@@ -38,8 +38,19 @@ python3.12 install.py --run
 ```
 
 `install.py --run` = install + start in one step (dependencies auto-install,
-server binds `0.0.0.0:7777` so the VPS public IP works). Without `--run` it
-only installs; then start manually with `python3.12 -m web.server.server`.
+server binds `0.0.0.0:7777` so the VPS public IP works). The owner email +
+password are asked only once (saved locally, skipped on later runs).
+Without `--run` it only installs; then start manually with `x5agent`.
+
+**Start directly (from anywhere, no update check)**
+
+```bash
+x5agent              # serve now on 0.0.0.0:7777
+x5agent --public     # also enable the Tailscale Funnel public link
+```
+
+The `x5agent` command is installed on PATH by `pip install -e .`
+(the installer adds it automatically when missing).
 
 **Windows**
 

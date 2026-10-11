@@ -1,6 +1,6 @@
 [project]
 name = "x5agent"
-version = "0.9.0"
+version = "0.10.0"
 description = "Professional Agent Loop with built-in embedding model and universal AI model connections (AI Models templates)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,6 +29,9 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["core*", "scripts*"]
+
+[project.scripts]
+x5agent = "scripts.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
