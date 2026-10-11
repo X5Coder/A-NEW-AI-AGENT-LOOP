@@ -291,10 +291,17 @@ def enable_funnel(bin_path: str, port: int = 7777) -> str | None:
         [bin_path, "funnel", "--bg", str(port)],
         [bin_path, "funnel", str(port)],
     ]
+    # First attempt gets longer: fresh tailnets provision HTTPS certificates
+    # inside this call. A timeout is just a failed variant, never fatal.
     chosen = None
     with _Spinner("enabling funnel"):
-        for args in variants:
-            proc = _run(args, timeout=60)
+        for args, timeout in zip(variants, (180, 60, 60)):
+            try:
+                proc = _run(args, timeout=timeout)
+            except (subprocess.TimeoutExpired, OSError) as e:
+                print(f"  funnel variant timed out ({' '.join(args[1:])}: "
+                      f"{str(e)[:80]}), trying next ...")
+                continue
             if proc is not None and proc.returncode == 0:
                 chosen = args
                 break
@@ -305,7 +312,10 @@ def enable_funnel(bin_path: str, port: int = 7777) -> str | None:
         # Funnel blocked (ACL/plan) -> tailnet-only serve, still useful.
         print("  funnel refused - falling back to tailnet-only serve ...")
         with _Spinner("enabling tailnet serve"):
-            _run([bin_path, "serve", "--bg", target], timeout=60)
+            try:
+                _run([bin_path, "serve", "--bg", target], timeout=60)
+            except (subprocess.TimeoutExpired, OSError) as e:
+                print(f"  WARN: serve timed out ({str(e)[:80]})")
         print("  WARN: funnel refused (check admin: HTTPS + funnel in ACL) — using tailnet-only serve")
     info = login_status(bin_path)
     dns = info.get("dns")

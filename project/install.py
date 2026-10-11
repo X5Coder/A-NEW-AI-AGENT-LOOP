@@ -621,54 +621,57 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
         return False
 
 
-def setup_public_share(mode=None, assume_yes: bool = False) -> str | None:
-    """Step 7/7: Tailscale Funnel public link (anyone can open).
+def setup_public_share(mode=None, assume_yes: bool = False) -> tuple[str | None, str]:
+    """Step 7/7: Tailscale install + login. Returns (url, reason).
 
-    Flow: install check (auto-install attempt on Linux when automatic) ->
-    login URL shown + opened in browser -> funnel on ->
-    permanent https://<machine>.<tailnet>.ts.net printed.
-    Returns the public URL, or None when the link is off/unavailable.
-    Never fatal: the local console works even when this is skipped.
+    Funnel itself is NOT enabled here on purpose: it needs a listening
+    server (enabling it against a dead port hangs), so the server turns it
+    on in the background when started with --public, after the port answers.
+    Returns the expected public URL (tailnet DNS) when logged in, else None
+    with a short reason. Never fatal: the local console works regardless.
     mode: True/False/None (flag --public/--no-public/unset). With --run and
-    no explicit flag the link is attempted automatically (no prompt).
+    no explicit flag the login is attempted automatically (no prompt).
     """
     _step("7/7 public link (Tailscale Funnel — anyone can open)")
     if mode is False:
         _ok("skipped (--no-public) - local console only")
-        return None
+        return None, "skipped (--no-public)"
     try:
         sys.path.insert(0, str(PROJECT_ROOT))
-        from web.server.tailscale_share import ensure_public, is_installed
+        from web.server.tailscale_share import (
+            is_installed, login_interactive, login_status)
     except Exception as e:
         _warn(f"public link skipped ({str(e)[:120]}) - local console still works")
-        return None
+        return None, "unavailable"
     auto = bool(mode) or assume_yes
     if not auto:
         try:
             ans = input("  Enable the public internet link? [Y/n]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
-            return None
+            return None, "skipped"
         if ans == "n":
             _ok("skipped - local console only")
-            return None
-        auto = True  # user said yes - proceed automatically from here
-    installed, _ = is_installed()
+            return None, "skipped"
+    installed, bin_path = is_installed()
     if not installed and not _install_tailscale():
-        return None
-    try:
-        snap = ensure_public(port=7777, open_browser=True)
-    except Exception as e:
-        _warn(f"public link failed ({str(e)[:120]}) - local console still works")
-        return None
-    url = snap.get("public_url")
-    if url:
-        _ok(f"public console: {url}")
-    elif not snap.get("installed"):
-        _warn("install Tailscale, then: python -m web.server.server --public")
-    else:
-        _warn("login not completed - re-run: python -m web.server.server --public")
-    return url
+        return None, "needs Tailscale (see above)"
+    installed, bin_path = is_installed()
+    if not installed or not bin_path:
+        _warn("install Tailscale, then re-run with --public")
+        return None, "needs Tailscale (see above)"
+    info = login_status(bin_path)
+    if not info.get("logged_in"):
+        if not login_interactive(bin_path):
+            _warn("login not completed - re-run to retry it")
+            return None, "login incomplete (re-run to retry)"
+        info = login_status(bin_path)
+    dns = str(info.get("dns") or "")
+    if dns:
+        _ok(f"logged in ({dns}) - funnel activates when the server starts with --public")
+        return f"https://{dns}", ""
+    _warn("login state unclear - re-run to retry it")
+    return None, "login unclear (re-run to retry)"
 
 
 def _install_tailscale() -> bool:
@@ -715,6 +718,44 @@ def _install_tailscale() -> bool:
         return False
 
 
+def _reachable_url(port: int = CONSOLE_PORT) -> str:
+    """Best URL to open the console from another machine.
+
+    Prefers the public IP (what a VPS user actually needs), falls back to
+    the LAN IP, then loopback. Best-effort, short timeouts, never raises.
+    """
+    lan = ""
+    try:
+        import socket as _socket
+
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))  # no packets sent, routing lookup only
+            lan = str(s.getsockname()[0] or "")
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+    except Exception:
+        lan = ""
+    try:
+        import re as _re
+        import urllib.request as _url
+
+        req = _url.Request("https://api.ipify.org",
+                           headers={"User-Agent": "x5agent-installer"})
+        with _url.urlopen(req, timeout=8) as r:
+            pub = r.read().decode("utf-8").strip()
+        if _re.match(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$", pub):
+            return f"http://{pub}:{port}/"
+    except Exception:
+        pass
+    if lan and not lan.startswith("127."):
+        return f"http://{lan}:{port}/"
+    return f"http://127.0.0.1:{port}/"
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     print("=" * 70)
@@ -741,7 +782,7 @@ def main(argv=None) -> int:
     public_mode = args.public
     if args.run and public_mode is None:
         public_mode = True
-    public_url = setup_public_share(mode=public_mode, assume_yes=auto)
+    public_url, public_reason = setup_public_share(mode=public_mode, assume_yes=auto)
     if not args.no_open_browser:
         try:
             import webbrowser
@@ -750,15 +791,15 @@ def main(argv=None) -> int:
         except Exception:
             pass
     print("\n" + "=" * 70)
-    print(f"  Web Server (Local):  {UI_URL}")
-    print(f"  Web Server (Public): {public_url or 'off - install Tailscale, then re-run with --public'}")
+    print(f"  Web Server (Local):  {_reachable_url()}")
+    print(f"  Web Server (Public): {public_url or 'off - ' + public_reason}")
     print("  Server Running Now" if args.run else "  Server Ready")
     print("=" * 70)
     if args.run:
         print("\n[install] starting console now (--run)...")
         cmd = [sys.executable, "-m", "web.server.server",
                "--host", "0.0.0.0", "--port", "7777"]
-        if args.public:
+        if public_mode:
             cmd.append("--public")
         os.chdir(str(PROJECT_ROOT))
         os.execv(sys.executable, cmd)
