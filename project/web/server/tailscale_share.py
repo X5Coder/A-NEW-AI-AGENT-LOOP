@@ -29,7 +29,6 @@ from pathlib import Path
 
 TAILNET_INSTALL_URL = "https://tailscale.com/download"
 LOGIN_URL_RE = re.compile(r"https://login\.tailscale\.com/[^\s'\"]+")
-MAX_RETRIES = 3
 CMD_TIMEOUT = 30
 LOGIN_WAIT_SEC = 180
 FUNNEL_PORT = 443
@@ -66,18 +65,6 @@ def find_tailscale() -> str | None:
 
 def _run(args: list[str], timeout: int = CMD_TIMEOUT) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-
-
-def _run_retry(args: list[str]) -> subprocess.CompletedProcess | None:
-    last = None
-    for _ in range(MAX_RETRIES):
-        try:
-            last = _run(args)
-            return last
-        except (subprocess.TimeoutExpired, OSError):
-            last = None
-            time.sleep(1)
-    return last
 
 
 def is_installed() -> tuple[bool, str | None]:
@@ -231,20 +218,26 @@ def enable_funnel(bin_path: str, port: int = 7777) -> str | None:
     Tries the modern syntax first, falls back to older variants.
     Funnel needs HTTPS + MagicDNS + funnel allowed in the admin ACL; when the
     admin blocks it, falls back to tailnet-only `serve` and returns its URL.
+    One attempt per variant (a bad flag never heals on retry) with progress
+    prints, so a slow first-time certificate provisioning never looks hung.
     """
     target = f"http://127.0.0.1:{port}"
+    print("  enabling funnel (first time may provision certificates, ~1 min)...")
     variants = [
         [bin_path, "funnel", "--bg", target],
         [bin_path, "funnel", "--bg", str(port)],
         [bin_path, "funnel", str(port)],
     ]
     for args in variants:
-        proc = _run_retry(args)
+        proc = _run(args, timeout=60)
         if proc is not None and proc.returncode == 0:
+            print(f"  OK: funnel on ({' '.join(args[1:])})")
             break
+        print(f"  funnel variant failed ({' '.join(args[1:])}), trying next ...")
     else:
         # Funnel blocked (ACL/plan) -> tailnet-only serve, still useful.
-        _run_retry([bin_path, "serve", "--bg", target])
+        print("  funnel refused - falling back to tailnet-only serve ...")
+        _run([bin_path, "serve", "--bg", target], timeout=60)
         print("  WARN: funnel refused (check admin: HTTPS + funnel in ACL) — using tailnet-only serve")
     info = login_status(bin_path)
     dns = info.get("dns")

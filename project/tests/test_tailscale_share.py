@@ -57,7 +57,7 @@ def test_enable_funnel_saves_record(monkeypatch, tmp_path):
     class Proc:
         returncode = 0
         stdout = ""
-    monkeypatch.setattr(ts, "_run_retry", lambda args: Proc())
+    monkeypatch.setattr(ts, "_run", lambda *a, **k: Proc())
     monkeypatch.setattr(ts, "login_status",
                         lambda b: {"logged_in": True, "dns": "desk.example.ts.net"})
     saved = tmp_path / "tailscale.json"

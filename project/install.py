@@ -231,21 +231,23 @@ def check_environment() -> bool:
               file=sys.stderr)
         return False
     _ok(f"python {sys.version.split()[0]}")
-    if sys.version_info < BROWSER_PYTHON:
-        _warn(f"python {BROWSER_PYTHON[0]}.{BROWSER_PYTHON[1]}+ is recommended for full "
-              "browser support (x5browser 1.5.1 runs on 3.10+, the browser "
-              "check below is the source of truth)")
-    device = "cpu"
-    try:
-        import torch  # type: ignore
+    # Fast GPU gate first: importing torch takes tens of seconds and
+    # cuda.is_available() can block on driver probing. On machines with no
+    # NVIDIA GPU both answers are known to be cpu without touching torch.
+    if _has_nvidia_gpu():
+        try:
+            import torch  # type: ignore
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        device = "cpu (torch not installed)"
-    print(f"  device: {device} (GPU used automatically when available)")
-    from core.embedding.bootstrap import detect_device  # noqa: E402
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            device = "cpu (torch not installed)"
+        print(f"  device: {device} (GPU used automatically when available)")
+        from core.embedding.bootstrap import detect_device  # noqa: E402
 
-    print(f"  embedding device: {detect_device()} (detected once, cached)")
+        print(f"  embedding device: {detect_device()} (detected once, cached)")
+    else:
+        print("  device: cpu (no NVIDIA GPU)")
+        print("  embedding device: cpu (no NVIDIA GPU)")
     if not ensure_dependencies():
         return False
     _ok("dependencies present")
@@ -517,8 +519,7 @@ def _owner_exists() -> bool:
         from web.server.console_auth import is_setup, owner_email
 
         if is_setup():
-            print(f"  OK: owner already set ({owner_email()}) - skipping "
-                  "(pass --email/--password to change it)")
+            print(f"  OK: owner already set ({owner_email()})")
             return True
     except Exception:
         pass
