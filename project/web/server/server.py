@@ -1657,6 +1657,10 @@ def serve_ws(conn, peer: str = "") -> None:
         token = (msg or {}).get("token") if isinstance(msg, dict) else ""
         if not isinstance(msg, dict) or msg.get("op") != "auth":
             try:
+                _ws_send(conn, {"type": "auth_error", "error": "auth required"})
+            except Exception:
+                pass
+            try:
                 conn.close(4401, "auth required")
             except Exception:
                 pass
@@ -1671,6 +1675,10 @@ def serve_ws(conn, peer: str = "") -> None:
         except Exception:
             ok = False
         if not ok:
+            try:
+                _ws_send(conn, {"type": "auth_error", "error": "invalid token"})
+            except Exception:
+                pass
             try:
                 conn.close(4401, "auth required")
             except Exception:

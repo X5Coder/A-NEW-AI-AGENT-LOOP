@@ -7,12 +7,14 @@
  */
 "use strict";
 
-import { onWsPush, onWsHello, ensureWs } from "./ws.js?v=1";
+import { onWsPush, onWsHello, onWsStatus, ensureWs, isHttpFallback } from "./ws.js?v=1";
 
 const handlers = new Map(); // type -> Set<fn>
 const lastState = new Map(); // state types only (replayed to late subscribers)
 const STATE_TYPES = new Set(["browser", "live", "chat", "dashboard", "workspace", "scheduler", "gateway"]);
 let started = false;
+let sseSource = null;
+let sseWanted = false;
 
 export function onPush(type, fn) {
   if (typeof type !== "string" || typeof fn !== "function") return;
@@ -71,9 +73,60 @@ export function startEvents() {
   started = true;
   onWsHello(onHello);
   onWsPush(onServerPush);
+  onWsStatus(onTransportStatus);
   // Owner gate: a dead session surfaces as WS auth failure (ws.js sends
   // the tab to login) — this probe only catches the cookie-less case early.
   try {
     ensureWs().catch(() => {});
   } catch (_) {}
+  // If the WS upgrade is already known-blocked (proxy/funnel), start SSE
+  // right away instead of waiting for the status callback.
+  try {
+    if (isHttpFallback()) startSseFallback();
+  } catch (_) {}
+}
+
+function onTransportStatus(online) {
+  try {
+    if (!online && isHttpFallback()) startSseFallback();
+    else if (online) stopSseFallback();
+  } catch (_) {}
+}
+
+function startSseFallback() {
+  // SSE fallback: same onPush contract over /api/events (plain HTTPS GET,
+  // passes proxies that drop the WS upgrade). One source per page.
+  if (sseWanted) return;
+  sseWanted = true;
+  try {
+    if (sseSource) return;
+    const src = new EventSource("/api/events");
+    sseSource = src;
+    src.onmessage = (e) => {
+      let frame;
+      try {
+        frame = JSON.parse(e.data);
+      } catch (_) {
+        return;
+      }
+      if (!frame || typeof frame !== "object") return;
+      if (frame.type === "hello" && frame.data) {
+        onHello(frame.data);
+        return;
+      }
+      if (typeof frame.type === "string") onServerPush(frame.type, frame.data || {});
+    };
+    src.onerror = () => {
+      // EventSource retries natively; a hard failure just stays quiet —
+      // the WS background retry may still recover the socket.
+    };
+  } catch (_) {}
+}
+
+function stopSseFallback() {
+  sseWanted = false;
+  try {
+    if (sseSource) sseSource.close();
+  } catch (_) {}
+  sseSource = null;
 }

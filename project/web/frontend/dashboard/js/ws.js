@@ -17,7 +17,11 @@ const pending = new Map(); // id -> {resolve, reject}
 const pushHandlers = new Set(); // fn(channel, data)
 const rawHandlers = new Set(); // fn(msg) — chat progress frames
 const helloHandlers = new Set(); // fn(hello)
+const statusHandlers = new Set(); // fn(online:boolean) — transport state
 let closedByUs = false;
+let wsOnline = false; // true only after auth_ok on the socket
+let httpFallback = false; // true when the WS upgrade never completes (proxy/funnel drops it)
+let everAuthed = false; // any auth_ok on this page load (token is valid)
 
 export function getWsToken() {
   try {
@@ -53,6 +57,28 @@ export function onWsRaw(fn) {
 
 export function onWsHello(fn) {
   if (typeof fn === "function") helloHandlers.add(fn);
+}
+
+export function onWsStatus(fn) {
+  if (typeof fn === "function") statusHandlers.add(fn);
+}
+
+export function isWsOnline() {
+  return wsOnline;
+}
+
+export function isHttpFallback() {
+  return httpFallback;
+}
+
+function setOnline(on) {
+  if (wsOnline === on) return;
+  wsOnline = on;
+  for (const fn of statusHandlers) {
+    try {
+      fn(on);
+    } catch (_) {}
+  }
 }
 
 function dispatchHello(hello) {
@@ -92,7 +118,25 @@ function connect() {
     }
     sock = ws;
     let authed = false;
+    let opened = false;
+    // Upgrade watchdog: some proxies (funnel included) answer HTTP fine but
+    // never complete the WS upgrade — onerror/onclose fire without onopen.
+    // That is a transport block, NOT a bad token: never log out for it.
+    const upgradeTimer = setTimeout(() => {
+      if (!opened && !authed) {
+        httpFallback = true;
+        try {
+          ws.close();
+        } catch (_) {}
+      }
+    }, 8000);
+    const clearUpgradeTimer = () => {
+      try {
+        clearTimeout(upgradeTimer);
+      } catch (_) {}
+    };
     ws.onopen = () => {
+      opened = true;
       try {
         ws.send(JSON.stringify({ op: "auth", token: getWsToken() }));
       } catch (_) {}
@@ -107,8 +151,25 @@ function connect() {
       if (!m || typeof m !== "object") return;
       if (m.type === "auth_ok") {
         authed = true;
+        everAuthed = true;
+        httpFallback = false;
+        clearUpgradeTimer();
+        setOnline(true);
         dispatchHello(m.hello || {});
         resolve(ws);
+        return;
+      }
+      if (m.type === "auth_error") {
+        // Server explicitly refused the token (expired/logout) — that and
+        // only that means back to login.
+        clearUpgradeTimer();
+        try {
+          setWsToken("");
+        } catch (_) {}
+        try {
+          if (location.pathname !== "/login.html") location.href = "/login.html";
+        } catch (_) {}
+        resolve(null);
         return;
       }
       if (m.type === "push") {
@@ -127,8 +188,35 @@ function connect() {
       if (typeof m.type === "string") dispatchRaw(m);
     };
     const dead = () => {
+      clearUpgradeTimer();
+      if (!opened && !authed) {
+        // Upgrade never completed (proxy/funnel drops WS): transport block,
+        // NOT a bad token. Stay on the page on HTTP fallback, retry WS
+        // quietly in the background for when the route allows it.
+        httpFallback = true;
+        setOnline(false);
+        try {
+          ws.close();
+        } catch (_) {}
+        sock = null;
+        setTimeout(connect, 10000);
+        resolve(null);
+        return;
+      }
       if (!authed) {
-        // Bad/expired token — back to login instead of retrying forever.
+        // Opened but no auth_ok: only log out when the token itself is
+        // known-bad (server sent auth_error, handled above) or when a
+        // previous auth already proved it on this page load. Otherwise it
+        // is a dropped connection mid-handshake — retry quietly.
+        if (everAuthed) {
+          try {
+            ws.close();
+          } catch (_) {}
+          sock = null;
+          setTimeout(connect, 3000);
+          resolve(null);
+          return;
+        }
         try {
           setWsToken("");
         } catch (_) {}
@@ -142,17 +230,36 @@ function connect() {
         ws.close();
       } catch (_) {}
       sock = null;
+      setOnline(false);
       setTimeout(connect, 3000);
       resolve(null);
     };
     ws.onerror = dead;
     ws.onclose = () => {
+      clearUpgradeTimer();
       if (closedByUs) {
+        setOnline(false);
+        resolve(null);
+        return;
+      }
+      if (!opened && !authed) {
+        // Same transport-block case as dead(): HTTP fallback + quiet retry.
+        httpFallback = true;
+        setOnline(false);
+        sock = null;
+        for (const [, p] of pending) {
+          try {
+            p.reject(new Error("ws closed"));
+          } catch (_) {}
+        }
+        pending.clear();
+        setTimeout(connect, 10000);
         resolve(null);
         return;
       }
       // Reconnect with fresh hello resync (same as old SSE behavior).
       sock = null;
+      setOnline(false);
       for (const [, p] of pending) {
         try {
           p.reject(new Error("ws closed"));
@@ -172,12 +279,40 @@ export function ensureWs() {
   return connect();
 }
 
+// HTTP fallback map: when the WS upgrade is blocked (proxy/funnel), the
+// same ops ride plain POSTs so the console keeps working. chat_stream has
+// no POST-streaming fallback here (SSE endpoint still exists server-side);
+// its WS-only frames are awaited via onWsRaw when the socket is up.
+const HTTP_OPS = {
+  chat_answer: { method: "POST", url: "/api/chat_answer" },
+  chat_cancel: { method: "POST", url: "/api/chat_cancel" },
+  chat_active: { method: "GET", url: "/api/chat_active" },
+  chat_frames: { method: "GET", url: "/api/chat_frames" },
+  ping: null, // local-only, no HTTP equivalent needed
+};
+
+function httpFallbackOp(op, params) {
+  const route = HTTP_OPS[op];
+  if (!route) return Promise.reject(new Error("ws not connected"));
+  const url = route.url;
+  const init =
+    route.method === "GET" ? { cache: "no-store" } : {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params || {}),
+    };
+  return fetch(url, init).then((r) =>
+    r.json().then((d) => ({ id: 0, ok: r.ok, data: d }))
+  );
+}
+
 export function sendOp(op, params) {
   return ensureWs().then(
     (ws) =>
       new Promise((resolve, reject) => {
         if (!ws || ws.readyState !== 1) {
-          reject(new Error("ws not connected"));
+          // WS blocked (proxy/funnel): same op over HTTP, no logout.
+          httpFallbackOp(op, params).then(resolve, reject);
           return;
         }
         const id = nextId++;
@@ -186,7 +321,7 @@ export function sendOp(op, params) {
           ws.send(JSON.stringify({ id, op, params: params || {} }));
         } catch (e) {
           pending.delete(id);
-          reject(e);
+          httpFallbackOp(op, params).then(resolve, () => reject(e));
           return;
         }
         setTimeout(() => {
