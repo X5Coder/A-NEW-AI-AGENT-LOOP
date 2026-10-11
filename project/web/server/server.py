@@ -4298,8 +4298,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         return resolved
 
     def end_headers(self):
-        # Prevent caching during development for static assets too
-        if not self.path.startswith("/api/"):
+        # Prevent caching during development for static assets too.
+        # getattr: parse_request() may have failed on garbage bytes
+        # (internet scanners) leaving self.path unset - send_error()
+        # still calls us, and must not crash on top of a 400.
+        if not getattr(self, "path", "").startswith("/api/"):
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
@@ -4371,8 +4374,46 @@ def _enable_public_share_bg(port: int) -> None:
         snap = ensure_public(port=port, open_browser=False)
         if snap.get("public_url"):
             print(f"  PUBLIC console (anyone can open): {snap['public_url']}")
+            _print_final_report(port, snap["public_url"])
     except Exception as e:
         print(f"[WARN] Public share failed: {e}", file=sys.stderr)
+
+
+def _print_final_report(port: int, public_url: str) -> None:
+    """Clear screen + the final 3-line report (Web Server Local/Public/Running).
+
+    Runs after funnel succeeds: everything the user needs, nothing else.
+    Skips the clear when stdout is not a terminal (logs stay intact).
+    Never raises.
+    """
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        try:
+            from install import _reachable_url
+
+            local = _reachable_url(port)
+        except Exception:
+            local = f"http://127.0.0.1:{port}/"
+        cleared = False
+        try:
+            import shutil as _shutil
+            import subprocess as _sp
+
+            if sys.stdout.isatty() and _shutil.which("clear"):
+                _sp.run(["clear"], timeout=5)
+                cleared = True
+        except Exception:
+            pass
+        if not cleared:
+            print()
+        print("=" * 70)
+        print(f"  Web Server (Local):  {local}")
+        print(f"  Web Server (Public): {public_url}")
+        print("  Server Running Now")
+        print("=" * 70)
+    except Exception:
+        pass
 
 
 def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False) -> int:
