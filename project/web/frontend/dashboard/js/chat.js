@@ -3635,7 +3635,7 @@ function _buildLivePlayer(atX, atY) {
   mini.id = "liveMini";
   mini.innerHTML = `
     <div class="live-mini-head" data-drag>
-      <span class="live-dot" aria-hidden="true"></span><span>Browser Running</span>
+      <span>Browser Running</span>
       <span class="live-mini-spot">
         <button type="button" class="live-full" data-act="reload" aria-label="Reload live view">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10" /><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10" /></svg>
@@ -4181,7 +4181,6 @@ function showControlCard(url) {
   card.id = "liveControlManual";
   card.innerHTML = `
     <div class="live-head">
-      <span class="live-dot" aria-hidden="true"></span>
       <button type="button" class="live-mini-x" data-act="dismiss" aria-label="Close">✕</button>
     </div>
     <div class="live-body"></div>`;

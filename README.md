@@ -1,11 +1,11 @@
-# X5Agent — v0.14.1
+# X5Agent — v0.14.2
 
 Professional agent with one built-in model (embedding) plus universal
 connections to any AI model through **AI Models** templates.
 
 ---
 
-## Setup — unified install / update command (v0.14.1)
+## Setup — unified install / update command (v0.14.2)
 
 **One command installs a fresh copy OR updates an existing one** (same command,
 safe to re-run — source only via `git pull --ff-only`, `X5Agent/Data` untouched):
@@ -14,8 +14,8 @@ safe to re-run — source only via `git pull --ff-only`, `X5Agent/Data` untouche
 curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bash
 ```
 
-Verify after update: open Settings → Updates (must show `0.14.1`) or check
-`updates.json` → `"version": "0.14.1". Then hard-refresh the console page
+Verify after update: open Settings → Updates (must show `0.14.2`) or check
+`updates.json` → `"version": "0.14.2". Then hard-refresh the console page
 (Ctrl+Shift+R) so the new `live-url.js`/`chat.js` take effect.
 
 **Requirements: Python 3.10+** (full browser support — `x5browser==1.5.1`
