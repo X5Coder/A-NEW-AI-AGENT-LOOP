@@ -275,14 +275,40 @@ def login_interactive(bin_path: str) -> bool:
     return ok
 
 
+FUNNEL_APPROVAL_RE = re.compile(r"https://login\.tailscale\.com/f/funnel[^\s'\"]*")
+
+
+def _print_funnel_approval(link: str | None) -> None:
+    """Action box: funnel is disabled tailnet-wide, only an admin approval
+    unlocks it (no code path can). Points at the exact approval link when
+    Tailscale printed one, else the admin DNS page."""
+    print("  " + "=" * 66)
+    print("  >>> FUNNEL NEEDS ONE ADMIN APPROVAL (public link stays off until then):")
+    if link:
+        print(f"  >>> approve here: {link}")
+        try:
+            if webbrowser.open(link):
+                print("  (opened in a browser automatically)")
+                return
+        except Exception:
+            pass
+        print("  (no browser on this server - open the link above on YOUR computer)")
+    else:
+        print("  >>> admin console: https://login.tailscale.com/admin/dns")
+        print("  >>> enable HTTPS certificates + approve Funnel, then re-run")
+    print("  " + "=" * 66)
+
+
 def enable_funnel(bin_path: str, port: int = 7777) -> str | None:
     """Enable Funnel on the console port, return the public URL (or None).
 
     Tries the modern syntax first, falls back to older variants.
     Funnel needs HTTPS + MagicDNS + funnel allowed in the admin ACL; when the
     admin blocks it, falls back to tailnet-only `serve` and returns its URL.
-    One attempt per variant (a bad flag never heals on retry) with progress
-    prints, so a slow first-time certificate provisioning never looks hung.
+    When the tailnet never enabled Funnel, Tailscale prints an approval link:
+    it is shown immediately and we STOP (retrying is pointless until a human
+    approves). One attempt per variant with progress prints, so a slow
+    first-time certificate provisioning never looks hung.
     """
     target = f"http://127.0.0.1:{port}"
     print("  enabling funnel (first time may provision certificates, ~1 min)...")
@@ -291,17 +317,22 @@ def enable_funnel(bin_path: str, port: int = 7777) -> str | None:
         [bin_path, "funnel", "--bg", str(port)],
         [bin_path, "funnel", str(port)],
     ]
-    # First attempt gets longer: fresh tailnets provision HTTPS certificates
-    # inside this call. A timeout is just a failed variant, never fatal.
     chosen = None
     with _Spinner("enabling funnel"):
-        for args, timeout in zip(variants, (180, 60, 60)):
+        for args, timeout in zip(variants, (45, 30, 30)):
             try:
                 proc = _run(args, timeout=timeout)
             except (subprocess.TimeoutExpired, OSError) as e:
                 print(f"  funnel variant timed out ({' '.join(args[1:])}: "
                       f"{str(e)[:80]}), trying next ...")
                 continue
+            out = ""
+            if proc is not None:
+                out = str(getattr(proc, "stdout", "") or "") + str(getattr(proc, "stderr", "") or "")
+            approval = FUNNEL_APPROVAL_RE.search(out)
+            if approval:
+                _print_funnel_approval(approval.group(0))
+                return None
             if proc is not None and proc.returncode == 0:
                 chosen = args
                 break
