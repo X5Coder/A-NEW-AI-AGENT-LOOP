@@ -99,6 +99,19 @@
   .brand .t { font-family: "Space Grotesk", "Inter", sans-serif; font-weight: 700; font-size: 20px; }
   .brand .t .nx { color: var(--blue); }
   h1 { font-family: "Space Grotesk", "Inter", sans-serif; font-size: 32px; font-weight: 700; letter-spacing: -.5px; }
+  h1 .wave {
+    display: inline-block; font-size: .92em;
+    transform-origin: 70% 70%;
+    filter: drop-shadow(0 0 10px rgba(59,158,255,.45));
+    animation: wave 2.4s ease-in-out infinite;
+  }
+  @keyframes wave {
+    0%, 100% { transform: rotate(0deg); }
+    20% { transform: rotate(16deg); }
+    40% { transform: rotate(-8deg); }
+    60% { transform: rotate(14deg); }
+    80% { transform: rotate(-4deg); }
+  }
   label { display: block; font-size: 13px; font-weight: 600; color: var(--text-secondary); margin: 22px 0 8px; }
   /* Dashboard white-glass credential fields (same as the app templates):
      white gradient + blur + bright top edge. Focus only brightens the
@@ -228,11 +241,11 @@
         </div>
         <div class="t"><span class="nx">X5</span>Agent</div>
       </div>
-      <h1 id="title">Hi, sir! 👋</h1>
+      <h1 id="title">Hi, sir! <span class="wave">👋</span></h1>
       <form id="form" novalidate>        <label for="email">Email</label>
         <div class="field" id="emailField">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>
-          <input id="email" type="email" autocomplete="username" required placeholder="you@mail.com">
+          <input id="email" type="email" autocomplete="username" required placeholder="you@gmail.com">
         </div>
         <label for="pw">Password</label>
         <div class="field" id="pwField">
@@ -285,7 +298,7 @@
   });
   fetch("/api/auth/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
     setupMode = !!(d && d.setup_needed);
-    title.textContent = setupMode ? "Create your account" : "Hi, sir! 👋";
+    title.innerHTML = setupMode ? "Create your account" : "Hi, sir! <span class=\"wave\">👋</span>";
     goText.textContent = "Connect";
   }).catch(function () { fail("Could not reach the server"); });
   document.getElementById("form").addEventListener("submit", function (e) {
