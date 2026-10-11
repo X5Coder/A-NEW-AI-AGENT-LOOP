@@ -109,7 +109,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml and updates.json at the repo root).
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.9.0"
 
 UPDATE_REPO = "X5Coder/X5Agent"
 

@@ -83,8 +83,9 @@ def parse_args(argv=None):
     p.add_argument("--no-open-browser", action="store_true",
                    help="Do not open the console URL in a browser at the end")
     p.add_argument("--run", action="store_true",
-                   help="Start the console server after a successful install "
-                        "(same as running python -m web.server.server afterwards)")
+                   help="Install + start in one step: no prompts, the public "
+                        "link is attempted automatically unless --no-public, "
+                        "then the console server takes over on 0.0.0.0:7777")
     return p.parse_args(argv)
 
 
@@ -586,46 +587,98 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
         return False
 
 
-def setup_public_share(mode=None, assume_yes: bool = False) -> None:
-    """Step 6/6: Tailscale Funnel public link (anyone can open).
+def setup_public_share(mode=None, assume_yes: bool = False) -> str | None:
+    """Step 7/7: Tailscale Funnel public link (anyone can open).
 
-    Flow: install check -> login URL shown + opened in browser ->
-    funnel on -> permanent https://<machine>.<tailnet>.ts.net printed.
+    Flow: install check (auto-install attempt on Linux when automatic) ->
+    login URL shown + opened in browser -> funnel on ->
+    permanent https://<machine>.<tailnet>.ts.net printed.
+    Returns the public URL, or None when the link is off/unavailable.
     Never fatal: the local console works even when this is skipped.
-    mode: True/False/None (flag --public/--no-public/unset).
+    mode: True/False/None (flag --public/--no-public/unset). With --run and
+    no explicit flag the link is attempted automatically (no prompt).
     """
     _step("7/7 public link (Tailscale Funnel — anyone can open)")
     if mode is False:
         _ok("skipped (--no-public) - local console only")
-        return
+        return None
     try:
         sys.path.insert(0, str(PROJECT_ROOT))
-        from web.server.tailscale_share import ensure_public, status
+        from web.server.tailscale_share import ensure_public, is_installed
     except Exception as e:
         _warn(f"public link skipped ({str(e)[:120]}) - local console still works")
-        return
-    if mode is True or assume_yes:
-        ans = "y"
-    else:
+        return None
+    auto = bool(mode) or assume_yes
+    if not auto:
         try:
             ans = input("  Enable the public internet link? [Y/n]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
-            return
-    if ans == "n":
-        _ok("skipped - local console only")
-        return
+            return None
+        if ans == "n":
+            _ok("skipped - local console only")
+            return None
+        auto = True  # user said yes - proceed automatically from here
+    installed, _ = is_installed()
+    if not installed and not _install_tailscale():
+        return None
     try:
         snap = ensure_public(port=7777, open_browser=True)
     except Exception as e:
         _warn(f"public link failed ({str(e)[:120]}) - local console still works")
-        return
-    if snap.get("public_url"):
-        _ok(f"public console: {snap['public_url']}")
+        return None
+    url = snap.get("public_url")
+    if url:
+        _ok(f"public console: {url}")
     elif not snap.get("installed"):
         _warn("install Tailscale, then: python -m web.server.server --public")
     else:
         _warn("login not completed - re-run: python -m web.server.server --public")
+    return url
+
+
+def _install_tailscale() -> bool:
+    """Best-effort Tailscale install on Linux via the official script.
+
+    Mirrors the browser Chrome --fix pattern: one attempt, bounded
+    (5 minutes), never fatal - the local console works without it.
+    Returns True when `tailscale` is on PATH afterwards.
+    """
+    import platform
+
+    if platform.system() != "Linux":
+        _warn("automatic Tailscale install supports Linux only - "
+              "install manually: https://tailscale.com/download")
+        return False
+    if shutil.which("tailscale"):
+        return True
+    if shutil.which("curl") is None:
+        _warn("cannot auto-install Tailscale (curl missing) - "
+              "install manually: https://tailscale.com/download")
+        return False
+    needs_root = hasattr(os, "geteuid") and os.geteuid() != 0
+    if needs_root and shutil.which("sudo") is None:
+        _warn("cannot auto-install Tailscale (needs root) - "
+              "install manually: https://tailscale.com/download")
+        return False
+    print("  installing Tailscale (official script)...")
+    try:
+        cmd = "curl -fsSL https://tailscale.com/install.sh | sh"
+        if needs_root:
+            cmd = "curl -fsSL https://tailscale.com/install.sh | sudo sh"
+        proc = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode == 0 and shutil.which("tailscale"):
+            _ok("Tailscale installed")
+            return True
+        _warn("Tailscale auto-install failed - "
+              "install manually: https://tailscale.com/download")
+        return False
+    except Exception as e:
+        _warn(f"Tailscale auto-install failed ({str(e)[:120]}) - "
+              "install manually: https://tailscale.com/download")
+        return False
 
 
 def main(argv=None) -> int:
@@ -633,6 +686,9 @@ def main(argv=None) -> int:
     print("=" * 70)
     print("  X5Agent install / update (one command)")
     print("=" * 70)
+    # --run means fully automatic: no prompts (browser fix + public link),
+    # and the public link is attempted unless explicitly disabled.
+    auto = args.yes or args.run
     if not check_environment():
         return 1
     check_project_state()
@@ -640,7 +696,7 @@ def main(argv=None) -> int:
     if not ensure_resources(hf_token=args.hf_token):
         return 1
     if not args.skip_browser:
-        check_browser(assume_yes=args.yes)
+        check_browser(assume_yes=auto)
     if not args.skip_firewall:
         ensure_firewall()
     if not ask_credentials(email=args.email, password=args.password):
@@ -648,7 +704,10 @@ def main(argv=None) -> int:
               "flags (or X5_EMAIL/X5_PASSWORD env) for non-interactive use",
               file=sys.stderr)
         return 1
-    setup_public_share(mode=args.public, assume_yes=args.yes)
+    public_mode = args.public
+    if args.run and public_mode is None:
+        public_mode = True
+    public_url = setup_public_share(mode=public_mode, assume_yes=auto)
     if not args.no_open_browser:
         try:
             import webbrowser
@@ -657,15 +716,14 @@ def main(argv=None) -> int:
         except Exception:
             pass
     print("\n" + "=" * 70)
-    print(f"  Console (local):  {UI_URL}")
-    print("  Console (public): python -m web.server.server --public  (from project/)")
-    print("  Start it: python -m web.server.server  (from project/)")
-    print("  Start it now: python install.py --run  (install + start in one command)")
+    print(f"  Web Server (Local):  {UI_URL}")
+    print(f"  Web Server (Public): {public_url or 'off - install Tailscale, then re-run with --public'}")
+    print("  Server Running Now" if args.run else "  Server Ready")
     print("=" * 70)
     if args.run:
         print("\n[install] starting console now (--run)...")
         cmd = [sys.executable, "-m", "web.server.server",
-               "--host", "0.0.0.0", "--port", 7777]
+               "--host", "0.0.0.0", "--port", "7777"]
         if args.public:
             cmd.append("--public")
         os.chdir(str(PROJECT_ROOT))
