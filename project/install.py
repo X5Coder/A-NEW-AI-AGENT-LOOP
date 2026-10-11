@@ -324,12 +324,31 @@ def check_project_state() -> dict:
     return {"embedding": embedding, "has_data": has_data, "git": git, "local": local}
 
 
-def update_source() -> None:
-    """Source-only update: tracked code via git fast-forward. Never deletes data."""
+def _git_head() -> str:
+    """Current commit hash, or '' when unavailable. Never raises."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(GIT_ROOT),
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            return (proc.stdout or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def update_source() -> bool:
+    """Source-only update: tracked code via git fast-forward. Never deletes data.
+
+    Returns True when the pull moved to a newer commit (caller may need a
+    restart to run the new code).
+    """
     _step("3/7 source update (code only, data untouched)")
     if not (shutil.which("git") and GIT_ROOT is not None):
         _warn("no git checkout - skipping update (download the release zip instead)")
-        return
+        return False
+    before = _git_head()
     try:
         proc = subprocess.run(
             ["git", "pull", "--ff-only"], cwd=str(GIT_ROOT),
@@ -340,10 +359,13 @@ def update_source() -> None:
             print(f"  git: {line[:160]}")
         if proc.returncode == 0:
             _ok("source is now latest (user data untouched: X5Agent/ + embedding_model/ are untracked)")
-        else:
-            _warn("git pull did not fast-forward (local changes?) - continuing with current code")
+            after = _git_head()
+            return bool(before and after and before != after)
+        _warn("git pull did not fast-forward (local changes?) - continuing with current code")
+        return False
     except Exception as e:
         _warn(f"update failed ({str(e)[:120]}) - continuing with current code")
+        return False
 
 
 def ensure_resources(hf_token: str = "") -> bool:
@@ -767,7 +789,7 @@ def main(argv=None) -> int:
     if not check_environment():
         return 1
     check_project_state()
-    update_source()
+    code_updated = update_source()
     if not ensure_resources(hf_token=args.hf_token):
         return 1
     if not args.skip_browser:
@@ -796,6 +818,21 @@ def main(argv=None) -> int:
     print("  Server Running Now" if args.run else "  Server Ready")
     print("=" * 70)
     if args.run:
+        try:
+            sys.path.insert(0, str(PROJECT_ROOT))
+            from scripts.cli import _port_answers
+
+            already_up = _port_answers(CONSOLE_PORT)
+        except Exception:
+            already_up = False
+        if already_up:
+            if code_updated:
+                print("\n[install] already running AND source was just updated - "
+                      "restart to run the new code:")
+                print('  pkill -f "web.server.server"; x5agent')
+            else:
+                print("\n[install] already running - keeping it (report above).")
+            return 0
         print("\n[install] starting console now (--run)...")
         cmd = [sys.executable, "-m", "web.server.server",
                "--host", "0.0.0.0", "--port", "7777"]
