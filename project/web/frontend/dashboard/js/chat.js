@@ -8,6 +8,7 @@
 import { openModal, closeModal, toast } from "./ui.js?v=8";
 import { navigate } from "./navigation.js?v=10";
 import { onPush } from "./events.js?v=1";
+import { remoteLiveUrl } from "./live-url.js?v=1";
 
 const MAX_MESSAGE = 4000;
 /* no chat avatars — assistant messages are content-only */
@@ -3247,7 +3248,11 @@ async function decideNeedsModel(qid, decision, kind) {
 
 /* ---------------- live browser: control card + floating preview ---------------- */
 function liveFrame(url) {
-  let clean = String(url || "");
+  // Remote console (funnel): loopback viewer links are rewritten to the
+  // funnel /live/ route on this page's host, or the iframe can never reach
+  // them. Local pages keep the original URL untouched.
+  let clean = remoteLiveUrl(url);
+  if (!clean) clean = String(url || "");
   // Mixed-content guard: an http viewer inside an https console is blocked
   // outright by the browser. Best-effort upgrade to https so the live view
   // still opens when the relay serves TLS; otherwise the original URL stays.

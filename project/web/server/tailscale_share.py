@@ -276,6 +276,8 @@ def login_interactive(bin_path: str) -> bool:
 
 
 FUNNEL_APPROVAL_RE = re.compile(r"https://login\.tailscale\.com/f/funnel[^\s'\"]*")
+LIVE_ROUTE_PATH = "/live/"
+LIVE_VIEWER_PORT = 6080
 
 
 def _print_funnel_approval(link: str | None) -> None:
@@ -297,6 +299,62 @@ def _print_funnel_approval(link: str | None) -> None:
         print("  >>> admin console: https://login.tailscale.com/admin/dns")
         print("  >>> enable HTTPS certificates + approve Funnel, then re-run")
     print("  " + "=" * 66)
+
+
+def live_route_active() -> bool:
+    """True when the /live/ viewer route already exists in serve config."""
+    try:
+        installed, _ = is_installed()
+        if not installed:
+            return False
+        proc = _run(["tailscale", "serve", "status", "--json"], timeout=15)
+        data = json.loads(proc.stdout or "{}")
+        web = data.get("Web") if isinstance(data, dict) else None
+        if not isinstance(web, dict):
+            return False
+        for cfg in web.values():
+            handlers = cfg.get("Handlers") if isinstance(cfg, dict) else None
+            if isinstance(handlers, dict) and LIVE_ROUTE_PATH in handlers:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def ensure_live_route() -> bool:
+    """Expose the live viewer at <tailnet>/live/ (idempotent, best-effort).
+
+    The library mints viewer links on 127.0.0.1:6080, unreachable from a
+    remote browser. One funnel path-route makes them reachable under the
+    same public hostname (the page + its websocket both live under /live/).
+    Skips quietly when Tailscale is absent or the viewer is down (a later
+    call after browser boot retries it). Never raises.
+    """
+    try:
+        if live_route_active():
+            return True
+        installed, bin_path = is_installed()
+        if not installed or not bin_path:
+            return False
+        import socket as _socket
+
+        try:
+            probe = _socket.create_connection(
+                ("127.0.0.1", LIVE_VIEWER_PORT), timeout=3.0)
+            try:
+                probe.close()
+            except Exception:
+                pass
+        except Exception:
+            return False  # viewer down: nothing to route yet
+        proc = _run([bin_path, "funnel", "--bg", "--set-path", LIVE_ROUTE_PATH,
+                     f"http://127.0.0.1:{LIVE_VIEWER_PORT}"], timeout=60)
+        if proc is not None and proc.returncode == 0 and live_route_active():
+            print("  OK: live viewer routed at <tailnet>/live/")
+            return True
+        return False
+    except Exception:
+        return False
 
 
 def enable_funnel(bin_path: str, port: int = 7777) -> str | None:
@@ -389,6 +447,9 @@ def ensure_public(port: int = 7777, open_browser: bool = True) -> dict:
                 webbrowser.open(public_url)
         except Exception:
             pass
+        # Viewer route for remote live view (skips quietly when the
+        # browser is not up yet - retried after browser boot).
+        ensure_live_route()
     else:
         print("  WARN: could not determine the public URL — open admin: https://login.tailscale.com/admin/machines")
     return status(port)

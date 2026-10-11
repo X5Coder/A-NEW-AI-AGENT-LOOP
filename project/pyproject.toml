@@ -1,6 +1,6 @@
 [project]
 name = "x5agent"
-version = "0.13.0"
+version = "0.14.0"
 description = "Professional Agent Loop with built-in embedding model and universal AI model connections (AI Models templates)"
 readme = "README.md"
 requires-python = ">=3.10"

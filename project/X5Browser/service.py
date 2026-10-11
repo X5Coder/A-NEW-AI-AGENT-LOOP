@@ -414,6 +414,7 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
                 raise RuntimeError(STOPPED_MESSAGE)
             _browser = adopted_browser
             _started = True
+            _ensure_remote_live()
             return adopted_browser
         _started = False
         my_gen = _gen
@@ -485,6 +486,7 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
             raise RuntimeError("Browser failed to start (process died immediately)")
         _browser = browser
         _started = True
+        _ensure_remote_live()
         # Fresh boot only (reached only via open_browser/restart_browser).
         await _boot_home_tab(browser)
         return browser
@@ -654,6 +656,28 @@ def call_tool(name: str, kwargs: dict) -> Any:
     if not isinstance(kwargs, dict):
         raise TypeError("tool kwargs must be dict")
     return _submit(lambda: _call_async(name.strip(), dict(kwargs)))
+
+
+def _ensure_remote_live() -> None:
+    """Best-effort /live/ viewer route for remote (funnel) viewing.
+
+    Called once per successful boot/adopt in a daemon thread (never blocks
+    the boot): if Tailscale funnel is on and the viewer answers locally,
+    its route is (re)ensured so funnel links keep working. Never raises.
+    """
+    def _run() -> None:
+        try:
+            from web.server.tailscale_share import ensure_live_route
+            ensure_live_route()
+        except Exception:
+            pass
+
+    try:
+        import threading as _threading
+
+        _threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        pass
 
 
 def _empty_links() -> dict:
