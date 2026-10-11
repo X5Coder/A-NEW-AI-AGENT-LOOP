@@ -3446,7 +3446,8 @@ function showEdgeTab(url, continueQid) {
   const player = document.getElementById("liveMini");
   if (player) {
     const frame = player.querySelector(".live-frame");
-    if (frame && frame.getAttribute("src") !== clean) frame.src = clean;
+    const out = remoteLiveUrl(clean);
+    if (frame && frame.getAttribute("src") !== out) frame.src = out;
     syncPlayerContinue(player);
   }
 }
@@ -3690,10 +3691,11 @@ const TAKE_CONTROL_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentCo
 
 function reloadLiveFrame() {
   // Re-point the iframe at the freshest known stream URL (heals "Not Connected").
+  // Rendered through the remote rewrite so reloads never regress to loopback.
   const player = document.getElementById("liveMini");
   const frame = player ? player.querySelector(".live-frame") : null;
   if (!frame) return;
-  const fresh = browserStreamUrl || frame.getAttribute("src") || "";
+  const fresh = remoteLiveUrl(browserStreamUrl || frame.getAttribute("src") || "");
   if (fresh) frame.src = fresh;
 }
 
@@ -3720,7 +3722,8 @@ async function refreshLiveFrameFromServer() {
     if (!frame) return;
     if (fresh) {
       browserStreamUrl = fresh;
-      if (frame.getAttribute("src") !== fresh) frame.src = fresh;
+      const out = remoteLiveUrl(fresh);
+      if (frame.getAttribute("src") !== out) frame.src = out;
       else reloadLiveFrame();
       return;
     }
