@@ -4491,8 +4491,18 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
                 except Exception:
                     pass
     except OSError as e:
-        print(f"[ERROR] Failed to bind {host}:{port} — {e}", file=sys.stderr)
-        print("  Try: python -m web.server.server --port 7777", file=sys.stderr)
+        import errno as _errno
+
+        if e.errno in (_errno.EADDRINUSE, 98, 10013):
+            # Port held by a stale/wedged server (answers nothing but keeps
+            # the socket): only freeing it helps, never another start attempt.
+            print(f"[ERROR] Port {port} is busy but nothing answers on it "
+                  f"(stale server holding the socket).", file=sys.stderr)
+            print('  Free it, then start again:  pkill -f "web.server.server"; x5agent',
+                  file=sys.stderr)
+        else:
+            print(f"[ERROR] Failed to bind {host}:{port} — {e}", file=sys.stderr)
+            print("  Try: python -m web.server.server --port 7777", file=sys.stderr)
         return 1
 
     return 0
