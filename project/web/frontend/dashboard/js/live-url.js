@@ -14,7 +14,18 @@
 export function remoteLiveUrl(viewerUrl, pageLocation) {
   const raw = String(viewerUrl || "");
   if (!raw) return raw;
-  const loc = pageLocation || null;
+  // Default to the current page location when the caller omits it (all
+  // chat.js callers pass a single arg). Without this the rewrite never
+  // runs remotely and iframes keep pointing at the viewer's own localhost.
+  let loc = pageLocation || null;
+  if (!loc) {
+    try {
+      if (typeof window !== "undefined" && window.location) loc = window.location;
+      else if (typeof globalThis !== "undefined" && globalThis.location) loc = globalThis.location;
+    } catch (_) {
+      loc = null;
+    }
+  }
   const pageHost = String((loc && loc.hostname) || "");
   if (!pageHost || pageHost === "127.0.0.1" || pageHost === "localhost" || pageHost === "::1") {
     return raw; // local page: loopback viewer works as-is

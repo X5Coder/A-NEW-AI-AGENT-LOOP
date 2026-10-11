@@ -3331,7 +3331,7 @@ function showLiveControlCard(q) {
   card.querySelector(".live-body").appendChild(liveFrame(url));
   card.querySelector('[data-act="full"]').addEventListener("click", () => {
     try {
-      window.open(url, "_blank", "noopener");
+      window.open(remoteLiveUrl(url) || url, "_blank", "noopener");
     } catch (_) {}
   });
   card.querySelector(".live-continue").addEventListener("click", async (e) => {
@@ -3564,7 +3564,7 @@ function showPreviewPlayer(url) {
     markLiveSeen();
     const mini = document.getElementById("liveMini");
     const frame = mini && mini.querySelector(".live-frame");
-    if (mini && frame && frame.getAttribute("src") === clean) return;
+    if (mini && frame && frame.getAttribute("src") === (remoteLiveUrl(clean) || clean)) return;
     browserStreamUrl = clean;
     openLivePlayer();
   } catch (_) {}
@@ -3614,7 +3614,8 @@ function openLivePlayer(atX, atY) {
             browserStreamUrl = u;
             const player = document.getElementById("liveMini");
             const frame = player ? player.querySelector(".live-frame") : null;
-            if (frame && frame.getAttribute("src") !== u) frame.src = u;
+            const out = remoteLiveUrl(u) || u;
+            if (frame && frame.getAttribute("src") !== out) frame.src = out;
           }
         } catch (_) {}
       })
@@ -3817,10 +3818,11 @@ function reviveLiveFrames() {
       const u = st && typeof st.url === "string" ? st.url : "";
       if (!u) return;
       if (u !== browserStreamUrl) browserStreamUrl = u;
+      const out = remoteLiveUrl(u) || u;
       frames.forEach((f) => {
         if (!f.isConnected) return;
         try {
-          if (f.getAttribute("src") !== u) f.src = u;
+          if (f.getAttribute("src") !== out) f.src = out;
         } catch (_) {}
       });
     })
@@ -4208,9 +4210,11 @@ async function isLiveUrlAlive(url, timeoutMs = 6000) {
   // Bounded reachability probe for a persisted stream link: a no-cors fetch
   // resolves (opaque) on any answer and rejects only when nothing listens
   // (dead relay, browser closed while the library still reports running).
-  // Never throws. Same pattern as the live frame watcher.
+  // Probes the remote-rewritten URL so a funnel page checks the server's
+  // /live/ route instead of the viewer's own localhost. Never throws.
+  // Same pattern as the live frame watcher.
   try {
-    const u = String(url || "");
+    const u = remoteLiveUrl(String(url || "")) || String(url || "");
     if (!u.startsWith("http")) return false;
     const ctl = new AbortController();
     const timer = setTimeout(() => {
