@@ -6,7 +6,8 @@ by `python install.py` is honored here immediately (and vice versa):
   hash = pbkdf2_hmac(sha256, password, salt, 200_000).hex()
 
 Sessions are in-memory random tokens (30 days); a server restart logs
-everyone out (fail-closed, documented). Cookie: HttpOnly + SameSite=Lax.
+everyone out (fail-closed, documented). Cookie: HttpOnly + SameSite=None +
+Secure (HTTPS-safe for the funnel; ignored on plain-HTTP loopback).
 Secrets are never logged and never returned (reads expose email only).
 """
 

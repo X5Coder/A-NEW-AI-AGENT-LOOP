@@ -967,6 +967,87 @@ class _ChatError(Exception):
         self.status = status
 
 
+def _read_request_body(rfile, headers, max_bytes: int) -> bytes:
+    """Read a request body with Content-Length or chunked framing.
+
+    Reverse proxies (Tailscale funnel included) may forward a POST with
+    Transfer-Encoding: chunked and no Content-Length. The old
+    Content-Length-only reads saw an empty body there, so login arrived
+    with empty credentials and answered 401 even with a correct password.
+    Bounded by max_bytes in both modes. Never raises (empty on failure).
+    """
+    try:
+        length_raw = (headers.get("Content-Length") or "").strip()
+    except Exception:
+        length_raw = ""
+    try:
+        length = int(length_raw) if length_raw else 0
+    except Exception:
+        length = 0
+    if length > 0:
+        try:
+            if length > max_bytes:
+                return b""
+            return rfile.read(length) or b""
+        except Exception:
+            return b""
+    try:
+        enc = str(headers.get("Transfer-Encoding") or "").lower()
+    except Exception:
+        enc = ""
+    if "chunked" not in enc:
+        return b""
+    try:
+        out = bytearray()
+        while True:
+            line = rfile.readline(128)
+            if not line:
+                break
+            try:
+                size = int(line.strip().split(b";", 1)[0], 16)
+            except Exception:
+                break
+            if size <= 0:
+                try:
+                    rfile.readline(128)
+                except Exception:
+                    pass
+                break
+            if len(out) + size > max_bytes:
+                return b""
+            try:
+                chunk = rfile.read(size)
+            except Exception:
+                break
+            if not chunk:
+                break
+            out += chunk
+            try:
+                rfile.readline(8)
+            except Exception:
+                pass
+        return bytes(out)
+    except Exception:
+        return b""
+
+
+def _session_cookie(token: str, clear: bool = False) -> str:
+    """Session Set-Cookie value: HTTPS-safe (Secure + SameSite=None).
+
+    The funnel serves the console over HTTPS while the server sees plain
+    HTTP on loopback, so the cookie must carry Secure + SameSite=None to
+    survive the browser round-trip; on plain-HTTP loopback the Secure
+    attribute is simply ignored by local clients.
+    """
+    try:
+        from web.server.console_auth import COOKIE_NAME as _cookie_name
+    except Exception:
+        _cookie_name = "x5sess"
+    if clear:
+        return f"{_cookie_name}=; HttpOnly; Path=/; SameSite=None; Secure; Max-Age=0"
+    return f"{_cookie_name}={token}; HttpOnly; Path=/; SameSite=None; Secure"
+
+
 # Pending loop questions: qid -> answer Queue (one outstanding per loop, bounded wait)
 _PENDING_QUESTIONS: dict = {}
 _PQ_LOCK = threading.Lock()
@@ -3961,11 +4042,17 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         import uuid as _uuid
 
         try:
-            length = int(self.headers.get("Content-Length", 0))
-            if length > STT_MAX_BODY:
-                self._send_json({"error": "audio too large (max 12MB)"}, status=413)
+            raw = _read_request_body(self.rfile, self.headers, STT_MAX_BODY)
+            if not raw:
+                try:
+                    too_big = int(self.headers.get("Content-Length", 0) or 0) > STT_MAX_BODY
+                except Exception:
+                    too_big = False
+                if too_big:
+                    self._send_json({"error": "audio too large (max 12MB)"}, status=413)
+                else:
+                    self._send_json({"error": "invalid json"}, status=400)
                 return
-            raw = self.rfile.read(length) if length else b""
             try:
                 payload = json.loads(raw.decode("utf-8")) if raw else {}
             except Exception:
@@ -4034,13 +4121,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def _read_json_body(self, max_bytes: int) -> dict:
         """Read + validate a JSON request body. Raises _ChatError on failure."""
-        try:
-            length = int(self.headers.get("Content-Length", 0) or 0)
-        except Exception:
-            length = 0
-        if length > max_bytes:
-            raise _ChatError(f"payload too large (max {max_bytes // (1024 * 1024)}MB)", status=413)
-        raw = self.rfile.read(length) if length else b""
+        raw = _read_request_body(self.rfile, self.headers, max_bytes)
+        if not raw and max_bytes > 0:
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+            except Exception:
+                length = 0
+            if length > max_bytes:
+                raise _ChatError(f"payload too large (max {max_bytes // (1024 * 1024)}MB)", status=413)
         try:
             data = json.loads(raw.decode("utf-8")) if raw else {}
         except Exception:
@@ -4760,10 +4848,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def _read_json_body(self, max_bytes=65536):
         """Read a small JSON body (auth forms only). Returns {} on any failure."""
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            if length <= 0 or length > max_bytes:
+            raw = _read_request_body(self.rfile, self.headers, max_bytes)
+            if not raw:
                 return {}
-            raw = self.rfile.read(length)
             data = json.loads(raw.decode("utf-8"))
             return data if isinstance(data, dict) else {}
         except Exception:
@@ -4803,7 +4890,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 entry = ""
             self._send_json({"ok": True, "email": email, "ws_token": entry}, headers={
-                "Set-Cookie": f"{_ca.COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Lax"})
+                "Set-Cookie": _session_cookie(token)})
         except Exception as e:
             self._send_json({"error": str(e)[:200]}, status=500)
 
@@ -4828,7 +4915,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 entry = ""
             self._send_json({"ok": True, "ws_token": entry}, headers={
-                "Set-Cookie": f"{_ca.COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Lax"})
+                "Set-Cookie": _session_cookie(token)})
         except Exception as e:
             self._send_json({"error": str(e)[:200]}, status=500)
 
@@ -4846,7 +4933,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 pass
             self._send_json({"ok": True}, headers={
-                "Set-Cookie": f"{_ca.COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"})
+                "Set-Cookie": _session_cookie("", clear=True)})
         except Exception as e:
             self._send_json({"error": str(e)[:200]}, status=500)
 
