@@ -279,7 +279,7 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   ├── build_embedding_seed.py     # builds committed *.seed.json (tool+trigger, --snapshot-only instant, auto-fetch when the model is missing)
 │   ├── x5-local                    # local console starter (127.0.0.1:7777, no prompt)
 │   ├── x5-public                   # public console starter (127.0.0.1:7777 --public via Tailscale Funnel)
-│   ├── cli.py                      # the `x5agent` PATH command: serve now on 0.0.0.0:7777 from anywhere, no update check
+│   ├── cli.py                      # the `x5agent` PATH command: serve now on 0.0.0.0:7777 from anywhere, no update check (prints the 3-line report when already running)
 │   ├── x5console.service           # systemd unit: local console (edit User + WorkingDirectory, then enable --now)
 │   └── x5console-public.service    # systemd unit: public console (needs host tailscale login)
 ├── main.py                         # entrypoint: bundled embedding check (offline, GPU auto/CPU) -> X5Agent ensure + legacy->Data migrate -> seed/rebuild tool embeddings -> start loop

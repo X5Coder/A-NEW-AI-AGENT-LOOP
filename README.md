@@ -50,7 +50,8 @@ x5agent --public     # also enable the Tailscale Funnel public link
 ```
 
 The `x5agent` command is installed on PATH by `pip install -e .`
-(the installer adds it automatically when missing).
+(the installer adds it automatically when missing). When the server is
+already running it prints the 3-line report instead of a second copy.
 
 **Windows**
 

@@ -4428,10 +4428,11 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
 
     # Single-owner guard: Windows SO_REUSEADDR lets a second process bind the
     # same port, which would split traffic (and the browser) between two
-    # owners. Refuse to start when someone already answers here.
+    # owners. Refuse to start when someone already answers here. Probe
+    # loopback (connecting to 0.0.0.0 is invalid and never answers).
     try:
         import socket as _socket
-        _probe = _socket.create_connection((host, port), timeout=2.0)
+        _probe = _socket.create_connection(("127.0.0.1", port), timeout=2.0)
         try:
             _probe.close()
         except Exception:
