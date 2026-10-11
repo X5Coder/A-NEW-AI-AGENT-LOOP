@@ -11,6 +11,9 @@ Sync/async bridge: the agent loop is synchronous while x5browser is async.
 One daemon thread owns a dedicated event loop; every call is scheduled on it
 with a bounded timeout (120s). Acting tools run exactly once (no blind retry);
 read-only tools retry up to 3 times on transient transport failures only.
+A transient CDP drop first tries the library's repair_session() re-attach
+(1.5.1+: same browser/process/tabs, never boots, refuses after an explicit
+close), so the retry — and the next call — meets a healthy session.
 
 Live links: the library mints ONE control link and ONE preview link per
 session and keeps them stable until the browser closes or restarts. This
@@ -512,6 +515,23 @@ def _transient(error: Exception) -> bool:
     return any(m in text for m in markers)
 
 
+async def _try_repair(browser: Any) -> bool:
+    """Best-effort CDP re-attach after a transient drop. Never raises, never boots.
+
+    The library's repair_session() (new in 1.5.1) only re-reads the debugger
+    URL and re-attaches on the same browser (same process, profile, tabs):
+    one bounded attempt, refuses when the browser was explicitly closed.
+    Missing on older libraries -> False (retry path unchanged).
+    """
+    try:
+        repair = getattr(browser, "repair_session", None)
+        if repair is None or not callable(repair):
+            return False
+        return bool(await asyncio.wait_for(repair(), timeout=15.0))
+    except Exception:
+        return False
+
+
 async def _close_async() -> Any:
     """Close the browser for real and keep it closed. Never boots anything.
 
@@ -601,7 +621,16 @@ async def _call_async(name: str, kwargs: dict) -> Any:
             raise
         except Exception as e:
             last = e
-            if attempt + 1 >= attempts or not _transient(e):
+            if not _transient(e):
+                raise
+            # Self-heal the dropped session: read-only retries then meet a
+            # healthy handle, and acting tools (exactly once, still raised
+            # below) leave a repaired session for the next call.
+            try:
+                await _try_repair(browser)
+            except Exception:
+                pass
+            if attempt + 1 >= attempts:
                 raise
             await asyncio.sleep(min(1.0 * (attempt + 1), 3.0))
             continue

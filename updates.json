@@ -1,9 +1,16 @@
 {
-  "version": "0.6.0",
-  "description": "X5Browser updated to 1.5.0 with 5 new tools (Google search, page fetch, Markdown read, image extract, page triggers), and install.py now checks the browser (official Chrome + environment via the library doctor) before asking for the owner email.",
+  "version": "0.7.0",
+  "description": "Installer is now fully automatable (flags/env, no prompts), version is synced everywhere (0.7.0), update check no longer needs GitHub releases, firewall port opens automatically, HF_TOKEN is an optional speedup, local/public console ships as scripts+systemd units, and the login page was rebuilt in the console theme (split: form on the right, glass fields).",
   "features": [
-    "Browser library updated from 1.4.0 to 1.5.0 (44 tools: 43 library + show_preview).",
-    "New: quick_search (Google results as JSON), fetch_pages (URLs as clean Markdown), read_markdown, extract_image, manage_triggers.",
-    "Install runs the X5Browser doctor before the owner email and offers to install official Chrome when missing (never blocks the install)."
+    "Version synced to 0.7.0 in server APP_VERSION, pyproject.toml, updates.json and dashboard placeholders (was 0.5.0 vs 0.6.0).",
+    "Server bind error now suggests --port 7777 (was 7778, against the all-7777 decision).",
+    "install.py flags: --email/--password (or X5_EMAIL/X5_PASSWORD), --yes, --public/--no-public, --skip-browser, --skip-firewall, --hf-token, --no-open-browser — no stdin injection, no GetPassWarning.",
+    "Update check reads raw updates.json from GitHub (main/master) — works with zero releases (releases/latest API removed).",
+    "Installer opens TCP 7777 automatically via ufw/firewalld (best-effort, with exact manual fallback).",
+    "HF_TOKEN strictly optional: authenticated HuggingFace download for higher rate limits on slow networks; anonymous stays default.",
+    "New project/scripts/: x5-local, x5-public starters + x5console.service, x5console-public.service systemd units.",
+    "Docs: Python 3.10+ (3.12 recommended) for full browser support (x5browser 1.5.1), firewall + HF_TOKEN + non-interactive examples in both READMEs.",
+    "Browser library 1.5.0 to 1.5.1 (no tool changes: Linux live hardening + CDP session self-heal; Docker now bakes official Google Chrome, which the library requires).",
+    "Login page rebuilt in the console theme (Manus dark tokens #1a1a1a/#121212, blue #3b9eff): split layout with the form on the right and glass fields, single self-contained file, full-width on mobile."
   ]
 }

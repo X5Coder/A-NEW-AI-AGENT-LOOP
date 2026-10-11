@@ -1,0 +1,24 @@
+# x5console.service — X5Agent console, LOCAL only (127.0.0.1:7777).
+# Install:
+#   sudo cp x5console.service /etc/systemd/system/
+#   # edit User + WorkingDirectory below to match your machine, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now x5console
+#   systemctl status x5console
+[Unit]
+Description=X5Agent console (local only, 127.0.0.1:7777)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- EDIT THESE TWO LINES ---
+User=ubuntu
+WorkingDirectory=/opt/X5Agent/project
+# ----------------------------
+ExecStart=/usr/bin/python3 -m web.server.server --host 127.0.0.1 --port 7777
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

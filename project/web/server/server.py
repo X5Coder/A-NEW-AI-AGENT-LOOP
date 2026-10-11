@@ -108,10 +108,10 @@ mimetypes.add_type("text/html", ".html")
 
 
 # Console version shown at the end of the sidebar (single source of truth,
-# keep in sync with pyproject.toml). Served via /api/dashboard.
-APP_VERSION = "0.5.0"
+# keep in sync with pyproject.toml and updates.json at the repo root).
+APP_VERSION = "0.7.0"
 
-UPDATE_REPO = "X5Coder/A-NEW-AI-AGENT-LOOP"
+UPDATE_REPO = "X5Coder/X5Agent"
 
 # Source-only update job state (in-memory, one at a time, bounded lines).
 _UPDATE_STATE = {"state": "idle", "lines": [], "done": False, "ok": False,
@@ -1844,7 +1844,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": "clear failed", "detail": str(e)[:200]}, status=500)
 
     def _handle_browser_api(self):
-        """GET {running} — read-only browser probe. POST {action} — preview|control|close."""
+        """GET {running} — read-only browser probe. POST {action} — open|preview|control|close."""
         try:
             if str(PROJECT_ROOT) not in sys.path:
                 sys.path.insert(0, str(PROJECT_ROOT))
@@ -1865,10 +1865,26 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=e.status)
                 return
             action = payload.get("action")
-            if action not in ("preview", "control", "close"):
-                self._send_json({"error": "action preview|control|close required"}, status=400)
+            if action not in ("open", "preview", "control", "close"):
+                self._send_json({"error": "action open|preview|control|close required"}, status=400)
                 return
             from core.agent.loop.dispatcher import execute_tool
+            if action == "open":
+                res = execute_tool("open_browser", {})
+                out = res.get("output") if isinstance(res.get("output"), dict) else {}
+                if not res.get("success"):
+                    detail = str(res.get("error") or (out.get("error") if isinstance(out, dict) else "") or "")[:200]
+                    if "already_running" in detail:
+                        links = _live_snapshot()
+                        self._send_json({"ok": True, "already_running": True,
+                                         "stream": _live_active()})
+                        return
+                    self._send_json({"error": "open failed",
+                                     "detail": detail}, status=502)
+                    return
+                _events_emit_browser(force=True)
+                self._send_json({"ok": True, "stream": _live_active()})
+                return
             if action == "control":
                 # Manual take-over from the preview player: stop the agent loop
                 # first (same as chat cancel), then mint the CONTROL live URL
@@ -4434,7 +4450,7 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
                     pass
     except OSError as e:
         print(f"[ERROR] Failed to bind {host}:{port} — {e}", file=sys.stderr)
-        print("  Try: python -m web.server.server --port 7778", file=sys.stderr)
+        print("  Try: python -m web.server.server --port 7777", file=sys.stderr)
         return 1
 
     return 0

@@ -1,17 +1,22 @@
 """X5Agent single install/update command.
 
 Flow (exactly, nothing else):
-  1. python install.py
-  2. environment check (python, CPU/GPU, disk, dependencies)
-  3. project state check (missing / complete / has live data)
+  1. python install.py [--yes] [--email E --password P] [--public|--no-public]
+   2. environment check (python, CPU/GPU, disk, dependencies; below 3.12 warns:
+      x5browser 1.5.1 runs on 3.10+, 3.12 recommended for full browser support)
+  3. project state check (missing / complete / has live data; latest version
+     read from raw updates.json on GitHub — no releases needed)
   4. source-only update (git pull --ff-only: tracked code only,
      NEVER touches X5Agent/Data, embedding_model/, or any user data)
   5. bundled embedding check (offline) + tool/trigger embeddings ready
-  6. browser check (X5Browser doctor: Chrome + environment, offers --fix)
-  7. email + password prompt (stored as salted hash only, never plaintext)
-  8. public link via Tailscale Funnel (install check -> login URL
+     (HF_TOKEN optional: higher HuggingFace rate limits on slow networks)
+  6. firewall step (best-effort open of TCP 7777 via ufw/firewalld)
+  7. browser check (X5Browser doctor: Chrome + environment, offers --fix)
+  8. email + password (flags/env X5_EMAIL+X5_PASSWORD or prompt; salted hash
+     in Data, never plaintext)
+  9. public link via Tailscale Funnel (install check -> login URL
      shown + opened -> funnel on -> permanent public URL printed)
-  9. opens the console in the browser + prints local and public URLs
+  10. opens the console in the browser + prints local and public URLs
 
 Run from the project/ directory:  python install.py
 Start the console after:          python -m web.server.server
@@ -33,10 +38,47 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 GIT_ROOT = next((p for p in (PROJECT_ROOT, PROJECT_ROOT.parents[0])
                  if (p / ".git").exists()), None)
-REPO_URL = "https://github.com/X5Coder/A-NEW-AI-AGENT-LOOP"
+REPO_URL = "https://github.com/X5Coder/X5Agent"
 UI_URL = "http://127.0.0.1:7777/"
+CONSOLE_PORT = 7777
 MIN_PYTHON = (3, 10)
+BROWSER_PYTHON = (3, 12)  # x5browser 1.5.1 floor is 3.10; 3.12 still recommended for full browser support
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def parse_args(argv=None):
+    """Non-interactive flags so the installer is fully automatable.
+
+    Examples:
+      python install.py --yes
+      python install.py --email owner@mail.com --password S3cret123 --public
+      HF_TOKEN=hf_xxx python install.py --email a@b.c --password S3cret123 --no-public
+      X5_EMAIL=a@b.c X5_PASSWORD=S3cret123 python install.py --yes
+    Env fallbacks: X5_EMAIL / X5_PASSWORD / HF_TOKEN.
+    """
+    import argparse
+
+    p = argparse.ArgumentParser(description="X5Agent install / update (one command)")
+    p.add_argument("--email", default=os.environ.get("X5_EMAIL", ""),
+                   help="Owner email (else prompted)")
+    p.add_argument("--password", default=os.environ.get("X5_PASSWORD", ""),
+                   help="Owner password, min 8 chars (env X5_PASSWORD preferred over CLI)")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="Assume yes to optional prompts (Chrome install, public link)")
+    p.add_argument("--public", dest="public", action="store_true", default=None,
+                   help="Enable the Tailscale Funnel public link without prompting")
+    p.add_argument("--no-public", dest="public", action="store_false",
+                   help="Skip the public link without prompting")
+    p.add_argument("--skip-browser", action="store_true",
+                   help="Skip the browser doctor check")
+    p.add_argument("--skip-firewall", action="store_true",
+                   help="Skip the firewall port step")
+    p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
+                   help="Optional HuggingFace token (env HF_TOKEN): authenticated "
+                        "downloads get higher rate limits on slow networks")
+    p.add_argument("--no-open-browser", action="store_true",
+                   help="Do not open the console URL in a browser at the end")
+    return p.parse_args(argv)
 
 
 def _step(title: str) -> None:
@@ -64,6 +106,10 @@ def check_environment() -> bool:
               file=sys.stderr)
         return False
     _ok(f"python {sys.version.split()[0]}")
+    if sys.version_info < BROWSER_PYTHON:
+        _warn(f"python {BROWSER_PYTHON[0]}.{BROWSER_PYTHON[1]}+ is recommended for full "
+              "browser support (x5browser 1.5.1 runs on 3.10+, the browser "
+              "check below is the source of truth)")
     device = "cpu"
     try:
         import torch  # type: ignore
@@ -106,19 +152,28 @@ def _local_version() -> str:
 
 
 def _latest_version() -> str | None:
-    """Latest GitHub release tag (best-effort, 10s timeout, never raises)."""
-    try:
-        import urllib.request
+    """Latest version from the repo (best-effort, 10s timeout, never raises).
 
-        req = urllib.request.Request(
-            "https://api.github.com/repos/X5Coder/A-NEW-AI-AGENT-LOOP/releases/latest",
-            headers={"User-Agent": "x5agent-installer", "Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as r:
-            tag = str(json.loads(r.read().decode("utf-8")).get("tag_name") or "").strip()
-        return tag.lstrip("v") or None
-    except Exception:
-        return None
+    Single source of truth is updates.json at the repo root (raw file on
+    main, then master) — no GitHub releases needed (a repo with zero
+    releases would make the releases/latest API 404).
+    """
+    for branch in ("main", "master"):
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(
+                f"https://raw.githubusercontent.com/X5Coder/X5Agent/{branch}/updates.json",
+                headers={"User-Agent": "x5agent-installer", "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            ver = str((data or {}).get("version") or "").strip().lstrip("v")
+            if ver:
+                return ver
+        except Exception:
+            continue
+    return None
 
 
 def check_project_state() -> dict:
@@ -173,12 +228,24 @@ def update_source() -> None:
         _warn(f"update failed ({str(e)[:120]}) - continuing with current code")
 
 
-def ensure_resources() -> bool:
-    """Embedding model (auto-download on first run, delta check on updates) + prebuilt tool/trigger embeddings."""
+def ensure_resources(hf_token: str = "") -> bool:
+    """Embedding model (auto-download on first run, delta check on updates) + prebuilt tool/trigger embeddings.
+
+    hf_token is strictly optional: when given (flag or HF_TOKEN env) it is
+    used only to authenticate HuggingFace downloads (higher rate limits on
+    slow networks). Anonymous download is the default and works fine.
+    """
     _step("4/7 resources (embedding auto-fetch + prebuilt embeddings)")
     sys.path.insert(0, str(PROJECT_ROOT))
     from core.embedding.bootstrap import ensure_embedding_model
 
+    token = (hf_token or os.environ.get("HF_TOKEN") or "").strip()
+    if token:
+        os.environ["HF_TOKEN"] = token
+        _ok("HF_TOKEN provided — authenticated HuggingFace download (higher rate limits)")
+    else:
+        print("  info: no HF_TOKEN — anonymous HuggingFace download "
+              "(fine on normal networks; set HF_TOKEN=hf_xxx on slow/capped ones)")
     try:
         # sync=True: check first - current files are skipped, only deltas download.
         ensure_embedding_model(sync=True)
@@ -203,7 +270,7 @@ def ensure_resources() -> bool:
     return True
 
 
-def check_browser() -> bool:
+def check_browser(assume_yes: bool = False) -> bool:
     """Browser check via the X5Browser doctor (inspect only, offers --fix).
 
     Runs BEFORE the owner email step: answers "can this machine run the
@@ -246,12 +313,15 @@ def check_browser() -> bool:
         except Exception:
             continue
     if not chrome_ok:
-        try:
-            ans = input("  Official Chrome is missing. Install it now? [Y/n]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            _warn("Chrome install skipped (non-interactive) - install it later, then re-run")
-            return True
+        if assume_yes:
+            ans = "y"
+        else:
+            try:
+                ans = input("  Official Chrome is missing. Install it now? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print(file=sys.stderr)
+                _warn("Chrome install skipped (non-interactive) - install it later, then re-run")
+                return True
         if ans not in ("n", "no"):
             print("  installing official Chrome (one system prompt may appear)...")
             try:
@@ -276,22 +346,80 @@ def check_browser() -> bool:
     return True
 
 
-def ask_credentials() -> bool:
-    """Email + hidden password prompt. Stores salted hash only. Returns True on success."""
-    _step("6/7 console owner")
+def ensure_firewall(port: int = CONSOLE_PORT) -> None:
+    """Open the console port in the host firewall (best-effort, never fatal).
+
+    Tries `ufw allow <port>/tcp` when ufw exists, else `firewall-cmd`
+    (--add-port/--reload) when firewalld exists. Otherwise prints the exact
+    manual command. The console on localhost works without this; it is only
+    needed to reach the console from other machines / the public link.
+    """
+    _step(f"firewall (open TCP port {port}, best-effort)")
     try:
-        email = input("  email: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print(file=sys.stderr)
-        return False
+        if shutil.which("ufw"):
+            proc = subprocess.run(
+                ["ufw", "allow", f"{port}/tcp"],
+                capture_output=True, text=True, timeout=60,
+            )
+            out = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
+            for line in out[:5]:
+                print(f"  ufw: {line[:160]}")
+            if proc.returncode == 0:
+                _ok(f"firewall open: TCP {port} (ufw)")
+                return
+            _warn(f"ufw exited {proc.returncode} — run manually: sudo ufw allow {port}/tcp")
+            return
+        if shutil.which("firewall-cmd"):
+            proc = subprocess.run(
+                ["firewall-cmd", "--permanent", f"--add-port={port}/tcp"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if proc.returncode == 0:
+                subprocess.run(["firewall-cmd", "--reload"],
+                               capture_output=True, text=True, timeout=60)
+                _ok(f"firewall open: TCP {port} (firewalld)")
+                return
+            _warn(f"firewall-cmd failed — run manually as root: "
+                  f"firewall-cmd --permanent --add-port={port}/tcp; firewall-cmd --reload")
+            return
+    except Exception as e:
+        _warn(f"firewall step failed ({str(e)[:120]}) - local console still works")
+        return
+    _warn(f"no supported firewall tool found (ufw/firewalld) — "
+          f"if port {port} is filtered, run manually: sudo ufw allow {port}/tcp")
+
+
+def ask_credentials(email: str = "", password: str = "") -> bool:
+    """Email + hidden password prompt. Stores salted hash only. Returns True on success.
+
+    Fully non-interactive when email+password are passed (flags or
+    X5_EMAIL/X5_PASSWORD env): no input()/getpass() calls at all, so no
+    stdin injection and no GetPassWarning. Interactive prompts are only a
+    fallback when a value is missing.
+    """
+    _step("6/7 console owner")
+    email = (email or "").strip().lower()
+    if not email:
+        try:
+            email = input("  email: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return False
     if not EMAIL_RE.match(email):
         print("  ERROR: invalid email format", file=sys.stderr)
         return False
-    try:
-        pw = getpass.getpass("  password (min 8, hidden): ")
-    except (EOFError, KeyboardInterrupt):
-        print(file=sys.stderr)
-        return False
+    pw = (password or "")
+    if not pw:
+        try:
+            if not sys.stdin.isatty():
+                # Piped stdin (automation): read one line without getpass noise.
+                line = sys.stdin.readline()
+                pw = (line or "").rstrip("\r\n")
+            else:
+                pw = getpass.getpass("  password (min 8, hidden): ")
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return False
     if len(pw) < 8:
         print("  ERROR: password too short (min 8)", file=sys.stderr)
         return False
@@ -313,25 +441,32 @@ def ask_credentials() -> bool:
         return False
 
 
-def setup_public_share() -> None:
+def setup_public_share(mode=None, assume_yes: bool = False) -> None:
     """Step 6/6: Tailscale Funnel public link (anyone can open).
 
     Flow: install check -> login URL shown + opened in browser ->
     funnel on -> permanent https://<machine>.<tailnet>.ts.net printed.
     Never fatal: the local console works even when this is skipped.
+    mode: True/False/None (flag --public/--no-public/unset).
     """
     _step("7/7 public link (Tailscale Funnel — anyone can open)")
+    if mode is False:
+        _ok("skipped (--no-public) - local console only")
+        return
     try:
         sys.path.insert(0, str(PROJECT_ROOT))
         from web.server.tailscale_share import ensure_public, status
     except Exception as e:
         _warn(f"public link skipped ({str(e)[:120]}) - local console still works")
         return
-    try:
-        ans = input("  Enable the public internet link? [Y/n]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print(file=sys.stderr)
-        return
+    if mode is True or assume_yes:
+        ans = "y"
+    else:
+        try:
+            ans = input("  Enable the public internet link? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return
     if ans == "n":
         _ok("skipped - local console only")
         return
@@ -348,7 +483,8 @@ def setup_public_share() -> None:
         _warn("login not completed - re-run: python -m web.server.server --public")
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    args = parse_args(argv)
     print("=" * 70)
     print("  X5Agent install / update (one command)")
     print("=" * 70)
@@ -356,18 +492,22 @@ def main() -> int:
         return 1
     check_project_state()
     update_source()
-    if not ensure_resources():
+    if not ensure_resources(hf_token=args.hf_token):
         return 1
-    check_browser()
-    if not ask_credentials():
+    if not args.skip_browser:
+        check_browser(assume_yes=args.yes)
+    if not args.skip_firewall:
+        ensure_firewall()
+    if not ask_credentials(email=args.email, password=args.password):
         return 1
-    setup_public_share()
-    try:
-        import webbrowser
+    setup_public_share(mode=args.public, assume_yes=args.yes)
+    if not args.no_open_browser:
+        try:
+            import webbrowser
 
-        webbrowser.open(UI_URL)
-    except Exception:
-        pass
+            webbrowser.open(UI_URL)
+        except Exception:
+            pass
     print("\n" + "=" * 70)
     print(f"  Console (local):  {UI_URL}")
     print("  Console (public): python -m web.server.server --public  (from project/)")

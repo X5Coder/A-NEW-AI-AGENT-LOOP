@@ -1,7 +1,7 @@
 """
 X5Browser integration — versioned single-folder browser layer.
 
-Wrapper 1.5.0 over lib x5browser==1.5.0 (see VERSION).
+Wrapper 1.5.1 over lib x5browser==1.5.1 (see VERSION).
 - catalog.py: 44 tool specs (43 library + show_preview wrapper), all core plugins (always on, behind tool_search).
 - service.py: single browser owner + sync/async bridge + screenshots.
   Explicit lifecycle: open_browser/restart_browser boot; every other tool
@@ -14,8 +14,8 @@ Update path: bump VERSION lib pin, adjust catalog.py to the new TOOL_SCHEMAS.
 """
 from __future__ import annotations
 
-__version__ = "1.5.0"
-LIB_PIN = "x5browser==1.5.0"
+__version__ = "1.5.1"
+LIB_PIN = "x5browser==1.5.1"
 
 from .catalog import (  # noqa: E402
     ALL_TOOLS,

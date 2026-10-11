@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# x5-local — start the X5Agent console for local use only (http://127.0.0.1:7777/).
+# Usage:  ./x5-local            (from project/scripts/, or anywhere)
+#         bash x5-local
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJ="$(cd "$HERE/.." && pwd)"
+cd "$PROJ"
+exec python3 -m web.server.server --host 127.0.0.1 --port 7777

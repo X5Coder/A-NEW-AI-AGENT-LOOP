@@ -9,7 +9,7 @@ Flow (exactly, nothing else):
   3. Seed the models volume when empty (tracked configs from the image;
      the 1.1GB weights download once via the embedding bootstrap, then persist).
   4. Ensure X5Agent dirs exist inside the data volume (idempotent).
-  4. Browser engine check: headless chromium smoke test (bounded, warn-only —
+  4. Browser engine check: headless Chrome smoke test (bounded, warn-only —
      proves the X5Browser engine can run on this headless server).
   5. exec() the console server on 0.0.0.0:7777 (port mapping needs a
      non-loopback bind; the funnel public link stays opt-in via X5_PUBLIC=1).
@@ -34,7 +34,8 @@ CONFIG_MARKER = "config.json"
 BINDS = ("/app/data", "/data")
 PULL_TIMEOUT = 300
 BROWSER_TIMEOUT = 90
-# Same lookup order as the x5browser library's own launcher.
+# Official Chrome first (the only engine the x5browser library accepts);
+# chromium entries are smoke-test fallback only, never the agent browser.
 BROWSER_BINARIES = ("google-chrome", "google-chrome-stable", "chromium",
                     "chromium-browser", "chrome")
 

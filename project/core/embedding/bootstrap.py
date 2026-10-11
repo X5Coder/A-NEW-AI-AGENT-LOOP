@@ -20,6 +20,9 @@ import time
 from pathlib import Path
 
 # HuggingFace source of the bundled embedding model (auto-fetch, first run).
+# Auth is OPTIONAL: plain anonymous download works. When HF_TOKEN (env) is
+# set — e.g. `HF_TOKEN=hf_xxx python install.py` on a slow/capped network —
+# it is used only to raise HuggingFace rate limits. Never required, never logged.
 _SOURCE_REPO = "Qwen/Qwen3-Embedding-0.6B"
 MARKER = ".download_complete"
 # Essential files only: weights + configs + tokenizer. Skips docs, git
@@ -162,6 +165,7 @@ def ensure_embedding_model(sync: bool = False, timeout_seconds: int = 3600) -> P
         print("=" * 70)
     _set_state("downloading", "Fetching embedding model (deltas only)…")
     last_error = None
+    _use_hf_token()
     for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
         try:
             target.mkdir(parents=True, exist_ok=True)
@@ -193,6 +197,30 @@ def ensure_embedding_model(sync: bool = False, timeout_seconds: int = 3600) -> P
     _set_state("ready")
     print("[OK] Embedding model ready.")
     return target
+
+
+def _use_hf_token() -> None:
+    """Optional HuggingFace login from HF_TOKEN env (rate limits only).
+
+    Best-effort and silent on failure: anonymous download is the default.
+    The token value is never printed or stored.
+    """
+    try:
+        import os as _os
+
+        token = (_os.environ.get("HF_TOKEN") or "").strip()
+        if not token:
+            return
+        try:
+            from huggingface_hub import login as _hf_login
+
+            _hf_login(token=token, add_to_git_credential=False)
+            print("[..] HuggingFace: authenticated download (HF_TOKEN set).")
+        except Exception as e:
+            print(f"[WARN] HuggingFace login failed ({str(e)[:100]}) - "
+                  "continuing anonymously.")
+    except Exception:
+        pass
 
 
 def ensure_in_background() -> threading.Thread:

@@ -45,7 +45,7 @@ for needed in ("_live_snapshot", "_live_active", "_live_pause_entry",
     assert hasattr(srv, needed), f"missing new server helper: {needed}"
 print("old server live_state/heal helpers removed OK")
 
-# ---- catalog surface (library 1.5.0 = 43 tools + our show_preview wrapper) ----
+# ---- catalog surface (library 1.5.1 = 43 tools + our show_preview wrapper) ----
 assert len(catalog.ALL_TOOLS) == 44, len(catalog.ALL_TOOLS)
 assert "browser_status" in catalog.ALL_TOOLS
 assert "show_preview" in catalog.ALL_TOOLS

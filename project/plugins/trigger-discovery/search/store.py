@@ -57,6 +57,35 @@ def _collect_trigger_specs() -> list[dict]:
                             triggers.append(spec)
                     except Exception:
                         continue
+    # Browser page-monitor trigger (project/X5Browser, single versioned folder).
+    # manage_triggers lives in the browser tool catalog, so without this it only
+    # shows in tool_search and never in the triggers section (trigger_search).
+    # Appended here so trigger_search embeds it and the hash auto-rebuilds on change.
+    try:
+        import sys as _sys2
+        _root2 = _project_root()
+        if str(_root2) not in _sys2.path:
+            _sys2.path.insert(0, str(_root2))
+        from X5Browser.catalog import SPECS as _BROWSER_SPECS
+        _seen = {t.get("name") for t in triggers}
+        for _spec in _BROWSER_SPECS:
+            try:
+                if not isinstance(_spec, dict):
+                    continue
+                if _spec.get("name") != "manage_triggers":
+                    continue
+                if not isinstance(_spec.get("description"), str):
+                    continue
+                if _spec.get("name") in _seen:
+                    continue
+                triggers.append({"name": _spec["name"], "description": _spec["description"],
+                                 "inputs": _spec.get("inputs", {}),
+                                 "source": "X5Browser"})
+                _seen.add(_spec.get("name"))
+            except Exception:
+                continue
+    except Exception:
+        pass
     triggers.sort(key=lambda x: x.get("name",""))
     return triggers
 

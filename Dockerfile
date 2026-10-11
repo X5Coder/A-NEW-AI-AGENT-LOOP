@@ -18,11 +18,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 # git: entrypoint refreshes source via `git pull --ff-only` on every start.
-# chromium: the X5Browser engine (headless fallback on servers without a
-# display; the library finds it as `chromium` on PATH by itself).
+# Official Google Chrome: the X5Browser engine (x5browser>=1.5 accepts the
+# original Chrome only, never Chromium) for headless runs on servers without
+# a display; the library finds `google-chrome` on PATH by itself.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git chromium \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends git wget \
+ && wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+ && apt-get install -y /tmp/google-chrome.deb \
+ && rm -rf /var/lib/apt/lists/* /tmp/google-chrome.deb
 
 WORKDIR /app
 
