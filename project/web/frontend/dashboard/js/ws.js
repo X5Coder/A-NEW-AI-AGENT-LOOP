@@ -92,8 +92,6 @@ export function retryWsNow() {
   failCount = 0;
   connect();
 }
-let lastActivity = 0; // last inbound frame: freshly-opened sockets skip heartbeat
-let heartbeatTimer = null;
 
 function noteActivity() {
   try {
