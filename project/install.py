@@ -828,21 +828,25 @@ def main(argv=None) -> int:
     print("  Server Running Now" if args.run else "  Server Ready")
     print("=" * 70)
     if args.run:
+        already, stopper = False, None
         try:
             sys.path.insert(0, str(PROJECT_ROOT))
-            from scripts.cli import _port_answers
-
-            already_up = _port_answers(CONSOLE_PORT)
+            from scripts.cli import _port_answers as _probe, _stop_server as _stopfn
+            already = _probe(CONSOLE_PORT)
+            stopper = _stopfn
         except Exception:
-            already_up = False
-        if already_up:
-            if code_updated:
-                print("\n[install] already running AND source was just updated - "
-                      "restart to run the new code:")
-                print('  pkill -f "web.server.server"; x5agent')
-            else:
-                print("\n[install] already running - keeping it (report above).")
-            return 0
+            already, stopper = False, None
+        if already:
+            print("\n[install] server already running - stopping it for a fresh start ...")
+            ok = False
+            if stopper is not None:
+                try:
+                    ok = stopper(CONSOLE_PORT)
+                except Exception:
+                    ok = False
+            if not ok:
+                print("  start aborted (see above).", file=sys.stderr)
+                return 1
         print("\n[install] starting console now (--run)...")
         cmd = [sys.executable, "-m", "web.server.server",
                "--host", "0.0.0.0", "--port", "7777"]

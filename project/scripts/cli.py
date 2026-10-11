@@ -1,10 +1,8 @@
 """The `x5agent` command (installed on PATH via pip install -e .).
 
 Starts the console directly: no update check, no prompts, no install steps.
-When the server is already running, prints the 3-line report instead:
-  Web Server (Local):  ...
-  Web Server (Public): ...
-  Server Running Now
+Restart semantics: a running server is stopped (graceful, then forced)
+before the fresh one binds.
 Usage from anywhere:  x5agent [--public] [--port 7777]
 """
 from __future__ import annotations
@@ -32,34 +30,63 @@ def _port_answers(port: int) -> bool:
         return False
 
 
-def _show_report(port: int) -> None:
-    """The final 3-line report for an already-running server. Never raises."""
-    try:
-        if str(PROJECT_ROOT) not in sys.path:
-            sys.path.insert(0, str(PROJECT_ROOT))
+def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
+    """Stop our console server so a fresh one can bind (restart semantics).
+
+    SIGINT first (the server's clean KeyboardInterrupt shutdown path),
+    SIGKILL fallback, then verify the port is actually free. Only processes
+    whose command line is ours are ever signalled; a foreign port holder is
+    reported, never killed. Posix only (needs pkill/pgrep).
+    Returns True when the port is free.
+    """
+    import platform as _plat
+    import shutil as _sh
+    import subprocess as _sp
+    import time as _time
+
+    def _free() -> bool:
         try:
-            from web.server.tailscale_share import status
-
-            snap = status(port)
+            return not _port_answers(port)
         except Exception:
-            snap = {}
-        url = snap.get("public_url") if isinstance(snap, dict) else None
-        if not url:
-            if not (snap or {}).get("installed", True):
-                url = "off (no Tailscale)"
-            elif not (snap or {}).get("logged_in", False):
-                url = "off (not logged in)"
-            else:
-                url = "off (funnel not enabled - restart with --public)"
-        from web.server.server import _print_final_report
+            return False
 
-        _print_final_report(port, url)
-    except Exception as e:
-        print(f"[x5agent] running at http://127.0.0.1:{port}/ ({e})")
+    def _ours() -> bool:
+        try:
+            proc = _sp.run(["pgrep", "-f", "web.server.server"],
+                           capture_output=True, text=True, timeout=15)
+            return proc.returncode == 0 and bool((proc.stdout or "").strip())
+        except Exception:
+            return False
+
+    if _plat.system() == "Windows" or _sh.which("pkill") is None or _sh.which("pgrep") is None:
+        print("  automatic restart needs Linux/Mac with pkill+pgrep - "
+              "stop the old server manually and re-run")
+        return False
+    if _free():
+        return True
+    if not _ours():
+        print(f"  port {port} is busy but no X5Agent server found - "
+              f"not touching it (free {port} manually and re-run)")
+        return False
+    for sig, pause in (("-INT", wait_sec), ("-9", 5)):
+        try:
+            _sp.run(["pkill", sig, "-f", "web.server.server"],
+                    capture_output=True, timeout=15)
+        except Exception:
+            pass
+        print(f"  stopping old server ({'graceful' if sig == '-INT' else 'forced'}) ...")
+        deadline = _time.time() + pause
+        while _time.time() < deadline:
+            if _free():
+                print("  old server stopped - port is free")
+                return True
+            _time.sleep(1)
+    print(f"  port {port} is still busy - free it manually and re-run")
+    return False
 
 
 def main(argv=None) -> int:
-    """Serve now on 0.0.0.0, or report when already running."""
+    """Serve now on 0.0.0.0, restarting a running server first."""
     import argparse
 
     p = argparse.ArgumentParser(
@@ -74,8 +101,10 @@ def main(argv=None) -> int:
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
     if _port_answers(args.port):
-        _show_report(args.port)
-        return 0
+        print("  server already running - stopping it for a fresh start ...")
+        if not _stop_server(args.port):
+            print("  start aborted (see above).", file=sys.stderr)
+            return 1
     from web.server.server import run
 
     return run(host="0.0.0.0", port=args.port, public=args.public)

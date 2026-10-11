@@ -50,8 +50,9 @@ x5agent --public     # also enable the Tailscale Funnel public link
 ```
 
 The `x5agent` command is installed on PATH by `pip install -e .`
-(the installer adds it automatically when missing). When the server is
-already running it prints the 3-line report instead of a second copy.
+(the installer adds it automatically when missing). Restart semantics:
+a running server is stopped (graceful, then forced) before the fresh one
+binds; a foreign port holder is never touched.
 
 **Windows**
 
