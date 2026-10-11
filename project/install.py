@@ -88,6 +88,23 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def _has_nvidia_gpu() -> bool:
+    """Best-effort NVIDIA GPU check via nvidia-smi. False when unsure.
+
+    When unsure the caller keeps the default (CUDA) install path so GPU
+    machines never lose GPU support because of a failed detection.
+    """
+    try:
+        if shutil.which("nvidia-smi") is None:
+            return False
+        proc = subprocess.run(
+            ["nvidia-smi", "-L"], capture_output=True, text=True, timeout=30,
+        )
+        return proc.returncode == 0 and "GPU" in (proc.stdout or "")
+    except Exception:
+        return False
+
+
 def ensure_dependencies() -> bool:
     """Install project dependencies once when missing (pip install -e .).
 
@@ -97,7 +114,12 @@ def ensure_dependencies() -> bool:
     because stock Ubuntu python3.10 ships an old pip+setuptools pair that
     fails editable installs with
     `canonicalize_version() got ... strip_trailing_zero`.
-    Bounded: two pip runs max, 10-minute timeout each, never loops.
+    On machines without an NVIDIA GPU it pre-installs the CPU-only torch
+    wheel (~200MB) so pip does not pull the ~2.5GB CUDA bundle on a
+    CPU-only VPS (that download alone exceeds the install timeout).
+    Bounded: three pip runs max (toolchain 10min, torch-CPU 20min,
+    project 30min), never loops. A timeout keeps pip's cache, so just
+    re-running the installer resumes where it stopped.
     Returns True when the required packages import cleanly afterwards.
     """
     missing = []
@@ -115,14 +137,33 @@ def ensure_dependencies() -> bool:
              "pip", "setuptools", "wheel", "packaging>=24.2"],
             cwd=str(PROJECT_ROOT), timeout=600,
         )
-        if tool.returncode == 0:
+        toolchain_ok = tool.returncode == 0
+        if toolchain_ok:
             _ok("build toolchain refreshed (pip/setuptools/wheel/packaging)")
         else:
             _warn(f"toolchain refresh exited {tool.returncode} - "
                   "trying install anyway")
+        # --break-system-packages exists on the refreshed pip (Debian/Ubuntu
+        # require it); the stock old pip does not accept it, so only use it
+        # when the refresh succeeded.
+        extra = ["--break-system-packages"] if toolchain_ok else []
+        if not _has_nvidia_gpu():
+            print("  no NVIDIA GPU detected - installing CPU-only torch "
+                  "first (avoids the ~2.5GB CUDA download)...")
+            cpu = subprocess.run(
+                [sys.executable, "-m", "pip", "install", *extra,
+                 "--index-url", "https://download.pytorch.org/whl/cpu",
+                 "torch"],
+                cwd=str(PROJECT_ROOT), timeout=1200,
+            )
+            if cpu.returncode == 0:
+                _ok("CPU-only torch installed")
+            else:
+                _warn(f"CPU torch install exited {cpu.returncode} - "
+                      "trying full install anyway (slower)")
         proc = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-e", "."],
-            cwd=str(PROJECT_ROOT), timeout=600,
+            [sys.executable, "-m", "pip", "install", *extra, "-e", "."],
+            cwd=str(PROJECT_ROOT), timeout=1800,
         )
         if proc.returncode != 0:
             print("  ERROR: pip install -e . failed "
@@ -130,6 +171,11 @@ def ensure_dependencies() -> bool:
             print("  run manually: pip install -e .  (from project/) "
                   "then re-run install", file=sys.stderr)
             return False
+    except subprocess.TimeoutExpired:
+        print("  ERROR: pip install timed out (slow network?) - pip cached "
+              "the progress, just re-run the same command to resume",
+              file=sys.stderr)
+        return False
     except Exception as e:
         print(f"  ERROR: pip install failed ({str(e)[:120]})", file=sys.stderr)
         return False
