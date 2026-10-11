@@ -109,7 +109,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml and updates.json at the repo root).
-APP_VERSION = "0.16.0"
+APP_VERSION = "0.17.0"
 
 UPDATE_REPO = "X5Coder/X5Agent"
 
@@ -1132,14 +1132,16 @@ def _build_stream_frame(kind: str, val: Any, out: Any) -> dict | None:
         return None
 
 
-# ---- realtime event hub (SSE push; replaces client polling) ----
-# One connection per open tab. All state changes fan out from here, so N
-# clients cost O(1) server work: singleton watchers (browser 10s, dashboard
-# 30s, workspace 15s) broadcast ONLY on change; instant events (live/chat/
-# workspace-API writes) broadcast at the mutation point. Same logic and
-# freshness as the old polls, ~95% fewer requests at SaaS scale.
+# ---- realtime event hub (SSE push + WS push; replaces client polling) ----
+# One SSE connection per open tab (legacy) + one WS socket per open tab
+# (chat + pushes over the same socket). All state changes fan out from
+# _events_broadcast, so N clients cost O(1) server work: singleton watchers
+# (browser 10s, dashboard 30s, workspace 15s) broadcast ONLY on change;
+# instant events (live/chat/workspace-API writes) broadcast at the mutation
+# point.
 _EVENTS_LOCK = threading.Lock()
 _EVENT_SUBS: list = []
+_WS_SUBS: list = []  # live WS sockets: {"send": fn, "q": Queue}
 _EVENTS_SEQ = 0
 _WATCHERS_STARTED = False
 _BROWSER_PUSH: dict = {"running": None, "url": None}
@@ -1149,7 +1151,7 @@ _DASH_CACHE: dict = {}  # last fanned-out dashboard bundle (hello serves it, O(1
 
 
 def _events_broadcast(etype: str, payload: dict) -> None:
-    """Fan one event out to every live SSE subscriber. Never raises, never blocks."""
+    """Fan one event out to SSE subscribers + live WS sockets. Never raises."""
     global _EVENTS_SEQ
     try:
         with _EVENTS_LOCK:
@@ -1172,8 +1174,547 @@ def _events_broadcast(etype: str, payload: dict) -> None:
                     _EVENT_SUBS.remove(sub)
                 except ValueError:
                     pass
+            ws_dead = []
+            for sub in _WS_SUBS:
+                try:
+                    q = sub["q"]
+                    if q.full():
+                        try:
+                            q.get_nowait()
+                        except Exception:
+                            pass
+                    q.put_nowait(frame)
+                except Exception:
+                    ws_dead.append(sub)
+            for sub in ws_dead:
+                try:
+                    _WS_SUBS.remove(sub)
+                except ValueError:
+                    pass
     except Exception:
         pass
+
+
+def _ws_send(conn, obj: dict) -> bool:
+    """One JSON text frame over an authed WS socket. False when dead."""
+    try:
+        import json as _json
+
+        raw = _json.dumps(obj, ensure_ascii=False)
+        if len(raw.encode("utf-8")) > 8 * 1024 * 1024:
+            return False
+        conn.send_text(raw)
+        return True
+    except Exception:
+        return False
+
+
+def _ws_chat_answer(payload: dict) -> dict:
+    """Same as POST /api/chat_answer, minus HTTP (WS op + loopback direct)."""
+    try:
+        qid = (payload or {}).get("id")
+        if not isinstance(qid, str) or not qid:
+            return {"error": "question id required"}
+        with _PQ_LOCK:
+            q = _PENDING_QUESTIONS.get(qid)
+        if q is None:
+            return {"error": "question expired or unknown"}
+        decision = (payload or {}).get("decision")
+        answer = (payload or {}).get("answer")
+        if isinstance(decision, str) and decision in ("continue", "stop", "skip", "activate"):
+            q.put({"decision": decision})
+        elif isinstance(answer, str) and answer.strip():
+            q.put({"answer": answer.strip()[:2000]})
+        else:
+            return {"error": "answer or decision required"}
+        _live_pause_clear(qid)
+        return {"ok": True}
+    except Exception as e:
+        return {"error": f"answer failed: {str(e)[:200]}"}
+
+
+def _ws_chat_cancel() -> dict:
+    """Same as POST /api/chat_cancel, minus HTTP. Best-effort."""
+    try:
+        with _RUN_LOCK:
+            ev = _ACTIVE_RUN.get("event")
+        if ev is not None:
+            try:
+                ev.set()
+            except Exception:
+                pass
+        return {"ok": True}
+    except Exception as e:
+        return {"error": f"cancel failed: {str(e)[:200]}"}
+
+
+def _ws_start_chat(conn, send_lock, payload: dict, gw: bool = False) -> dict:
+    """Start the agent loop; progress streams as frames on THIS socket.
+
+    Same pipeline as _handle_chat_stream (validation, busy slot, readiness,
+    run thread, done/error/cancelled frames) — only the transport differs:
+    frames go to this socket instead of SSE, and questions resolve via the
+    chat_answer WS op (or POST /api/chat_answer from loopback).
+    """
+    import queue as _queue
+    import uuid as _uuid
+
+    try:
+        fake_self = DashboardHandler.__new__(DashboardHandler)
+        loop_input, saved_paths = DashboardHandler._build_loop_input(fake_self, payload or {})
+    except _ChatError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+    if gw:
+        try:
+            with _RUN_LOCK:
+                busy = "event" in _ACTIVE_RUN
+        except Exception:
+            busy = False
+        if busy:
+            try:
+                for _p in saved_paths or []:
+                    try:
+                        Path(_p).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return {"error": "another run is active, try again shortly", "busy": True}
+    else:
+        try:
+            with _RUN_LOCK:
+                if "event" in _ACTIVE_RUN:
+                    try:
+                        for _p in saved_paths or []:
+                            try:
+                                Path(_p).unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    return {"error": "another run is active, try again shortly", "busy": True}
+        except Exception as e:
+            return {"error": str(e)[:200]}
+
+    ready, _, _ = _chat_readiness()
+    if not ready:
+        try:
+            for _p in saved_paths or []:
+                try:
+                    Path(_p).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return {"error": NO_MODEL_ERROR, "needs_model": True, "needs_kind": "text"}
+
+    restricted = (payload or {}).get("mode", "restricted") != "free"
+    events_q: _queue.Queue = _queue.Queue(maxsize=2000)
+    box: dict = {}
+
+    def _emit(obj) -> bool:
+        try:
+            with send_lock:
+                return _ws_send(conn, obj)
+        except Exception:
+            return False
+
+    def _stage(kind: str, val, out) -> None:
+        frame = _build_stream_frame(kind, val, out)
+        if frame is not None:
+            _run_frame_remember(frame)
+        try:
+            events_q.put_nowait((kind, val, out))
+        except Exception:
+            try:
+                events_q.get_nowait()
+            except Exception:
+                pass
+            try:
+                events_q.put_nowait((kind, val, out))
+            except Exception:
+                pass
+
+    def _on_question(kind: str, qpayload: dict):
+        qid = _uuid.uuid4().hex[:8]
+        q: _queue.Queue = _queue.Queue()
+        with _PQ_LOCK:
+            _PENDING_QUESTIONS[qid] = q
+        frame = {
+            "type": "question",
+            "id": qid,
+            "kind": kind,
+            "text": str(qpayload.get("question") or qpayload.get("command") or "")[:2000],
+            "choices": [str(c)[:200] for c in (qpayload.get("options") or [])[:4]],
+            "command": str(qpayload.get("command") or "")[:500],
+        }
+        if kind == "needs_model":
+            try:
+                from core.ai_models.store import KIND_TITLES as _TITLES
+                _k = str(qpayload.get("kind") or "text")
+                _t = str(qpayload.get("tool") or "")
+                frame["needs_kind"] = _k
+                frame["tool"] = _t[:40]
+                frame["text"] = f"Needs {_TITLES.get(_k, _k)} (used by {_t or 'this task'})."
+            except Exception:
+                frame["needs_kind"] = str(qpayload.get("kind") or "text")
+                frame["tool"] = str(qpayload.get("tool") or "")[:40]
+        if kind == "live":
+            live_view_only = bool(qpayload.get("view_only", False))
+            frame["url"] = str(qpayload.get("url") or "")[:2000]
+            frame["view_only"] = live_view_only
+            frame["tool"] = str(qpayload.get("tool") or "human_control")[:40]
+            frame["reason"] = str(qpayload.get("reason") or "")[:500]
+            with _PQ_LOCK:
+                _LIVE_PAUSE[qid] = {"tool": frame["tool"],
+                                    "view_only": live_view_only,
+                                    "reason": frame["reason"]}
+        if gw and kind in ("approval", "needs_model"):
+            with _PQ_LOCK:
+                _PENDING_QUESTIONS.pop(qid, None)
+                _LIVE_PAUSE.pop(qid, None)
+            return {"decision": "continue" if kind == "approval" else "skip"}
+        if gw and kind not in ("live",):
+            with _PQ_LOCK:
+                _PENDING_QUESTIONS.pop(qid, None)
+                _LIVE_PAUSE.pop(qid, None)
+            return None
+        if not _emit(frame):
+            with _PQ_LOCK:
+                _PENDING_QUESTIONS.pop(qid, None)
+                _LIVE_PAUSE.pop(qid, None)
+            return None
+        try:
+            return q.get(timeout=600)
+        except Exception:
+            _emit({"type": "question-expired", "id": qid})
+            return None
+        finally:
+            with _PQ_LOCK:
+                _PENDING_QUESTIONS.pop(qid, None)
+                _LIVE_PAUSE.pop(qid, None)
+
+    def _on_live(ev: dict) -> None:
+        try:
+            if not isinstance(ev, dict) or not ev.get("success"):
+                return
+            tool = str(ev.get("tool") or "")
+            if not tool:
+                return
+            _events_emit_browser(force=True)
+            if tool in ("agent_control", "close_browser"):
+                _stage("live_end", None, None)
+            elif tool in ("live_preview", "show_preview", "restart_browser", "open_browser"):
+                links = _live_snapshot()
+                purl = links.get("preview") if isinstance(links, dict) else ""
+                if isinstance(purl, str) and purl.startswith(("http://", "https://")):
+                    _stage("live", {"mode": "preview", "tool": tool,
+                                    "url": purl[:2000], "view_only": True}, None)
+                else:
+                    active = _live_active()
+                    if isinstance(active, dict) and active.get("url"):
+                        _stage("live", {"mode": active.get("mode"), "tool": tool,
+                                        "url": active["url"], "view_only": True}, None)
+            else:
+                active = _live_active()
+                if isinstance(active, dict) and active.get("url"):
+                    _stage("live", {"mode": active.get("mode"), "tool": tool,
+                                    "url": active["url"], "view_only": True}, None)
+        except Exception:
+            pass
+
+    def _run() -> None:
+        cancel_event = threading.Event()
+        _run_frames_clear()
+        with _RUN_LOCK:
+            _ACTIVE_RUN["event"] = cancel_event
+            _ACTIVE_RUN["input"] = loop_input[:200]
+        _events_emit_chat(gateway=gw)
+        try:
+            from core.agent.loop.engine import run_loop
+
+            chat_model, chat_key = _resolve_chat_model()
+            box["res"] = run_loop(
+                loop_input,
+                max_steps=CHAT_LOOP_STEPS,
+                verbose=False,
+                model=chat_model,
+                api_key=chat_key,
+                on_event=lambda t, o=None, k=None, m=None, r=None, s=None: _stage("event", t, (o, k, m, r, s)),
+                on_tool_start=lambda label, k=None, r=None, s=None: _stage("event_start", label, (k, r, s)),
+                on_token=lambda step, d: _stage("token", step, d),
+                restricted=restricted,
+                on_question=_on_question,
+                on_live_event=_on_live,
+                cancel_flag=cancel_event,
+            )
+        except Exception as e:
+            box["err"] = e
+        finally:
+            with _RUN_LOCK:
+                if _ACTIVE_RUN.get("event") is cancel_event:
+                    _ACTIVE_RUN.pop("event", None)
+                _ACTIVE_RUN.pop("input", None)
+            _run_frames_clear()
+            _events_emit_chat(gateway=gw)
+            _events_broadcast("chat_done", {"gateway": True} if gw else {})
+            try:
+                _events_emit_scheduler(force=True)
+            except Exception:
+                pass
+            events_q.put(("stop", None, None))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    def _pump() -> None:
+        try:
+            while True:
+                try:
+                    kind, val, out = events_q.get(timeout=25)
+                except Exception:
+                    if not _emit({"type": "ping"}):
+                        break
+                    continue
+                if kind == "stop":
+                    break
+                frame = _build_stream_frame(kind, val, out)
+                if frame is None:
+                    continue
+                try:
+                    _md = frame.get("media")
+                    _stm = _md.get("stream") if isinstance(_md, dict) else None
+                    _surl = _stm.get("url") if isinstance(_stm, dict) else None
+                    if isinstance(_surl, str) and _surl.startswith(("http://", "https://")):
+                        if _live_pause_entry() is None:
+                            _events_emit_browser(force=True)
+                except Exception:
+                    pass
+                if not _emit(frame):
+                    break
+            err = box.get("err")
+            _live_pause_clear()
+            if err is not None:
+                _emit({"type": "error", "error": "LLM request failed — connect a model in AI Models",
+                       "detail": str(err)[:200]})
+            else:
+                res = box.get("res") or {}
+                if res.get("cancelled"):
+                    _emit({"type": "cancelled"})
+                else:
+                    final = res.get("final_answer") or ""
+                    _need_kind = res.get("needs_model_kind")
+                    _done = {
+                        "type": "done",
+                        "reply": str(final),
+                        "events": DashboardHandler._extract_loop_events(None, res),
+                        "steps": res.get("steps", 0),
+                        "ids": res.get("message_ids"),
+                        "images": res.get("final_images") or [],
+                        "audio": res.get("final_audio") or [],
+                        "elapsed": res.get("elapsed_sec", 0),
+                    }
+                    if isinstance(_need_kind, str) and _need_kind:
+                        _done["needs_model"] = True
+                        _done["needs_kind"] = _need_kind
+                    _emit(_done)
+        except Exception:
+            pass
+        finally:
+            try:
+                for _p in saved_paths or []:
+                    try:
+                        Path(_p).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    threading.Thread(target=_pump, daemon=True).start()
+    return {"started": True}
+
+
+def serve_ws(conn, peer: str = "") -> None:
+    """Own one upgraded /ws socket: token auth -> chat ops + pushes -> cleanup.
+
+    First message MUST be {"op": "auth", "token": "<entry token>"}:
+    match -> auth_ok + hello, then ops flow. Anything else -> close 4401.
+    The socket opens when the UI loads, closes when the tab closes; pushes
+    (browser/chat/run/scheduler/...) fan out from _events_broadcast on this
+    same socket, so traffic is instant and bidirectional. Never raises.
+    """
+    import queue as _queue
+
+    send_lock = threading.Lock()
+    authed = False
+    inbox = None
+    stop = threading.Event()
+    try:
+        try:
+            conn.sock.settimeout(15.0)
+        except Exception:
+            pass
+        try:
+            from web.server.ws_proto import WsError as _WsErr
+
+            first = conn.recv_text()
+        except Exception:
+            return
+        finally:
+            try:
+                conn.sock.settimeout(None)
+            except Exception:
+                pass
+        try:
+            import json as _json
+
+            msg = _json.loads(first)
+        except Exception:
+            msg = None
+        token = (msg or {}).get("token") if isinstance(msg, dict) else ""
+        if not isinstance(msg, dict) or msg.get("op") != "auth":
+            try:
+                conn.close(4401, "auth required")
+            except Exception:
+                pass
+            return
+        try:
+            from web.server import ws_auth as _wa
+            from web.server import console_auth as _ca
+
+            ok = bool(_wa.check(token))
+            if not ok and not _ca.is_setup() and not (token or ""):
+                ok = True  # first-run setup window: admit once to create owner
+        except Exception:
+            ok = False
+        if not ok:
+            try:
+                conn.close(4401, "auth required")
+            except Exception:
+                pass
+            return
+        authed = True
+        try:
+            snap = _events_snapshot()
+        except Exception:
+            snap = {}
+        with send_lock:
+            _ws_send(conn, {"type": "auth_ok", "hello": snap})
+
+        inbox = _queue.Queue(maxsize=64)
+        with _EVENTS_LOCK:
+            _WS_SUBS.append({"q": inbox})
+
+        def _reader() -> None:
+            try:
+                while not stop.is_set():
+                    try:
+                        raw = conn.recv_text()
+                    except Exception:
+                        break
+                    try:
+                        import json as _json2
+
+                        m = _json2.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(m, dict):
+                        continue
+                    op = m.get("op")
+                    rid = m.get("id")
+                    try:
+                        if op == "chat_stream":
+                            data = _ws_start_chat(conn, send_lock,
+                                                 m.get("params") if isinstance(m.get("params"), dict) else m,
+                                                 gw=False)
+                        elif op == "chat_answer":
+                            data = _ws_chat_answer(m.get("params") if isinstance(m.get("params"), dict) else m)
+                        elif op == "chat_cancel":
+                            data = _ws_chat_cancel()
+                        elif op == "chat_active":
+                            with _RUN_LOCK:
+                                _a = "event" in _ACTIVE_RUN
+                                _pv = str(_ACTIVE_RUN.get("input") or "")[:200]
+                            data = {"active": bool(_a), "input": _pv}
+                        elif op == "chat_frames":
+                            with _RUN_LOCK:
+                                _a2 = "event" in _ACTIVE_RUN
+                                _pv2 = str(_ACTIVE_RUN.get("input") or "")[:200]
+                            with _RUN_FRAMES_LOCK:
+                                _fr = [dict(f) for f in _RUN_FRAMES]
+                            data = {"active": bool(_a2), "input": _pv2, "frames": _fr}
+                        elif op == "ping":
+                            data = {"pong": True}
+                        else:
+                            data = {"error": f"unknown op: {op}"}
+                    except Exception as e:
+                        data = {"error": f"op failed: {str(e)[:200]}"}
+                    try:
+                        with send_lock:
+                            if rid is not None and op != "chat_stream":
+                                _ws_send(conn, {"id": rid, "ok": "error" not in data,
+                                               **({"data": data} if "error" not in data else {"error": data["error"]})})
+                            elif rid is not None:
+                                _ws_send(conn, {"id": rid, "ok": "error" not in data,
+                                               **({"data": data} if "error" not in data else data)})
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    stop.set()
+                except Exception:
+                    pass
+
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+        last_ping = time.monotonic()
+        last_in = time.monotonic()
+        while authed:
+            try:
+                try:
+                    item = inbox.get(timeout=5.0)
+                    last_in = time.monotonic()
+                except _queue.Empty:
+                    item = None
+                if item is not None:
+                    with send_lock:
+                        if not _ws_send(conn, {"type": "push", "channel": item.get("type"),
+                                              "data": item.get("data") or {}}):
+                            break
+                    continue
+                now = time.monotonic()
+                if now - last_ping >= 20.0:
+                    last_ping = now
+                    try:
+                        conn.ping()
+                    except Exception:
+                        break
+                    if now - last_in > 75.0:
+                        break
+            except Exception:
+                break
+    finally:
+        try:
+            stop.set()
+        except Exception:
+            pass
+        try:
+            if inbox is not None:
+                with _EVENTS_LOCK:
+                    for sub in list(_WS_SUBS):
+                        try:
+                            if sub.get("q") is inbox:
+                                _WS_SUBS.remove(sub)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        try:
+            conn.close(1000, "")
+        except Exception:
+            pass
 
 
 def _events_snapshot() -> dict:
@@ -4256,7 +4797,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"error": str(e)[:200]}, status=400)
                 return
             token = _ca.create_session()
-            self._send_json({"ok": True, "email": email}, headers={
+            try:
+                from web.server import ws_auth as _wa
+                entry = _wa.mint(token)
+            except Exception:
+                entry = ""
+            self._send_json({"ok": True, "email": email, "ws_token": entry}, headers={
                 "Set-Cookie": f"{_ca.COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Lax"})
         except Exception as e:
             self._send_json({"error": str(e)[:200]}, status=500)
@@ -4276,7 +4822,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"error": "wrong email or password"}, status=401)
                 return
             token = _ca.create_session()
-            self._send_json({"ok": True}, headers={
+            try:
+                from web.server import ws_auth as _wa
+                entry = _wa.mint(token)
+            except Exception:
+                entry = ""
+            self._send_json({"ok": True, "ws_token": entry}, headers={
                 "Set-Cookie": f"{_ca.COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Lax"})
         except Exception as e:
             self._send_json({"error": str(e)[:200]}, status=500)
@@ -4287,7 +4838,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             if str(PROJECT_ROOT) not in sys.path:
                 sys.path.insert(0, str(PROJECT_ROOT))
             from web.server import console_auth as _ca
-            _ca.drop_session(_ca.session_from_cookie(self.headers.get("Cookie")))
+            sess = _ca.session_from_cookie(self.headers.get("Cookie"))
+            _ca.drop_session(sess)
+            try:
+                from web.server import ws_auth as _wa
+                _wa.drop_session_tokens(sess)
+            except Exception:
+                pass
             self._send_json({"ok": True}, headers={
                 "Set-Cookie": f"{_ca.COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"})
         except Exception as e:
@@ -4310,6 +4867,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except ValueError as e:
                 self._send_json({"error": str(e)[:200]}, status=400)
                 return
+            try:
+                from web.server import ws_auth as _wa
+                _wa.drop_session_tokens(_ca.session_from_cookie(self.headers.get("Cookie")))
+            except Exception:
+                pass
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"error": str(e)[:200]}, status=500)
@@ -4345,6 +4907,64 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 out.write(f"[dashboard] {self.address_string()} - {format % args}\n")
         except Exception:
             pass
+
+    def handle(self):
+        """Route GET /ws to serve_ws BEFORE the HTTP handler runs.
+
+        Peek-only detection (MSG_PEEK, never consumes): WS upgrades go to
+        serve_ws (module level, same file) on this same socket; everything
+        else keeps the normal HTTP dispatch. The HTTP handler never sees
+        /ws bytes.
+        """
+        try:
+            import socket as _socket
+
+            try:
+                peer = str(self.client_address[0]) if self.client_address else ""
+            except Exception:
+                peer = ""
+            try:
+                self.request.settimeout(3.0)
+                peek = self.request.recv(4096, _socket.MSG_PEEK)
+            except Exception:
+                peek = b""
+            finally:
+                try:
+                    self.request.settimeout(None)
+                except Exception:
+                    pass
+            try:
+                line = (peek or b"").split(b"\r\n", 1)[0].decode("latin-1")
+                parts = line.strip().split()
+                is_ws = (len(parts) >= 2 and parts[0].upper() == "GET"
+                         and parts[1].split("?", 1)[0] == "/ws")
+            except Exception:
+                is_ws = False
+            if is_ws:
+                try:
+                    from web.server.ws_proto import WsConnection
+
+                    conn = WsConnection(self.request, peer)
+                    conn.handshake()
+                except Exception:
+                    try:
+                        self.request.close()
+                    except Exception:
+                        pass
+                    return
+                try:
+                    serve_ws(conn, peer)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        self.request.close()
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            pass
+        super().handle()
 
     def handle_error(self, request, client_address):
         # A vanished client (cancelled fetch, closed tab, dead scanner probe)
@@ -4500,6 +5120,11 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
         _start_scheduler_loop()
     except Exception as e:
         print(f"[WARN] Scheduler loop failed to start: {e}", file=sys.stderr)
+
+    # WS sockets are detected in ThreadedServer.handle (MSG_PEEK on the raw
+    # socket, before HTTP runs) and served by serve_ws above. Broadcasts fan
+    # out to WS tabs inside _events_broadcast itself — no bridge needed.
+    # Plain wss works automatically behind the funnel: TLS terminates above us.
 
     try:
         with ThreadedServer((host, port), DashboardHandler) as httpd:

@@ -313,7 +313,11 @@
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: em, password: p1 })
     }).then(function (r) { return r.json().then(function (d) { return { s: r.status, d: d }; }); }).then(function (x) {
-      if (x.s === 200 && x.d && x.d.ok) { goText.textContent = "Connected ✓"; location.href = "/"; return; }
+      if (x.s === 200 && x.d && x.d.ok) {
+        try {
+          if (x.d.ws_token) localStorage.setItem("x5_ws_token", x.d.ws_token);
+        } catch (_) {}
+        goText.textContent = "Connected ✓"; location.href = "/"; return; }
       fail((x.d && x.d.error) || "Connection failed");
       setLoading(false);
     }).catch(function () { fail("Could not reach the server"); setLoading(false); });

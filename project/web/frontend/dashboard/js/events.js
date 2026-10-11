@@ -1,12 +1,13 @@
 /**
- * events.js — single SSE push channel (replaces every client poller).
+ * events.js — push fan-in over the ONE ws.js socket (replaces SSE).
  *
- * One EventSource per open tab. The server fans out state changes only
- * (browser/live/chat/chat_done/dashboard/workspace); a `hello` snapshot on
- * every (re)connect resyncs late subscribers, so no last-event-id plumbing
- * is needed. Modules register with onPush(type, fn) — no import cycles.
+ * Same contract as before: modules register with onPush(type, fn), hello
+ * snapshots resync late subscribers. Transport is ws.js now: pushes arrive
+ * on the same socket that carries chat (instant + bidirectional).
  */
 "use strict";
+
+import { onWsPush, onWsHello, ensureWs } from "./ws.js?v=1";
 
 const handlers = new Map(); // type -> Set<fn>
 const lastState = new Map(); // state types only (replayed to late subscribers)
@@ -23,27 +24,6 @@ export function onPush(type, fn) {
   } catch (_) {}
 }
 
-function dispatch(frame) {
-  if (!frame || typeof frame.type !== "string") return;
-  if (frame.type === "hello" && frame.data && typeof frame.data === "object") {
-    const snap = frame.data;
-    for (const key of ["browser", "chat", "workspace", "dashboard", "live", "scheduler", "gateway"]) {
-      if (snap[key] !== undefined) {
-        lastState.set(key === "live" ? "live" : key, snap[key]);
-        emit(key === "live" ? "live" : key, snap[key]);
-      }
-    }
-    return;
-  }
-  if (frame.type === "ping") return;
-  if (STATE_TYPES.has(frame.type)) {
-    try {
-      lastState.set(frame.type, frame.data);
-    } catch (_) {}
-  }
-  emit(frame.type, frame.data);
-}
-
 function emit(type, data) {
   const set = handlers.get(type);
   if (!set) return;
@@ -54,35 +34,46 @@ function emit(type, data) {
   }
 }
 
-function connect() {
-  let es = null;
-  // Owner gate: a 401 here means the session died (or logged out elsewhere)
-  // — take the whole console back to login instead of retrying forever.
-  fetch("/api/dashboard", { cache: "no-store" }).then((r) => {
-    if (r.status === 401) location.href = "/login.html";
-  }).catch(() => {});
-  try {
-    es = new EventSource("/api/events");
-  } catch (_) {
-    setTimeout(connect, 5000);
+function onHello(snap) {
+  if (!snap || typeof snap !== "object") return;
+  for (const key of ["browser", "chat", "workspace", "dashboard", "live", "scheduler", "gateway"]) {
+    if (snap[key] !== undefined) {
+      try {
+        lastState.set(key, snap[key]);
+      } catch (_) {}
+      emit(key, snap[key]);
+    }
+  }
+}
+
+function onServerPush(channel, data) {
+  if (typeof channel !== "string") return;
+  // Chat run frames also ride pushes: "run" replays to refreshed tabs,
+  // "chat_run" is the live progress (chat.js listens via onWsRaw too).
+  if (channel === "run" || channel === "chat_run") {
+    emit(channel, data);
     return;
   }
-  es.onmessage = (e) => {
+  if (channel === "chat_done") {
+    emit("chat_done", data);
+    return;
+  }
+  if (STATE_TYPES.has(channel)) {
     try {
-      dispatch(JSON.parse(e.data));
+      lastState.set(channel, data);
     } catch (_) {}
-  };
-  es.onerror = () => {
-    try {
-      es.close();
-    } catch (_) {}
-    // Reconnect with backoff; the fresh hello resyncs everything.
-    setTimeout(connect, 5000);
-  };
+  }
+  emit(channel, data);
 }
 
 export function startEvents() {
   if (started) return;
   started = true;
-  connect();
+  onWsHello(onHello);
+  onWsPush(onServerPush);
+  // Owner gate: a dead session surfaces as WS auth failure (ws.js sends
+  // the tab to login) — this probe only catches the cookie-less case early.
+  try {
+    ensureWs().catch(() => {});
+  } catch (_) {}
 }

@@ -8,7 +8,20 @@
 import { openModal, closeModal, toast } from "./ui.js?v=8";
 import { navigate } from "./navigation.js?v=10";
 import { onPush } from "./events.js?v=1";
+import { onWsRaw, sendOp } from "./ws.js?v=1";
 import { remoteLiveUrl } from "./live-url.js?v=1";
+
+// WS answer/cancel helpers: same server ops as POST /api/chat_answer|cancel.
+async function wsAnswer(body) {
+  const r = await sendOp("chat_answer", body || {});
+  const ok = Boolean(r && r.ok);
+  return { ok, status: ok ? 200 : 400 };
+}
+async function wsCancel() {
+  try {
+    await sendOp("chat_cancel", {});
+  } catch (_) {}
+}
 
 const MAX_MESSAGE = 4000;
 /* no chat avatars — assistant messages are content-only */
@@ -1537,19 +1550,15 @@ function openShotLightbox(src) {
 }
 
 async function sendStream(value, attachments, thinking) {
-  // Live event streaming — returns true when fully handled, false to fall back.
+  // Live event streaming over the ONE ws.js socket — returns true when
+  // fully handled, false to fall back. Frames arrive as raw WS messages
+  // (same shapes as the old SSE frames), so rendering is unchanged.
   activeThinking = thinking;
-  const controller = new AbortController();
   const myGen = ++runGen;
-  activeRun = { controller, cancelled: false, gen: myGen, thinking };
-  let res;
+  activeRun = { cancelled: false, gen: myGen, thinking };
+  let started;
   try {
-    res = await fetch("/api/chat_stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: value, attachments, mode: agentMode }),
-      signal: controller.signal,
-    });
+    started = await sendOp("chat_stream", { message: value, attachments, mode: agentMode });
   } catch (err) {
     const wasCancelled = Boolean(activeRun && activeRun.cancelled);
     activeRun = null;
@@ -1558,7 +1567,7 @@ async function sendStream(value, attachments, thinking) {
     }
     return false;
   }
-  if (!res.ok || !res.body) {
+  if (!started || !started.ok) {
     activeRun = null;
     return false;
   }
@@ -1731,30 +1740,19 @@ async function sendStream(value, attachments, thinking) {
     else collected.push(entry);
     scrollToBottom();
   }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  // WS frames arrive one message at a time on the same socket (same shapes
+  // as the old SSE frames). Wait for done/error/cancelled of THIS turn.
   let doneReceived = false;
-  try {
-    for (;;) {
-      const { done, value: chunk } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(chunk, { stream: true });
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop();
-      for (const frame of frames) {
-        const payload = frame
-          .split("\n")
-          .filter((l) => l.startsWith("data: "))
-          .map((l) => l.slice(6))
-          .join("\n");
-        if (!payload) continue;
-        let msg2;
-        try {
-          msg2 = JSON.parse(payload);
-        } catch (_) {
-          continue;
-        }
+  let turnResult = null; // true = handled, false = fall back
+  function onFrame(msg2) {
+    if (turnResult !== null) return;
+    try {
+      if (!activeRun || activeRun.gen !== myGen) {
+        turnResult = true;
+        return;
+      }
+    } catch (_) {}
+    try {
         if (msg2?.type === "event_start") appendStepStart({ event: msg2.event, key: msg2.key, reason: msg2.reason, loopStep: msg2.step });
         else if (msg2?.type === "event") appendStep({ event: msg2.event, output: msg2.output, key: msg2.key, media: msg2.media, reason: msg2.reason, shot: msg2.shot, loopStep: msg2.step });
         else if (msg2?.type === "token") appendToken(msg2.step, msg2.text);
@@ -1794,11 +1792,11 @@ async function sendStream(value, attachments, thinking) {
           } catch (_) {}
           activeThinking = null;
           activeRun = null;
-          return true;
+          turnResult = true;
+          return;
         } else if (msg2?.type === "done") {
-          doneReceived = true;
-          activeThinking = null;
-          activeRun = null;
+          (async () => {
+            try {
           const replyText = String(msg2.reply || "");
           // Finalization: the thinking-block settles (Working stops,
           // collapsed) and stays above; the final reply is always last.
@@ -1860,10 +1858,20 @@ async function sendStream(value, attachments, thinking) {
           finalEl.dataset.userText = value;
           attachAssistantBar(finalEl, replyText);
           if (msg2.needs_model) appendNeedsModelButton(finalEl, msg2.needs_kind);
-          return true;
+          doneReceived = true;
+          activeThinking = null;
+          activeRun = null;
+          turnResult = true;
+            } catch (_) {
+              turnResult = true;
+            }
+          })();
+          return;
         } else if (msg2?.type === "error") {
-          thinking.remove();
-          if (shell) shell.remove();
+          try {
+            thinking.remove();
+            if (shell) shell.remove();
+          } catch (_) {}
           activeThinking = null;
           activeRun = null;
           const { el: errEl, p: perr } = appendAssistantShell();
@@ -1871,12 +1879,28 @@ async function sendStream(value, attachments, thinking) {
             `Error: ${[msg2.error, msg2.detail].filter(Boolean).join(" — ") || "request failed"}`;
           if (msg2.needs_model) appendNeedsModelButton(errEl, msg2.needs_kind);
           scrollToBottom();
-          return true;
+          turnResult = true;
+          return;
         }
-      }
+    } catch (_) {}
+  }
+  onWsRaw(onFrame);
+  try {
+    for (;;) {
+      if (turnResult !== null) break;
+      try {
+        if (!activeRun || activeRun.gen !== myGen) {
+          turnResult = true;
+          break;
+        }
+      } catch (_) {}
+      await new Promise((r) => setTimeout(r, 50));
     }
-  } catch (_) {
-    // stream broke mid-way — handled below
+  } finally {
+    try {
+      // Unsubscribe this turn (ws.js has no off; gen-guard makes it a no-op).
+      turnResult = turnResult === null ? true : turnResult;
+    } catch (_) {}
   }
   if (!doneReceived) {
     // Superseded turn (STOP / fresh answer / newer message took over):
@@ -1898,7 +1922,7 @@ async function sendStream(value, attachments, thinking) {
     }
     scrollToBottom();
   }
-  return true;
+  return turnResult === null ? true : turnResult;
 }
 
 const SEND_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="6 11 12 5 18 11" /></svg>`;
@@ -3219,11 +3243,7 @@ async function decideApproval(qid, decision) {
   // Instant action — resumes the loop silently, no chat message.
   hideQuestionCard();
   try {
-    await fetch("/api/chat_answer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: qid, decision }),
-    });
+    await wsAnswer({ id: qid, decision });
   } catch (_) {
     toast("Answer failed");
   }
@@ -3234,11 +3254,7 @@ async function decideNeedsModel(qid, decision, kind) {
   // deep-links to AI Models with that dialog auto-opened.
   hideQuestionCard();
   try {
-    await fetch("/api/chat_answer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: qid, decision }),
-    });
+    await wsAnswer({ id: qid, decision });
   } catch (_) {
     toast("Answer failed");
     return;
@@ -3339,11 +3355,7 @@ function showLiveControlCard(q) {
     btn.disabled = true;
     btn.textContent = "…";
     try {
-      const res = await fetch("/api/chat_answer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: q.id, decision: "continue" }),
-      });
+      const res = await wsAnswer({ id: q.id, decision: "continue" });
       if (!res.ok) throw new Error("bad status");
       pendingQuestion = null;
       // Handoff over: the preview may come back (the resumed loop re-attaches).
@@ -4123,11 +4135,7 @@ async function answerLiveContinue(qid, btn) {
     btn.textContent = "…";
   }
   try {
-    const res = await fetch("/api/chat_answer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: qid, decision: "continue" }),
-    });
+    const res = await wsAnswer({ id: qid, decision: "continue" });
     if (!res.ok) throw new Error("bad status");
     pendingQuestion = null;
     pendingLiveQid = null;
@@ -4594,9 +4602,9 @@ async function resumeActiveRun() {
   // while busy — the running message is not persisted yet).
   let st = null;
   try {
-    const res = await fetch("/api/chat_active", { cache: "no-store" });
-    if (!res.ok) return;
-    st = await res.json().catch(() => ({}));
+    const r = await sendOp("chat_active", {});
+    if (!r || !r.ok) return;
+    st = (r && r.data) || {};
   } catch (_) {
     return;
   }
@@ -4632,11 +4640,9 @@ async function resumeActiveRun() {
   // Rebuild the steps already streamed for this run (they are not in the
   // persisted history until the loop ends), then keep following live pushes.
   try {
-    const fr = await fetch("/api/chat_frames", { cache: "no-store" });
-    if (fr.ok) {
-      const fd = await fr.json().catch(() => null);
-      if (fd && Array.isArray(fd.frames)) replayRunFrames(fd.frames);
-    }
+    const r = await sendOp("chat_frames", {});
+    const fd = (r && r.ok && r.data) || null;
+    if (fd && Array.isArray(fd.frames)) replayRunFrames(fd.frames);
   } catch (_) {}
 }
 
@@ -4660,11 +4666,7 @@ async function sendQuestionAnswer() {
   sendBtn.disabled = true;
   composerInput.disabled = true;
   try {
-    const res = await fetch("/api/chat_answer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: q.id, answer }),
-    });
+    const res = await wsAnswer({ id: q.id, answer });
     if (!res.ok) toast("Answer failed");
     // The loop resumes on the still-open stream; its completion event
     // carries the Q + A into the step arrow, then work continues.
@@ -5074,12 +5076,7 @@ async function editUserMessage(el) {
 async function abortActiveStream() {
   if (!activeRun) return;
   activeRun.cancelled = true;
-  try {
-    activeRun.controller.abort();
-  } catch (_) {}
-  try {
-    await fetch("/api/chat_cancel", { method: "POST" });
-  } catch (_) {}
+  await wsCancel();
   activeRun = null;
   setSending(false);
 }
@@ -5090,12 +5087,9 @@ async function stopGeneration() {
   try {
     if (activeRun) {
       activeRun.cancelled = true;
-      try {
-        activeRun.controller.abort();
-      } catch (_) {}
       activeRun = null;
     }
-    await fetch("/api/chat_cancel", { method: "POST" });
+    await wsCancel();
   } catch (_) {}
   catchupResume = false;
   try {
