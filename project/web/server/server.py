@@ -1683,6 +1683,14 @@ def serve_ws(conn, peer: str = "") -> None:
                 conn.close(4401, "auth required")
             except Exception:
                 pass
+            try:
+                import sys as _sys2
+                from web.server import ws_auth as _wa2
+                _sys2.stdout.write(
+                    f"[ws] auth_rejected peer={peer} fp={_wa2.entry_fingerprint(token)}\n")
+                _sys2.stdout.flush()
+            except Exception:
+                pass
             return
         authed = True
         try:

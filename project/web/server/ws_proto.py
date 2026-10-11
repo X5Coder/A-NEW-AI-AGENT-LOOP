@@ -133,6 +133,8 @@ class WsConnection:
         """Perform the server side of the upgrade. Returns request headers."""
         method, target, headers = _read_headers(self.rfile)
         path = target.split("?", 1)[0]
+        ua = str(headers.get("user-agent", ""))[:100]
+        ext = str(headers.get("sec-websocket-extensions", ""))[:100]
         if method != "GET" or path != WS_PATH:
             raise WsError("not a websocket upgrade")
         upgrade = headers.get("upgrade", "").lower()
@@ -157,6 +159,16 @@ class WsConnection:
             self.wfile.flush()
         except Exception as e:
             raise WsError(f"handshake write failed: {e}")
+        # One-line handshake log: proves the upgrade reached us (peer + UA +
+        # offered extensions). Outside connections arrive via 127.0.0.1
+        # (funnel proxies locally), so UA/ext distinguish real browsers.
+        try:
+            import sys as _sys
+            _sys.stdout.write(
+                f"[ws] upgrade peer={self.peer} ua={ua} ext={ext or '-'}\n")
+            _sys.stdout.flush()
+        except Exception:
+            pass
         return headers
 
     # -- receiving ------------------------------------------------------

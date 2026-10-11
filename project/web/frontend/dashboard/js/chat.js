@@ -8,7 +8,7 @@
 import { openModal, closeModal, toast } from "./ui.js?v=8";
 import { navigate } from "./navigation.js?v=10";
 import { onPush } from "./events.js?v=1";
-import { onWsRaw, sendOp } from "./ws.js?v=3";
+import { onWsRaw, sendOp } from "./ws.js?v=4";
 import { remoteLiveUrl } from "./live-url.js?v=1";
 
 // WS answer/cancel helpers: same server ops as POST /api/chat_answer|cancel.

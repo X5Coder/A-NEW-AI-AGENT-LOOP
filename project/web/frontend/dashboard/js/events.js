@@ -7,7 +7,7 @@
  */
 "use strict";
 
-import { onWsPush, onWsHello, onWsStatus, ensureWs, isHttpFallback, isWsParked, retryWsNow } from "./ws.js?v=3";
+import { onWsPush, onWsHello, onWsStatus, ensureWs, isHttpFallback, isWsParked, retryWsNow, lastWsClose } from "./ws.js?v=4";
 
 const handlers = new Map(); // type -> Set<fn>
 const lastState = new Map(); // state types only (replayed to late subscribers)
@@ -122,6 +122,11 @@ function updateConnPill() {
       try { document.body.appendChild(pill); } catch (_) { return; }
     }
     pill.textContent = parked ? "● updates via fallback — tap to retry" : "● connecting live…";
+    try {
+      let c = { code: 0, reason: "" };
+      try { c = lastWsClose() || c; } catch (_) {}
+      if (c.code) pill.title = "Last socket close: code " + c.code + (c.reason ? " (" + c.reason + ")" : "") + " — tap to retry";
+    } catch (_) {}
     try {
       if (pillTimer) clearTimeout(pillTimer);
     } catch (_) {}

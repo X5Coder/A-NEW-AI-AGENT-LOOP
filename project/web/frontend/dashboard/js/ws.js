@@ -33,6 +33,7 @@ let parked = false; // true when reconnects are parked (quiet fallback mode)
 let parkedTimer = null;
 const MAX_ATTEMPTS = 5;
 const PARK_MS = 60000;
+let lastClose = { code: 0, reason: "" }; // last onclose detail (diagnostic)
 
 function retryDelay() {
   // Exponential backoff: 3s, 6s, 12s, 24s, then park.
@@ -80,6 +81,14 @@ function scheduleReconnect() {
 
 export function isWsParked() {
   return parked;
+}
+
+export function lastWsClose() {
+  try {
+    return { code: lastClose.code || 0, reason: String(lastClose.reason || "") };
+  } catch (_) {
+    return { code: 0, reason: "" };
+  }
 }
 
 export function retryWsNow() {
@@ -358,9 +367,22 @@ function connect() {
       resolve(null);
     };
     ws.onerror = dead;
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       clearUpgradeTimer();
       stopHeartbeat();
+      // Diagnostic: the close code is THE clue (1006 = network cut before any
+      // server bytes, 4401 = server refused the token, 1000/1001 = normal).
+      // Logged once as info (not an error flood) + kept for tap-to-retry pill.
+      try {
+        lastClose = { code: (ev && ev.code) || 0, reason: String((ev && ev.reason) || "").slice(0, 80) };
+      } catch (_) {}
+      try {
+        if (typeof console !== "undefined" && console.info) {
+          console.info("[ws] closed code=" + lastClose.code +
+            (lastClose.reason ? " reason=" + lastClose.reason : "") +
+            (failCount >= MAX_ATTEMPTS ? " (parked on fallback)" : ""));
+        }
+      } catch (_) {}
       if (closedByUs) {
         setOnline(false);
         resolve(null);
