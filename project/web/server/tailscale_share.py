@@ -277,6 +277,7 @@ def login_interactive(bin_path: str) -> bool:
 
 FUNNEL_APPROVAL_RE = re.compile(r"https://login\.tailscale\.com/f/funnel[^\s'\"]*")
 LIVE_ROUTE_PATH = "/live/"
+LIVE_WS_PATH = "/websockify"
 LIVE_VIEWER_PORT = 6080
 
 
@@ -301,37 +302,48 @@ def _print_funnel_approval(link: str | None) -> None:
     print("  " + "=" * 66)
 
 
-def live_route_active() -> bool:
-    """True when the /live/ viewer route already exists in serve config."""
+def _serve_paths() -> set[str]:
+    """Path prefixes currently routed, or empty set. Never raises."""
     try:
         installed, _ = is_installed()
         if not installed:
-            return False
+            return set()
         proc = _run(["tailscale", "serve", "status", "--json"], timeout=15)
         data = json.loads(proc.stdout or "{}")
         web = data.get("Web") if isinstance(data, dict) else None
         if not isinstance(web, dict):
-            return False
+            return set()
+        out: set[str] = set()
         for cfg in web.values():
             handlers = cfg.get("Handlers") if isinstance(cfg, dict) else None
-            if isinstance(handlers, dict) and LIVE_ROUTE_PATH in handlers:
-                return True
-        return False
+            if isinstance(handlers, dict):
+                out.update(str(h) for h in handlers)
+        return out
+    except Exception:
+        return set()
+
+
+def live_route_active() -> bool:
+    """True when the /live/ viewer route already exists in serve config."""
+    try:
+        return LIVE_ROUTE_PATH in _serve_paths()
     except Exception:
         return False
 
 
 def ensure_live_route() -> bool:
-    """Expose the live viewer at <tailnet>/live/ (idempotent, best-effort).
+    """Expose the live viewer through the funnel (idempotent, best-effort).
 
-    The library mints viewer links on 127.0.0.1:6080, unreachable from a
-    remote browser. One funnel path-route makes them reachable under the
-    same public hostname (the page + its websocket both live under /live/).
+    Two routes: /live/ (page + assets, WS when ?path= is given) and
+    /websockify (the viewer's default WS path, so even a bare page URL
+    streams). The library mints viewer links on 127.0.0.1:6080, unreachable
+    from a remote browser.
     Skips quietly when Tailscale is absent or the viewer is down (a later
     call after browser boot retries it). Never raises.
     """
     try:
-        if live_route_active():
+        paths = _serve_paths()
+        if LIVE_ROUTE_PATH in paths and LIVE_WS_PATH in paths:
             return True
         installed, bin_path = is_installed()
         if not installed or not bin_path:
@@ -347,10 +359,16 @@ def ensure_live_route() -> bool:
                 pass
         except Exception:
             return False  # viewer down: nothing to route yet
-        proc = _run([bin_path, "funnel", "--bg", "--set-path", LIVE_ROUTE_PATH,
-                     f"http://127.0.0.1:{LIVE_VIEWER_PORT}"], timeout=60)
-        if proc is not None and proc.returncode == 0 and live_route_active():
-            print("  OK: live viewer routed at <tailnet>/live/")
+        for route in (LIVE_ROUTE_PATH, LIVE_WS_PATH):
+            if route in _serve_paths():
+                continue
+            proc = _run([bin_path, "funnel", "--bg", "--set-path", route,
+                         f"http://127.0.0.1:{LIVE_VIEWER_PORT}"], timeout=60)
+            if proc is None or proc.returncode != 0:
+                print(f"  WARN: live route {route} not added "
+                      f"(exit {getattr(proc, 'returncode', '?')})")
+        if live_route_active():
+            print("  OK: live viewer routed at <tailnet>/live/ (+ WS path)")
             return True
         return False
     except Exception:
