@@ -49,7 +49,18 @@ def _load_model():
     raise RuntimeError(f"Failed to load built-in embedding model: {last_err}") from last_err
 
 
-def embed_texts(texts: List[str], normalize: bool = True) -> List[List[float]]:
+def embed_texts(texts: List[str], normalize: bool = True,
+                progress_label: str | None = None,
+                chunk_size: int = 16) -> List[List[float]]:
+    """Encode texts with the bundled model. Batching is intentional: one
+    encode call over many texts is far faster than one call per text
+    (single tokenizer/model overhead, vectorized forward pass).
+
+    progress_label: when set and the batch exceeds chunk_size, encode in
+    chunks and print one `done/total` line per chunk (bulk warmups such as
+    the installer, so a long CPU encode never looks hung). Single-text
+    callers pass nothing and stay silent, exactly as before.
+    """
     if not isinstance(texts, list):
         raise TypeError("texts must be list[str]")
     if not texts:
@@ -60,6 +71,20 @@ def embed_texts(texts: List[str], normalize: bool = True) -> List[List[float]]:
         if len(t) > 8000:
             raise ValueError("text too long (max 8000 chars)")
     model = _load_model()
+    if progress_label is None or len(texts) <= chunk_size:
+        return _encode_chunk(model, texts, normalize)
+    total = len(texts)
+    print(f"[{progress_label}] encoding {total} texts...", flush=True)
+    out: List[List[float]] = []
+    for start in range(0, total, chunk_size):
+        out.extend(_encode_chunk(model, texts[start:start + chunk_size], normalize))
+        done = min(start + chunk_size, total)
+        print(f"[{progress_label}] {done}/{total}", flush=True)
+    return out
+
+
+def _encode_chunk(model, texts: List[str], normalize: bool) -> List[List[float]]:
+    """Single encode call with bounded retries (max 3)."""
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:

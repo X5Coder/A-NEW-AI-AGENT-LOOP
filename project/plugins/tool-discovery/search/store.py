@@ -221,8 +221,9 @@ def ensure_embeddings(auto_create: bool = True) -> list[dict]:
         txt = f"{t.get('name','')} : {t.get('description','')}"
         texts.append(txt[:2000])
 
-    # Embed with bounded retries inside service
-    embeddings = embed_texts(texts, normalize=True)
+    # Embed with bounded retries inside service (chunked progress lines
+    # so a long first-time CPU encode never looks hung).
+    embeddings = embed_texts(texts, normalize=True, progress_label="tool-discovery")
 
     tools_with_emb = []
     for spec, emb in zip(tools, embeddings):

@@ -173,7 +173,7 @@ def ensure_embeddings(auto_create: bool = True) -> list[dict]:
     if not is_ready():
         raise FileNotFoundError("Embedding model folder is missing (project/embedding_model/). Copy it with the project and restart.")
     texts = [f"{t.get('name','')} : {t.get('description','')}"[:2000] for t in triggers]
-    embeddings = embed_texts(texts, normalize=True)
+    embeddings = embed_texts(texts, normalize=True, progress_label="trigger-discovery")
     with_emb = []
     for spec, emb in zip(triggers, embeddings):
         with_emb.append({"name": spec["name"], "description": spec["description"], "spec": spec, "embedding": emb})
