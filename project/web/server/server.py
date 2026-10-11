@@ -2226,6 +2226,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/ws":
+            # Safety net: /ws must be upgraded in handle() (MSG_PEEK route to
+            # serve_ws) before HTTP runs. If it ever lands here, the upgrade
+            # was missed — answer 426 (Upgrade Required) instead of falling
+            # through to the SPA shell (200 index.html), which fails the
+            # browser upgrade silently with no diagnostic.
+            self.send_response(426)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
         if self._auth_gate(is_post=False):
             return
         if parsed.path == "/api/auth/status":
@@ -5020,7 +5032,28 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 peer = ""
             try:
                 self.request.settimeout(3.0)
-                peek = self.request.recv(4096, _socket.MSG_PEEK)
+                # Wait for the full request line: proxies (funnel included)
+                # may deliver the upgrade headers in several TCP segments, and
+                # a single peek() can return a partial line that misroutes
+                # /ws to the HTTP handler (upgrade never completes, wss fails).
+                import time as _time
+                peek = b""
+                deadline = _time.monotonic() + 3.0
+                while True:
+                    try:
+                        chunk = self.request.recv(4096, _socket.MSG_PEEK)
+                    except Exception:
+                        break
+                    if chunk:
+                        peek = chunk[:8192]
+                    if (not chunk or b"\r\n" in peek or b"\n" in peek
+                            or len(chunk) >= 8192
+                            or _time.monotonic() >= deadline):
+                        break
+                    try:
+                        _time.sleep(0.01)
+                    except Exception:
+                        break
             except Exception:
                 peek = b""
             finally:
