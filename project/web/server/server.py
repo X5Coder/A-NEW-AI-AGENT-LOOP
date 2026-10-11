@@ -109,7 +109,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml and updates.json at the repo root).
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.16.0"
 
 UPDATE_REPO = "X5Coder/X5Agent"
 
@@ -4001,6 +4001,24 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 _events_emit_browser(force=True)
                 if tool in ("agent_control", "close_browser"):
                     _stage("live_end", None, None)
+                elif tool in ("live_preview", "show_preview", "restart_browser", "open_browser"):
+                    # Watch-only surface: the floating player must render the
+                    # PREVIEW token link, never the control one (control opens
+                    # as a handoff card / edge tab through its own path).
+                    links = _live_snapshot()
+                    purl = links.get("preview") if isinstance(links, dict) else ""
+                    if isinstance(purl, str) and purl.startswith(("http://", "https://")):
+                        _stage("live", {"mode": "preview",
+                                        "tool": tool,
+                                        "url": purl[:2000],
+                                        "view_only": True}, None)
+                    else:
+                        active = _live_active()
+                        if isinstance(active, dict) and active.get("url"):
+                            _stage("live", {"mode": active.get("mode"),
+                                            "tool": tool,
+                                            "url": active["url"],
+                                            "view_only": True}, None)
                 else:
                     active = _live_active()
                     if isinstance(active, dict) and active.get("url"):

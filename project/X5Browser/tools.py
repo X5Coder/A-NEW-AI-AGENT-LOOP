@@ -543,7 +543,30 @@ def execute_browser_tool(name: str, args: Any) -> dict:
             return {"event": event, "ok": False,
                     "error": (err or "preview unavailable")[:500],
                     "has_screenshot": False}
-        return {"event": event, "ok": True, "url": rep["url"][:2000],
+        # Watch-only flow: the floating player must render the PREVIEW token
+        # only. live_preview already answers the preview token link, but guard
+        # anyway: prefer the library's stable preview link, then force the
+        # watch-only query form as a last resort (token preserved).
+        purl = str(rep.get("url") or "")
+        try:
+            links = _svc.live_links()
+            cand = links.get("preview") if isinstance(links, dict) else ""
+            if isinstance(cand, str) and cand.startswith(("http://", "https://")):
+                purl = cand
+        except Exception:
+            pass
+        if "token=CTRL" in purl or "view_only=true" not in purl.lower():
+            try:
+                from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+                parts = urlsplit(purl)
+                q = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                     if k.lower() != "view_only"]
+                q.append(("view_only", "true"))
+                purl = urlunsplit((parts.scheme, parts.netloc, parts.path,
+                                   urlencode(q), parts.fragment))
+            except Exception:
+                pass
+        return {"event": event, "ok": True, "url": purl[:2000],
                 "view_only": True, "show_player": True,
                 "message": "Preview shown to the user (watch-only, floating window).",
                 "has_screenshot": False}

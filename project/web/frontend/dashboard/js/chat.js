@@ -3457,20 +3457,37 @@ function showLiveLink(live) {
   // right-edge tab so the user can drive it; the show_preview tool opens the
   // floating watch-only window (idempotent — no reopen when already on screen);
   // every other watch-only link keeps the existing right-edge tab.
+  // Guard: the floating preview player NEVER renders a control URL. If a
+  // control link ever arrives here (stale frame, mixed state), convert it to
+  // the watch-only form instead of opening an interactive surface.
   try {
-    const url = live && typeof live.url === "string" ? live.url : "";
+    let url = live && typeof live.url === "string" ? live.url : "";
     if (!url) return;
     markLiveSeen();
-    if (live.view_only === false) {
+    if (live.view_only === false && live.tool !== "show_preview") {
       showEdgeTab(url);
       return;
     }
     if (live.tool === "show_preview") {
-      showPreviewPlayer(url);
+      showPreviewPlayer(toPreviewUrl(url));
       return;
     }
     showEdgeTab(url);
   } catch (_) {}
+}
+
+function toPreviewUrl(url) {
+  // Force the watch-only form: the library mints a distinct preview token,
+  // so a control URL must never be shown in the preview player. Best-effort
+  // client-side guard (server already prefers the preview link): flip the
+  // explicit view_only flag to true, preserving token/scale/path.
+  try {
+    const u = new URL(String(url || ""), location.href);
+    u.searchParams.set("view_only", "true");
+    return u.toString();
+  } catch (_) {
+    return String(url || "");
+  }
 }
 
 function showCloseBrowserDialog() {
@@ -3558,8 +3575,10 @@ function syncPlayerContinue(player) {
 function showPreviewPlayer(url) {
   // show_preview tool: bring the floating preview window up (watch-only).
   // Already showing this exact link -> do nothing (no reopen, no flicker).
+  // The player is watch-only only: force the preview form so a control URL
+  // can never render interactive inside the floating template.
   try {
-    const clean = String(url || "");
+    const clean = toPreviewUrl(String(url || ""));
     if (!clean) return;
     markLiveSeen();
     const mini = document.getElementById("liveMini");
@@ -4529,7 +4548,7 @@ function renderRunFrame(frame) {
       try {
         const st = frame.media && frame.media.stream;
         if (st && typeof st.url === "string" && st.url) {
-          if (st.tool === "show_preview") showPreviewPlayer(st.url);
+          if (st.tool === "show_preview") showPreviewPlayer(toPreviewUrl(st.url));
           else if (st.view_only !== false) {
             markLiveSeen();
             showEdgeTab(st.url);

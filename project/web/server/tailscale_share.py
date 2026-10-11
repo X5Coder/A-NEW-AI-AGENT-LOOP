@@ -279,6 +279,94 @@ FUNNEL_APPROVAL_RE = re.compile(r"https://login\.tailscale\.com/f/funnel[^\s'\"]
 LIVE_ROUTE_PATH = "/live/"
 LIVE_WS_PATH = "/websockify"
 LIVE_VIEWER_PORT = 6080
+VIEWER_FILE = "x5-live.html"
+
+# The x5browser library draws a small "efficiency dot" (green = active,
+# orange = idle) inside its viewer page. The console renders the viewer in
+# borderless templates (floating preview, control cards) where the overlay
+# reads as clutter, so every deployed copy gets it hidden (details below).
+# Nothing else in the page is touched — the beacon/SSE logic keeps running.
+_DOT_HIDE_CSS = (
+    "\n        /* X5Agent: hide the efficiency-dot overlay "
+    "(borderless templates). */\n"
+    "        #efficiency { display: none !important; }\n"
+)
+_DOT_HIDE_DIV = '<div id="efficiency" title="browser active"></div>'
+_DOT_HIDE_DIV_NEW = ('<div id="efficiency" title="browser active" '
+                     'style="display:none !important"></div>')
+
+
+def strip_viewer_dot(path: str) -> bool:
+    """Hide the efficiency-dot overlay in one deployed viewer copy.
+
+    Idempotent (safe to re-run after library upgrades): adds a display:none
+    rule for #efficiency when the file has one, and hides the div itself.
+    Returns True when the file exists and carries no visible dot afterwards.
+    Never raises.
+    """
+    try:
+        from pathlib import Path as _Path
+
+        target = _Path(str(path))
+        if not target.is_file():
+            return False
+        text = target.read_text(encoding="utf-8")
+        changed = False
+        if _DOT_HIDE_CSS not in text and "#efficiency" in text:
+            marker = "\n    </style>"
+            if marker in text:
+                text = text.replace(marker, _DOT_HIDE_CSS + marker, 1)
+                changed = True
+        if _DOT_HIDE_DIV in text:
+            text = text.replace(_DOT_HIDE_DIV, _DOT_HIDE_DIV_NEW)
+            changed = True
+        if changed:
+            target.write_text(text, encoding="utf-8")
+        compact = text.replace(" ", "")
+        return ('id="efficiency"' not in text
+                or "display:none" in compact)
+    except Exception:
+        return False
+
+
+def strip_deployed_viewer_dots() -> int:
+    """Hide the dot in every deployed viewer copy. Returns files fixed.
+
+    Copies live in two places: the library package (source of future
+    deploys) and the served noVNC web root. Both are patched so the overlay
+    never comes back after a reinstall/redeploy. Never raises.
+    """
+    fixed = 0
+    try:
+        from pathlib import Path as _Path
+
+        candidates = [_Path("/usr/share/novnc") / VIEWER_FILE]
+        try:
+            import x5browser.live.web as _web  # type: ignore
+
+            candidates.append(_Path(str(_web.__path__[0])) / VIEWER_FILE)
+        except Exception:
+            pass
+        try:
+            import x5browser as _xb  # type: ignore
+
+            candidates.append(_Path(str(_xb.__path__[0])) / "live" / "web" / VIEWER_FILE)
+        except Exception:
+            pass
+        seen: set = set()
+        for cand in candidates:
+            key = str(cand)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if strip_viewer_dot(key):
+                    fixed += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return fixed
 
 
 def _print_funnel_approval(link: str | None) -> None:
@@ -344,6 +432,10 @@ def ensure_live_route() -> bool:
     try:
         paths = _serve_paths()
         if LIVE_ROUTE_PATH in paths and LIVE_WS_PATH in paths:
+            try:
+                strip_deployed_viewer_dots()
+            except Exception:
+                pass
             return True
         installed, bin_path = is_installed()
         if not installed or not bin_path:
@@ -369,6 +461,10 @@ def ensure_live_route() -> bool:
                       f"(exit {getattr(proc, 'returncode', '?')})")
         if live_route_active():
             print("  OK: live viewer routed at <tailnet>/live/ (+ WS path)")
+            try:
+                strip_deployed_viewer_dots()
+            except Exception:
+                pass
             return True
         return False
     except Exception:

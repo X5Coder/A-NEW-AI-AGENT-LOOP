@@ -221,6 +221,108 @@ _ENV_UNITS = ("x5-xvfb.service", "x5-vnc.service", "x5-novnc.service",
               "x5-cdp-relay.service", "x5-clipboard.service")
 
 
+def _parse_cmdline(pid: int) -> str:
+    """One process command line (single line) or ''. Never raises."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+        return raw.replace(b"\x00", b" ").decode("utf-8", "ignore").strip()
+    except Exception:
+        return ""
+
+
+def reap_stale_viewers() -> int:
+    """Kill duplicate viewer relays + orphaned headless Chromes. Returns kills.
+
+    One browser only: the websockify relay is a singleton on 6080 — when two
+    or more answer, the newest is kept and the rest are killed (a double relay
+    is how one click arrives twice / a minute late). Orphaned headless
+    Chromes (dead --user-data-dir under /tmp, parent gone) are killed too and
+    their stale profile dirs removed, so leaked /tmp profiles never pile up.
+    Scoped narrowly (cmdline match), bounded, best-effort. Never raises, and
+    never touches the X5 live Chrome (its profile lives under
+    /var/lib/x5live-profile, never /tmp).
+    """
+    kills = 0
+    try:
+        import os as _os
+        import shutil as _shutil
+        import signal as _signal
+        import subprocess as _sp
+
+        me = _os.getpid()
+        # 1) Duplicate websockify relays on 6080: keep the newest, kill extras.
+        try:
+            proc = _sp.run(["pgrep", "-f", "websockify.*6080"],
+                           capture_output=True, text=True, timeout=15)
+            pids = sorted({int(t) for t in (proc.stdout or "").split()
+                           if t.strip().isdigit() and int(t) != me})
+        except Exception:
+            pids = []
+        if len(pids) > 1:
+            try:
+                starts = []
+                for pid in pids:
+                    try:
+                        with open(f"/proc/{pid}/stat", "r",
+                                  encoding="utf-8") as fh:
+                            starts.append((int(fh.read().split()[21]), pid))
+                    except Exception:
+                        continue
+                keep = max(starts)[1] if starts else pids[-1]
+            except Exception:
+                keep = pids[-1]
+            for pid in pids:
+                if pid == keep:
+                    continue
+                try:
+                    _os.kill(pid, _signal.SIGKILL)
+                    kills += 1
+                except Exception:
+                    continue
+        # 2) Orphaned headless Chromes: --user-data-dir under /tmp that no
+        # longer exists (leaked profile) or whose parent is gone (init-held).
+        try:
+            proc = _sp.run(["pgrep", "-f", "user-data-dir=/tmp/"],
+                           capture_output=True, text=True, timeout=15)
+            suspects = [int(t) for t in (proc.stdout or "").split()
+                        if t.strip().isdigit() and int(t) != me]
+        except Exception:
+            suspects = []
+        import re as _re
+        for pid in suspects:
+            try:
+                cmd = _parse_cmdline(pid)
+                if "user-data-dir=/tmp/" not in cmd:
+                    continue
+                m = _re.search(r"user-data-dir=(\S+)", cmd)
+                profile = m.group(1) if m else ""
+                try:
+                    with open(f"/proc/{pid}/stat", "r",
+                              encoding="utf-8") as fh:
+                        ppid = int(fh.read().split()[3])
+                except Exception:
+                    ppid = -1
+                orphan = (ppid in (0, 1))
+                stale_profile = bool(profile) and not Path(profile).exists()
+                if not (orphan or stale_profile):
+                    continue
+                try:
+                    _os.kill(pid, _signal.SIGKILL)
+                    kills += 1
+                except Exception:
+                    continue
+                try:
+                    if profile and profile.startswith("/tmp/") and len(profile) > 5:
+                        _shutil.rmtree(profile, ignore_errors=True)
+                except Exception:
+                    pass
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return kills
+
+
 def _env_units_active(stack: Any) -> bool:
     """True when every viewer unit is active (one bounded status call)."""
     try:
@@ -663,12 +765,23 @@ def _ensure_remote_live() -> None:
 
     Called once per successful boot/adopt in a daemon thread (never blocks
     the boot): if Tailscale funnel is on and the viewer answers locally,
-    its route is (re)ensured so funnel links keep working. Never raises.
+    its route is (re)ensured so funnel links keep working. Also hides the
+    library viewer overlay dot in every deployed copy (idempotent).
+    Never raises.
     """
     def _run() -> None:
         try:
-            from web.server.tailscale_share import ensure_live_route
+            from web.server.tailscale_share import ensure_live_route, strip_deployed_viewer_dots
             ensure_live_route()
+            try:
+                strip_deployed_viewer_dots()
+            except Exception:
+                pass
+            try:
+                from X5Browser.service import reap_stale_viewers
+                reap_stale_viewers()
+            except Exception:
+                pass
         except Exception:
             pass
 

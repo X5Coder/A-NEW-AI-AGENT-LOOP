@@ -29,7 +29,8 @@ for dead in ("live_cached", "note_live", "_LIVE_URLS", "_LIVE_LOCK",
              "_browser_alive_now", "_restart_relay", "_revive_relay",
              "_boot_wsl", "_windows_can_reach_stack"):
     assert not hasattr(svc, dead), f"old live helper still present: {dead}"
-for needed in ("live_links", "status_report", "_ensure_stack_up"):
+for needed in ("live_links", "status_report", "_ensure_stack_up",
+               "reap_stale_viewers"):
     assert hasattr(svc, needed), f"missing new helper: {needed}"
 print("old live cache/heal helpers removed OK")
 
@@ -166,6 +167,44 @@ try:
     bt._attach_auto_preview(out)
     assert out.get("preview", {}).get("url") == links["preview"], out
     print("auto-preview copies the library preview link OK")
+
+    # show_preview answers the watch-only preview token only (never a
+    # control link in the floating player).
+    _real_call = svc.call_tool
+    _real_links = svc.live_links
+    try:
+        svc.call_tool = lambda *a, **k: dict(_FakeBrowser("preview").live_report())
+        svc.live_links = lambda: {"running": True,
+                                  "control": "http://127.0.0.1:8790/view?token=CTRL&scale=true",
+                                  "preview": "http://127.0.0.1:8790/view?token=PREV&scale=true&view_only=true",
+                                  "owner": "agent"}
+        sp = bt.execute_browser_tool("show_preview", {})
+        assert sp["ok"] is True and sp["view_only"] is True, sp
+        assert "token=PREV" in sp["url"] and "token=CTRL" not in sp["url"], sp
+        print("show_preview answers the preview token only OK")
+    finally:
+        svc.call_tool = _real_call
+        svc.live_links = _real_links
+
+    # Viewer overlay dot: hidden idempotently in a deployed copy.
+    import tempfile as _tf
+    with _tf.NamedTemporaryFile("w+", suffix=".html", delete=False) as _tmp:
+        _tmp.write("<html><head><style>\n    </style></head><body>"
+                   '<div id="efficiency" title="browser active"></div></body></html>')
+        _tmp_path = _tmp.name
+    try:
+        from web.server.tailscale_share import strip_viewer_dot
+        assert strip_viewer_dot(_tmp_path) is True
+        _text = Path(_tmp_path).read_text(encoding="utf-8")
+        assert "display:none" in _text.replace(" ", ""), _text[:300]
+        assert strip_viewer_dot(_tmp_path) is True  # idempotent re-run
+        assert strip_viewer_dot(_tmp_path + ".missing") is False
+        print("viewer efficiency-dot strip is idempotent OK")
+    finally:
+        try:
+            Path(_tmp_path).unlink()
+        except Exception:
+            pass
 
     # owner = user -> the interactive control link is the current card
     svc._browser = _FakeBrowser("control")

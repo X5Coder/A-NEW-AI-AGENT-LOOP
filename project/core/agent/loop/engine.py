@@ -492,11 +492,28 @@ def _event_media(name: str, result: dict) -> dict | None:
         # assistant message (see _collect_final_audio), never inside the step.
         _stream_url = None
         _stream_vo = True
-        if name in _LIVE_PAUSE_TOOLS or name in _LIVE_EVENT_TOOLS or name == "live_preview" or name == "show_preview":
-            url = out.get("url")
+        if name in _LIVE_PAUSE_TOOLS or name in _LIVE_EVENT_TOOLS:
+            # Watch-only flow: show_preview/live_preview/agent_control must
+            # carry the PREVIEW token link (out["url"] from live_preview is
+            # already the preview token; guard anyway). The paused handoff
+            # (human/take control) carries the interactive control URL.
+            src = out
+            if name in ("show_preview", "live_preview", "agent_control"):
+                try:
+                    from X5Browser.service import live_links as _live_links
+                    _links = _live_links()
+                    _purl = _links.get("preview") if isinstance(_links, dict) else ""
+                    if isinstance(_purl, str) and _purl.startswith(("http://", "https://")):
+                        src = {**out, "url": _purl, "view_only": True}
+                except Exception:
+                    src = out
+            url = src.get("url")
             if isinstance(url, str) and url.startswith(("http://", "https://")):
                 _stream_url = url[:2000]
-                _stream_vo = bool(out.get("view_only", name == "live_preview"))
+                if name in ("show_preview", "live_preview", "agent_control"):
+                    _stream_vo = True
+                else:
+                    _stream_vo = bool(src.get("view_only", False))
         if _stream_url is None:
             pv = out.get("preview")
             if isinstance(pv, dict):
