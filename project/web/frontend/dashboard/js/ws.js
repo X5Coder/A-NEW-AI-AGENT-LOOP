@@ -22,6 +22,50 @@ let closedByUs = false;
 let wsOnline = false; // true only after auth_ok on the socket
 let httpFallback = false; // true when the WS upgrade never completes (proxy/funnel drops it)
 let everAuthed = false; // any auth_ok on this page load (token is valid)
+let lastActivity = 0; // last inbound frame: freshly-opened sockets skip heartbeat
+let heartbeatTimer = null;
+
+function noteActivity() {
+  try {
+    lastActivity = Date.now();
+  } catch (_) {}
+}
+
+function stopHeartbeat() {
+  try {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+  } catch (_) {}
+  heartbeatTimer = null;
+}
+
+function startHeartbeat() {
+  // Client heartbeat: a ping op every 25s keeps the funnel/proxy route and
+  // the server idle-watchdog (75s) from killing a quiet-but-healthy socket.
+  // No response = a dead socket: close it so the normal reconnect path runs.
+  stopHeartbeat();
+  noteActivity();
+  try {
+    heartbeatTimer = setInterval(() => {
+      try {
+        if (!sock || sock.readyState !== 1) return;
+        if (!wsOnline) return;
+        if (Date.now() - lastActivity < 25000) {
+          sendOp("ping", {}).catch(() => {});
+          return;
+        }
+        // Silent >25s on an "open" socket: ask once, drop when unanswered.
+        let answered = false;
+        const probe = sendOp("ping", {});
+        probe.then(() => { answered = true; }, () => {});
+        setTimeout(() => {
+          if (!answered) {
+            try { sock.close(4000, "heartbeat timeout"); } catch (_) {}
+          }
+        }, 10000);
+      } catch (_) {}
+    }, 25000);
+  } catch (_) {}
+}
 
 export function getWsToken() {
   try {
@@ -142,6 +186,9 @@ function connect() {
       } catch (_) {}
     };
     ws.onmessage = (e) => {
+      try {
+        if (typeof e.data === "string") noteActivity();
+      } catch (_) {}
       let m;
       try {
         m = JSON.parse(e.data);
@@ -155,6 +202,7 @@ function connect() {
         httpFallback = false;
         clearUpgradeTimer();
         setOnline(true);
+        startHeartbeat();
         dispatchHello(m.hello || {});
         resolve(ws);
         return;
@@ -237,6 +285,7 @@ function connect() {
     ws.onerror = dead;
     ws.onclose = () => {
       clearUpgradeTimer();
+      stopHeartbeat();
       if (closedByUs) {
         setOnline(false);
         resolve(null);
@@ -336,6 +385,7 @@ export function sendOp(op, params) {
 
 export function closeWs() {
   closedByUs = true;
+  stopHeartbeat();
   try {
     if (sock) sock.close(1000, "tab closed");
   } catch (_) {}

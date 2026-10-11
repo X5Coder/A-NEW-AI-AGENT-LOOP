@@ -109,7 +109,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml and updates.json at the repo root).
-APP_VERSION = "0.17.3"
+APP_VERSION = "0.17.4"
 
 UPDATE_REPO = "X5Coder/X5Agent"
 
@@ -1735,6 +1735,7 @@ def serve_ws(conn, peer: str = "") -> None:
                                 _fr = [dict(f) for f in _RUN_FRAMES]
                             data = {"active": bool(_a2), "input": _pv2, "frames": _fr}
                         elif op == "ping":
+                            last_in = time.monotonic()
                             data = {"pong": True}
                         else:
                             data = {"error": f"unknown op: {op}"}

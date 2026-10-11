@@ -7,7 +7,7 @@
  */
 "use strict";
 
-import { onWsPush, onWsHello, onWsStatus, ensureWs, isHttpFallback } from "./ws.js?v=1";
+import { onWsPush, onWsHello, onWsStatus, ensureWs, isHttpFallback } from "./ws.js?v=2";
 
 const handlers = new Map(); // type -> Set<fn>
 const lastState = new Map(); // state types only (replayed to late subscribers)
