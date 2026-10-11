@@ -602,6 +602,9 @@ def main(argv=None) -> int:
     if not args.skip_firewall:
         ensure_firewall()
     if not ask_credentials(email=args.email, password=args.password):
+        print("  hint: stdin is not interactive - pass --email/--password "
+              "flags (or X5_EMAIL/X5_PASSWORD env) for non-interactive use",
+              file=sys.stderr)
         return 1
     setup_public_share(mode=args.public, assume_yes=args.yes)
     if not args.no_open_browser:

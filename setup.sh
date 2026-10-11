@@ -47,8 +47,20 @@ for a in "$@"; do
 done
 
 cd "$DIR/project"
+# stdin fix (the classic curl|bash problem): when launched as
+# `curl ... | bash`, this shell's stdin is the finished pipe (EOF), so the
+# installer's interactive prompts (email/password) would die instantly.
+# Recover the real terminal for prompts when there is one behind the pipe.
+if [ -t 0 ]; then
+  TTY_IN="/dev/stdin"    # already a terminal, keep it
+elif [ -e /dev/tty ]; then
+  TTY_IN="/dev/tty"      # pipe/file stdin but a terminal exists: use it
+else
+  TTY_IN="/dev/stdin"    # truly headless: flags/env must supply everything
+fi
 if [ "$WANT_RUN" = "1" ]; then
-  exec "$PY" install.py --run "${ARGS[@]}"
+  # shellcheck disable=SC2094
+  exec "$PY" install.py --run "${ARGS[@]}" < "$TTY_IN"
 else
   FILTERED=()
   for a in "${ARGS[@]}"; do
@@ -56,5 +68,6 @@ else
       FILTERED+=("$a")
     fi
   done
-  exec "$PY" install.py "${FILTERED[@]:-}"
+  # shellcheck disable=SC2094
+  exec "$PY" install.py "${FILTERED[@]:-}" < "$TTY_IN"
 fi
