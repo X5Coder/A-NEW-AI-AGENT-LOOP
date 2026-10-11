@@ -24,6 +24,76 @@ let httpFallback = false; // true when the WS upgrade never completes (proxy/fun
 let everAuthed = false; // any auth_ok on this page load (token is valid)
 let lastActivity = 0; // last inbound frame: freshly-opened sockets skip heartbeat
 let heartbeatTimer = null;
+// Bounded reconnect: an endless 3s retry loop floods the console and the
+// server (Safari/iOS may refuse wss upgrades the server cannot fix — e.g.
+// extension negotiation or browser policy). After MAX_ATTEMPTS consecutive
+// failures we park quietly on HTTP/SSE fallback and retry rarely.
+let failCount = 0;
+let parked = false; // true when reconnects are parked (quiet fallback mode)
+let parkedTimer = null;
+const MAX_ATTEMPTS = 5;
+const PARK_MS = 60000;
+
+function retryDelay() {
+  // Exponential backoff: 3s, 6s, 12s, 24s, then park.
+  const step = Math.min(failCount, 4);
+  return 3000 * Math.pow(2, step);
+}
+
+function noteFailure() {
+  failCount += 1;
+  return failCount;
+}
+
+function noteSuccess() {
+  failCount = 0;
+  parked = false;
+  try {
+    if (parkedTimer) clearTimeout(parkedTimer);
+  } catch (_) {}
+  parkedTimer = null;
+}
+
+function scheduleReconnect() {
+  // Returns the delay used (0 = parked, no reconnect scheduled).
+  if (failCount >= MAX_ATTEMPTS) {
+    // Park: stay quiet on HTTP/SSE fallback, probe rarely in background.
+    parked = true;
+    httpFallback = true;
+    setOnline(false);
+    try {
+      if (parkedTimer) clearTimeout(parkedTimer);
+    } catch (_) {}
+    try {
+      parkedTimer = setTimeout(() => {
+        parked = false;
+        failCount = 0;
+        connect();
+      }, PARK_MS);
+    } catch (_) {}
+    return 0;
+  }
+  const delay = retryDelay();
+  setTimeout(connect, delay);
+  return delay;
+}
+
+export function isWsParked() {
+  return parked;
+}
+
+export function retryWsNow() {
+  // Manual retry (e.g. from a status pill): reset the budget and reconnect.
+  try {
+    if (parkedTimer) clearTimeout(parkedTimer);
+  } catch (_) {}
+  parkedTimer = null;
+  parked = false;
+  failCount = 0;
+  connect();
+}
+let lastActivity = 0; // last inbound frame: freshly-opened sockets skip heartbeat
+let heartbeatTimer = null;
 
 function noteActivity() {
   try {
@@ -156,7 +226,8 @@ function connect() {
     try {
       ws = new WebSocket(wsUrl());
     } catch (_) {
-      setTimeout(connect, 3000);
+      noteFailure();
+      scheduleReconnect();
       resolve(null);
       return;
     }
@@ -168,7 +239,9 @@ function connect() {
     // That is a transport block, NOT a bad token: never log out for it.
     const upgradeTimer = setTimeout(() => {
       if (!opened && !authed) {
-        httpFallback = true;
+        // NOTE: no httpFallback/close here — dead()/onclose below own the
+        // single failure path (bounded retry + park). Closing here would
+        // double-count one failure as two.
         try {
           ws.close();
         } catch (_) {}
@@ -201,6 +274,7 @@ function connect() {
         everAuthed = true;
         httpFallback = false;
         clearUpgradeTimer();
+        noteSuccess();
         setOnline(true);
         startHeartbeat();
         dispatchHello(m.hello || {});
@@ -238,16 +312,17 @@ function connect() {
     const dead = () => {
       clearUpgradeTimer();
       if (!opened && !authed) {
-        // Upgrade never completed (proxy/funnel drops WS): transport block,
-        // NOT a bad token. Stay on the page on HTTP fallback, retry WS
-        // quietly in the background for when the route allows it.
+        // Upgrade never completed (proxy/funnel/browser drops WS): transport
+        // block, NOT a bad token. Bounded retry with backoff, then park
+        // quietly on HTTP/SSE fallback (same page still works).
+        noteFailure();
         httpFallback = true;
         setOnline(false);
         try {
           ws.close();
         } catch (_) {}
         sock = null;
-        setTimeout(connect, 10000);
+        scheduleReconnect();
         resolve(null);
         return;
       }
@@ -261,7 +336,8 @@ function connect() {
             ws.close();
           } catch (_) {}
           sock = null;
-          setTimeout(connect, 3000);
+          noteFailure();
+          scheduleReconnect();
           resolve(null);
           return;
         }
@@ -279,7 +355,8 @@ function connect() {
       } catch (_) {}
       sock = null;
       setOnline(false);
-      setTimeout(connect, 3000);
+      noteFailure();
+      scheduleReconnect();
       resolve(null);
     };
     ws.onerror = dead;
@@ -292,17 +369,22 @@ function connect() {
         return;
       }
       if (!opened && !authed) {
-        // Same transport-block case as dead(): HTTP fallback + quiet retry.
-        httpFallback = true;
-        setOnline(false);
-        sock = null;
-        for (const [, p] of pending) {
-          try {
-            p.reject(new Error("ws closed"));
-          } catch (_) {}
+        // Same transport-block case as dead(): bounded retry, then park.
+        // Guard: dead() above may have already counted this failure
+        // (onerror fires before onclose for the same drop) — count once.
+        if (sock === ws) {
+          noteFailure();
+          httpFallback = true;
+          setOnline(false);
+          sock = null;
+          for (const [, p] of pending) {
+            try {
+              p.reject(new Error("ws closed"));
+            } catch (_) {}
+          }
+          pending.clear();
+          scheduleReconnect();
         }
-        pending.clear();
-        setTimeout(connect, 10000);
         resolve(null);
         return;
       }
@@ -315,7 +397,8 @@ function connect() {
         } catch (_) {}
       }
       pending.clear();
-      setTimeout(connect, 3000);
+      noteFailure();
+      scheduleReconnect();
       resolve(null);
     };
   });

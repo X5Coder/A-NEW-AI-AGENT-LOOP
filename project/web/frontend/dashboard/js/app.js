@@ -6,7 +6,7 @@
 
 import { initModal } from "./ui.js?v=9";
 import { initNavigation } from "./navigation.js?v=11";
-import { startEvents } from "./events.js?v=1";
+import { startEvents } from "./events.js?v=2";
 import { initWorkspace } from "./workspace.js?v=13";
 import { initDashboard } from "./dashboard.js?v=10";
 import { initCharts } from "./charts.js?v=12";

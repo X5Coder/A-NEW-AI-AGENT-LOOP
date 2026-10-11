@@ -7,7 +7,7 @@
  */
 "use strict";
 
-import { onWsPush, onWsHello, onWsStatus, ensureWs, isHttpFallback } from "./ws.js?v=2";
+import { onWsPush, onWsHello, onWsStatus, ensureWs, isHttpFallback, isWsParked, retryWsNow } from "./ws.js?v=3";
 
 const handlers = new Map(); // type -> Set<fn>
 const lastState = new Map(); // state types only (replayed to late subscribers)
@@ -90,6 +90,45 @@ function onTransportStatus(online) {
   try {
     if (!online && isHttpFallback()) startSseFallback();
     else if (online) stopSseFallback();
+    updateConnPill();
+  } catch (_) {}
+}
+
+let pillTimer = null;
+
+function updateConnPill() {
+  // One quiet status pill (toolbar): live / fallback / retrying — never a
+  // console flood. Removed when the socket is live again.
+  try {
+    let pill = document.getElementById("x5-conn-pill");
+    let parked = false;
+    try { parked = isWsParked(); } catch (_) {}
+    if (!isHttpFallback()) {
+      if (pill && pill.parentNode) pill.parentNode.removeChild(pill);
+      return;
+    }
+    if (!pill) {
+      pill = document.createElement("button");
+      pill.id = "x5-conn-pill";
+      pill.type = "button";
+      pill.title = "Live updates over the push channel — tap to retry";
+      pill.style.cssText = "position:fixed;bottom:14px;left:14px;z-index:9999;"
+        + "padding:6px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.18);"
+        + "background:rgba(20,20,25,.85);color:#ffd479;font-size:12px;cursor:pointer;"
+        + "backdrop-filter:blur(6px);";
+      try {
+        pill.addEventListener("click", () => { try { retryWsNow(); } catch (_) {} });
+      } catch (_) {}
+      try { document.body.appendChild(pill); } catch (_) { return; }
+    }
+    pill.textContent = parked ? "● updates via fallback — tap to retry" : "● connecting live…";
+    try {
+      if (pillTimer) clearTimeout(pillTimer);
+    } catch (_) {}
+    // Re-check shortly: the pill must vanish the moment WS recovers.
+    try {
+      pillTimer = setTimeout(updateConnPill, 5000);
+    } catch (_) {}
   } catch (_) {}
 }
 
