@@ -86,7 +86,7 @@ def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
 
 
 def main(argv=None) -> int:
-    """Serve now on 0.0.0.0, restarting a running server first."""
+    """Serve now on loopback, restarting a running server first."""
     import argparse
 
     p = argparse.ArgumentParser(
@@ -107,7 +107,10 @@ def main(argv=None) -> int:
             return 1
     from web.server.server import run
 
-    return run(host="0.0.0.0", port=args.port, public=args.public)
+    # Loopback only: remote access goes through the Tailscale funnel
+    # (which proxies to 127.0.0.1 and always requires the owner login),
+    # never a public bind.
+    return run(host="127.0.0.1", port=args.port, public=args.public)
 
 
 if __name__ == "__main__":

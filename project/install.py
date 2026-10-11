@@ -740,44 +740,6 @@ def _install_tailscale() -> bool:
         return False
 
 
-def _reachable_url(port: int = CONSOLE_PORT) -> str:
-    """Best URL to open the console from another machine.
-
-    Prefers the public IP (what a VPS user actually needs), falls back to
-    the LAN IP, then loopback. Best-effort, short timeouts, never raises.
-    """
-    lan = ""
-    try:
-        import socket as _socket
-
-        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))  # no packets sent, routing lookup only
-            lan = str(s.getsockname()[0] or "")
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-    except Exception:
-        lan = ""
-    try:
-        import re as _re
-        import urllib.request as _url
-
-        req = _url.Request("https://api.ipify.org",
-                           headers={"User-Agent": "x5agent-installer"})
-        with _url.urlopen(req, timeout=8) as r:
-            pub = r.read().decode("utf-8").strip()
-        if _re.match(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$", pub):
-            return f"http://{pub}:{port}/"
-    except Exception:
-        pass
-    if lan and not lan.startswith("127."):
-        return f"http://{lan}:{port}/"
-    return f"http://127.0.0.1:{port}/"
-
-
 def main(argv=None) -> int:
     args = parse_args(argv)
     print("=" * 70)
@@ -823,7 +785,7 @@ def main(argv=None) -> int:
         except Exception:
             pass
     print("\n" + "=" * 70)
-    print(f"  Web Server (Local):  {_reachable_url()}")
+    print(f"  Web Server (Local):  {UI_URL}")
     print(f"  Web Server (Public): {public_url or 'off - ' + public_reason}")
     print("  Server Running Now" if args.run else "  Server Ready")
     print("=" * 70)
@@ -849,7 +811,7 @@ def main(argv=None) -> int:
                 return 1
         print("\n[install] starting console now (--run)...")
         cmd = [sys.executable, "-m", "web.server.server",
-               "--host", "0.0.0.0", "--port", "7777"]
+               "--host", "127.0.0.1", "--port", "7777"]
         if public_mode:
             cmd.append("--public")
         os.chdir(str(PROJECT_ROOT))

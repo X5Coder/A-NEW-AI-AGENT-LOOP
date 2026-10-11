@@ -109,7 +109,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml and updates.json at the repo root).
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.0"
 
 UPDATE_REPO = "X5Coder/X5Agent"
 
@@ -4136,6 +4136,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     _AUTH_PUBLIC_POST = frozenset({
         "/api/auth/login", "/api/auth/setup",
     })
+    # Internal gateway dispatcher (same machine, cookie-less) may POST only
+    # these endpoints from loopback. NOTHING else is exempt from login: the
+    # Tailscale funnel also arrives via 127.0.0.1, so a blanket loopback
+    # bypass would let the whole internet in without a session.
+    _GATEWAY_LOOPBACK_POST = frozenset({
+        "/api/chat_stream", "/api/chat_answer", "/api/chat_cancel",
+    })
 
     def _auth_gate(self, is_post: bool) -> bool:
         """Enforce the owner gate. Returns True when the request was answered.
@@ -4173,8 +4180,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 peer = self.client_address[0] if self.client_address else ""
             except Exception:
                 peer = ""
-            if peer in ("127.0.0.1", "::1"):
-                return False  # internal loopback (gateway dispatcher)
+            if (peer in ("127.0.0.1", "::1") and is_post
+                    and path in self._GATEWAY_LOOPBACK_POST):
+                return False  # internal gateway dispatcher only (narrow set above)
             if path.startswith("/api/"):
                 self._send_json({"error": "login required"}, status=401)
             else:
@@ -4387,14 +4395,7 @@ def _print_final_report(port: int, public_url: str) -> None:
     Never raises.
     """
     try:
-        if str(PROJECT_ROOT) not in sys.path:
-            sys.path.insert(0, str(PROJECT_ROOT))
-        try:
-            from install import _reachable_url
-
-            local = _reachable_url(port)
-        except Exception:
-            local = f"http://127.0.0.1:{port}/"
+        local = f"http://127.0.0.1:{port}/"
         cleared = False
         try:
             import shutil as _shutil

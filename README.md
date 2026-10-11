@@ -26,7 +26,9 @@ curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bas
 What the one-liner does: clones (or fast-forward updates) the repo into
 `~/X5Agent`, auto-installs dependencies (`pip install -e .` inside
 `install.py` when missing), runs the full installer (env + browser doctor +
-owner + firewall), then starts the console on `0.0.0.0:7777`.
+owner once + firewall), then starts the console on `127.0.0.1:7777`
+(localhost only — remote access goes through the Tailscale Funnel public
+link, which always requires the owner login first).
 Re-running it only updates the source (`git pull --ff-only`, data untouched).
 
 **Manual (Linux / Mac)**
@@ -38,15 +40,17 @@ python3.12 install.py --run
 ```
 
 `install.py --run` = install + start in one step (dependencies auto-install,
-server binds `0.0.0.0:7777` so the VPS public IP works). The owner email +
-password are asked only once (saved locally, skipped on later runs).
+server binds `127.0.0.1:7777` - localhost only, never exposed publicly).
+The owner email + password are asked only once (saved locally, skipped on
+later runs). Every browser visit lands on the login page until the owner
+signs in (session cookie kept after that).
 Without `--run` it only installs; then start manually with `x5agent`.
 
 **Start directly (from anywhere, no update check)**
 
 ```bash
-x5agent              # serve now on 0.0.0.0:7777
-x5agent --public     # also enable the Tailscale Funnel public link
+x5agent              # serve now on 127.0.0.1:7777 (localhost only)
+x5agent --public     # also enable the Tailscale Funnel public link (login required)
 ```
 
 The `x5agent` command is installed on PATH by `pip install -e .`
