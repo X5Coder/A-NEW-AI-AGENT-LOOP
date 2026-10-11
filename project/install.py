@@ -93,7 +93,11 @@ def ensure_dependencies() -> bool:
 
     This is what collapses the old 2-step flow
     (`pip install -e .` then `python install.py`) into a single command.
-    Bounded: one pip run, 10-minute timeout, never retries in a loop.
+    First refreshes the build toolchain (pip/setuptools/wheel/packaging)
+    because stock Ubuntu python3.10 ships an old pip+setuptools pair that
+    fails editable installs with
+    `canonicalize_version() got ... strip_trailing_zero`.
+    Bounded: two pip runs max, 10-minute timeout each, never loops.
     Returns True when the required packages import cleanly afterwards.
     """
     missing = []
@@ -106,6 +110,16 @@ def ensure_dependencies() -> bool:
         return True
     print(f"  installing missing packages: {', '.join(missing)} (pip install -e .)...")
     try:
+        tool = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-U",
+             "pip", "setuptools", "wheel", "packaging>=24.2"],
+            cwd=str(PROJECT_ROOT), timeout=600,
+        )
+        if tool.returncode == 0:
+            _ok("build toolchain refreshed (pip/setuptools/wheel/packaging)")
+        else:
+            _warn(f"toolchain refresh exited {tool.returncode} - "
+                  "trying install anyway")
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-e", "."],
             cwd=str(PROJECT_ROOT), timeout=600,

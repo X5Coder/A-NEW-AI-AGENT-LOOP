@@ -4,7 +4,7 @@ version = "0.8.0"
 description = "Professional Agent Loop with built-in embedding model and universal AI model connections (AI Models templates)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "X5Agent" }]
 dependencies = [
     "huggingface_hub>=0.25",
