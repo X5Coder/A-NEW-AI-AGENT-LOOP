@@ -1,9 +1,10 @@
 """The `x5agent` command (installed on PATH via pip install -e .).
 
 Starts the console directly: no update check, no prompts, no install steps.
+Public link on by default (like install --run); pass --no-public for local only.
 Restart semantics: a running server is stopped (graceful, then forced)
 before the fresh one binds.
-Usage from anywhere:  x5agent [--public] [--port 7777]
+Usage from anywhere:  x5agent [--no-public] [--port 7777]
 """
 from __future__ import annotations
 
@@ -94,6 +95,8 @@ def main(argv=None) -> int:
         description="X5Agent console - serve now (no update check)")
     p.add_argument("--public", action="store_true",
                    help="Also expose via Tailscale Funnel (permanent public https URL)")
+    p.add_argument("--no-public", action="store_true",
+                   help="Local console only (skip the funnel)")
     p.add_argument("--port", type=int, default=DEFAULT_PORT,
                    help="Port to bind (default 7777)")
     args = p.parse_args(argv)
@@ -109,8 +112,9 @@ def main(argv=None) -> int:
 
     # Loopback only: remote access goes through the Tailscale funnel
     # (which proxies to 127.0.0.1 and always requires the owner login),
-    # never a public bind.
-    return run(host="127.0.0.1", port=args.port, public=args.public)
+    # never a public bind. Public link on unless explicitly disabled.
+    return run(host="127.0.0.1", port=args.port,
+               public=(args.public or not args.no_public))
 
 
 if __name__ == "__main__":
