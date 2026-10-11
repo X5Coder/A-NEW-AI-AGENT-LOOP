@@ -147,13 +147,38 @@ def _extract_login_url(text: str) -> str | None:
     return match.group(0) if match else None
 
 
+def _open_url_best_effort(url: str) -> bool:
+    """Try to open a URL in a browser. Best-effort, never raises.
+
+    A headless server has no browser to open (the common VPS case), so
+    callers always print the link for the user's own computer/phone too.
+    """
+    try:
+        if webbrowser.open(url):
+            return True
+    except Exception:
+        pass
+    try:
+        import os as _os
+
+        if _os.environ.get("DISPLAY") and shutil.which("xdg-open"):
+            proc = subprocess.run(
+                ["xdg-open", url], capture_output=True, timeout=15)
+            return proc.returncode == 0
+    except Exception:
+        pass
+    return False
+
+
 def login_interactive(bin_path: str) -> bool:
     """Run `tailscale login`, print + open the registration URL, wait for login.
 
     Returns True when `tailscale status --json` reports Running.
     Never raises; bounded wait (LOGIN_WAIT_SEC).
     """
-    print("  opening Tailscale registration — sign in once in your browser ...")
+    print("  Tailscale registration (one time, ~30 seconds).")
+    print("  Waiting up to 3 minutes - finish in your browser and this "
+          "continues by itself ...")
     try:
         proc = subprocess.Popen(
             [bin_path, "login"],
@@ -174,11 +199,15 @@ def login_interactive(bin_path: str) -> bool:
             url = _extract_login_url(line)
             if url and not opened:
                 opened = True
-                print(f"  >>> register here: {url}")
-                try:
-                    webbrowser.open(url)
-                except Exception:
-                    pass
+                print("  " + "=" * 66)
+                print("  >>> REGISTER HERE (open on YOUR computer or phone):")
+                print(f"  >>> {url}")
+                print("  " + "=" * 66)
+                if _open_url_best_effort(url):
+                    print("  (opened in a browser automatically)")
+                else:
+                    print("  (no browser on this server - copy the link above "
+                          "into your own browser)")
             if login_status(bin_path).get("logged_in"):
                 break
             if time.time() - start > LOGIN_WAIT_SEC:

@@ -89,6 +89,17 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def _pip_env() -> dict:
+    """Environment for pip subprocess calls (quiet root warning).
+
+    PIP_ROOT_USER_ACTION is only understood by new pip (ours is refreshed
+    first); old pip ignores unknown PIP_* names, so this is safe everywhere.
+    """
+    env = dict(os.environ)
+    env.setdefault("PIP_ROOT_USER_ACTION", "ignore")
+    return env
+
+
 def _has_nvidia_gpu() -> bool:
     """Best-effort NVIDIA GPU check via nvidia-smi. False when unsure.
 
@@ -138,7 +149,7 @@ def ensure_dependencies() -> bool:
         tool = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-U",
              "pip", "setuptools", "wheel", "packaging>=24.2"],
-            cwd=str(PROJECT_ROOT), timeout=600,
+            cwd=str(PROJECT_ROOT), timeout=600, env=_pip_env(),
         )
         toolchain_ok = tool.returncode == 0
         if toolchain_ok:
@@ -157,7 +168,7 @@ def ensure_dependencies() -> bool:
                 [sys.executable, "-m", "pip", "install", *extra,
                  "--index-url", "https://download.pytorch.org/whl/cpu",
                  "torch"],
-                cwd=str(PROJECT_ROOT), timeout=1200,
+                cwd=str(PROJECT_ROOT), timeout=1200, env=_pip_env(),
             )
             if cpu.returncode == 0:
                 _ok("CPU-only torch installed")
@@ -166,7 +177,7 @@ def ensure_dependencies() -> bool:
                       "trying full install anyway (slower)")
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "install", *extra, "-e", "."],
-            cwd=str(PROJECT_ROOT), timeout=1800,
+            cwd=str(PROJECT_ROOT), timeout=1800, env=_pip_env(),
         )
         if proc.returncode != 0:
             print("  ERROR: pip install -e . failed "

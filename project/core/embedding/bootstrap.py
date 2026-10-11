@@ -172,9 +172,19 @@ def ensure_embedding_model(sync: bool = False, timeout_seconds: int = 3600) -> P
             from huggingface_hub import snapshot_download
             # Built-in console progress bar from huggingface_hub (tqdm).
             # Files already current are skipped, so this is instant on re-runs.
-            snapshot_download(repo_id=_SOURCE_REPO, local_dir=str(target),
-                              local_dir_use_symlinks=False, resume_download=True,
-                              max_workers=4, allow_patterns=ALLOW_PATTERNS)
+            # The two filterwarnings silence hub-version deprecations
+            # (resume/symlink args are default behavior now) - the call
+            # itself is unchanged so old hub versions behave exactly as before.
+            import warnings as _warnings
+
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings(
+                    "ignore", message=".*resume_download.*", category=UserWarning)
+                _warnings.filterwarnings(
+                    "ignore", message=".*local_dir_use_symlinks.*", category=UserWarning)
+                snapshot_download(repo_id=_SOURCE_REPO, local_dir=str(target),
+                                  local_dir_use_symlinks=False, resume_download=True,
+                                  max_workers=4, allow_patterns=ALLOW_PATTERNS)
             last_error = None
             break
         except Exception as e:
