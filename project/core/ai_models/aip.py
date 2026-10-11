@@ -1146,7 +1146,17 @@ def execute_compiled(compiled: dict, canonical: dict) -> dict:
             if status >= 400:
                 raise AipError("provider", f"Service returned HTTP {status}.", "provider_server_error",
                                http_status=status)
-            return normalize(text, parser)
+            res = normalize(text, parser)
+            try:
+                from core.lm.usage import log_usage as _log_usage
+
+                _usage = res.get("usage") or {}
+                _log_usage(str(compiled.get("model_name") or "unknown"),
+                           _usage.get("prompt_tokens") or 0,
+                           _usage.get("completion_tokens") or 0)
+            except Exception:
+                pass  # accounting must never break chat
+            return res
         except AipError as e:
             last = e
             if not e.retryable and not _retryable(e.http_status or 0, e.category):
