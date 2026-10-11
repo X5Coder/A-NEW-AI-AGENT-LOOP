@@ -799,7 +799,7 @@ def main(argv=None) -> int:
         except Exception:
             already, stopper = False, None
         if already:
-            print("\n[install] server already running - stopping it for a fresh start ...")
+            print("\n[install] port busy - freeing it so exactly one server runs ...")
             ok = False
             if stopper is not None:
                 try:

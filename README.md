@@ -1,11 +1,11 @@
-# X5Agent — v0.14.2
+# X5Agent — v0.15.0
 
 Professional agent with one built-in model (embedding) plus universal
 connections to any AI model through **AI Models** templates.
 
 ---
 
-## Setup — unified install / update command (v0.14.2)
+## Setup — unified install / update command (v0.15.0)
 
 **One command installs a fresh copy OR updates an existing one** (same command,
 safe to re-run — source only via `git pull --ff-only`, `X5Agent/Data` untouched):
@@ -14,8 +14,8 @@ safe to re-run — source only via `git pull --ff-only`, `X5Agent/Data` untouche
 curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bash
 ```
 
-Verify after update: open Settings → Updates (must show `0.14.2`) or check
-`updates.json` → `"version": "0.14.2". Then hard-refresh the console page
+Verify after update: open Settings → Updates (must show `0.15.0`) or check
+`updates.json` → `"version": "0.15.0". Then hard-refresh the console page
 (Ctrl+Shift+R) so the new `live-url.js`/`chat.js` take effect.
 
 **Requirements: Python 3.10+** (full browser support — `x5browser==1.5.1`
@@ -66,8 +66,9 @@ x5agent --public     # also enable the Tailscale Funnel public link (login requi
 
 The `x5agent` command is installed on PATH by `pip install -e .`
 (the installer adds it automatically when missing). Restart semantics:
-a running server is stopped (graceful, then forced) before the fresh one
-binds; a foreign port holder is never touched.
+the console port is always freed first — ANY stale holder on it is stopped
+(graceful SIGINT, then forced SIGKILL; suspended ones resumed first) before
+the fresh server binds, so exactly one server ends up running.
 
 **Windows**
 

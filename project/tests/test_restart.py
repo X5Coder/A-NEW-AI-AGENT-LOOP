@@ -1,4 +1,5 @@
-"""Restart semantics: stop our server, never a foreign holder. Needs pkill/pgrep (posix)."""
+"""Restart semantics: the console port is always freed first (ANY stale holder
+is stopped graceful-then-forced), so exactly one server ends up running."""
 from __future__ import annotations
 
 import os
@@ -15,11 +16,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.cli import _port_answers, _stop_server
+from scripts.cli import _port_answers, _port_pids, _stop_server
+
+
+def _has_port_tools() -> bool:
+    if os.name != "posix":
+        return False
+    if shutil.which("ss") is not None or shutil.which("lsof") is not None:
+        return True
+    try:
+        return Path("/proc/net/tcp").exists()
+    except Exception:
+        return False
+
 
 needs_posix = pytest.mark.skipif(
-    os.name != "posix" or shutil.which("pkill") is None or shutil.which("pgrep") is None,
-    reason="needs Linux/Mac with pkill+pgrep")
+    not _has_port_tools(),
+    reason="needs Linux/Mac with ss/lsof (port-holder lookup)")
 
 
 def _free_port() -> int:
@@ -69,14 +82,36 @@ def test_stop_ours_frees_port():
 
 
 @needs_posix
-def test_stop_foreign_never_killed():
+def test_stop_any_holder_frees_port():
+    """ANY port holder is stopped (stale server or squatter): the fresh
+    server always finds a free port, so exactly one ends up running."""
     port = _free_port()
     proc = _hold_port(port, None)
     assert _wait_answers(port)
     try:
-        assert _stop_server(port, wait_sec=3) is False
-        assert proc.poll() is None  # still alive: not ours, not touched
-        assert _port_answers(port) is True
+        assert _stop_server(port, wait_sec=10) is True
+        assert _port_answers(port) is False
+        end = time.time() + 10
+        while proc.poll() is None and time.time() < end:
+            time.sleep(0.3)
+        assert proc.poll() is not None  # holder reaped, port free
+    finally:
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+
+
+@needs_posix
+def test_port_pids_finds_holder():
+    """Holder lookup reports the squatter PID (and never our own PID)."""
+    port = _free_port()
+    proc = _hold_port(port, None)
+    assert _wait_answers(port)
+    try:
+        pids = _port_pids(port)
+        assert proc.pid in pids
+        assert os.getpid() not in pids
     finally:
         proc.terminate()
         try:
