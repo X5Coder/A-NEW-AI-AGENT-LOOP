@@ -492,40 +492,82 @@ def ensure_firewall(port: int = CONSOLE_PORT) -> None:
           f"if port {port} is filtered, run manually: sudo ufw allow {port}/tcp")
 
 
+def _clear_screen() -> None:
+    """Best-effort terminal clear before the owner prompt (fresh screen).
+
+    Falls back to blank lines when there is no terminal clearer.
+    """
+    try:
+        if sys.stdout.isatty() and shutil.which("clear"):
+            subprocess.run(["clear"], timeout=5)
+            return
+    except Exception:
+        pass
+    print("\n\n", end="")
+
+
+def _read_password() -> str | None:
+    """Hidden password read. Returns None on abort (EOF/interrupt)."""
+    try:
+        if not sys.stdin.isatty():
+            # Piped stdin (automation): read one line without getpass noise.
+            line = sys.stdin.readline()
+            if not line:
+                return None
+            return line.rstrip("\r\n")
+        return getpass.getpass("  password (min 8, hidden): ")
+    except (EOFError, KeyboardInterrupt):
+        print(file=sys.stderr)
+        return None
+
+
 def ask_credentials(email: str = "", password: str = "") -> bool:
     """Email + hidden password prompt. Stores salted hash only. Returns True on success.
 
     Fully non-interactive when email+password are passed (flags or
     X5_EMAIL/X5_PASSWORD env): no input()/getpass() calls at all, so no
-    stdin injection and no GetPassWarning. Interactive prompts are only a
-    fallback when a value is missing.
+    stdin injection and no GetPassWarning. Interactive prompts retry until
+    the value is valid (bad email or weak/unreadable password re-asks
+    instead of aborting the whole install); EOF/interrupt still aborts.
+    Any letters, numbers and symbols (e.g. kimo1234##xxz) are accepted -
+    the only rules are a valid email shape and min 8 password chars.
     """
+    _clear_screen()
     _step("6/7 console owner")
     email = (email or "").strip().lower()
-    if not email:
-        try:
-            email = input("  email: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            return False
-    if not EMAIL_RE.match(email):
-        print("  ERROR: invalid email format", file=sys.stderr)
-        return False
+    while True:
+        if not email:
+            try:
+                email = input("  email: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print(file=sys.stderr)
+                return False
+        if EMAIL_RE.match(email):
+            break
+        print("  ERROR: invalid email format - please type it again",
+              file=sys.stderr)
+        email = ""
     pw = (password or "")
-    if not pw:
+    while True:
+        if not pw:
+            got = _read_password()
+            if got is None:
+                return False
+            pw = got
+        if len(pw) < 8:
+            print("  ERROR: password too short (min 8) - please type it again",
+                  file=sys.stderr)
+            pw = ""
+            continue
         try:
-            if not sys.stdin.isatty():
-                # Piped stdin (automation): read one line without getpass noise.
-                line = sys.stdin.readline()
-                pw = (line or "").rstrip("\r\n")
-            else:
-                pw = getpass.getpass("  password (min 8, hidden): ")
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            return False
-    if len(pw) < 8:
-        print("  ERROR: password too short (min 8)", file=sys.stderr)
-        return False
+            pw.encode("utf-8")
+        except UnicodeError:
+            print("  ERROR: password has unreadable characters - please "
+                  "retype it with plain letters/numbers/symbols",
+                  file=sys.stderr)
+            pw = ""
+            continue
+        break
     try:
         sys.path.insert(0, str(PROJECT_ROOT))
         from core.paths import data_db_file
