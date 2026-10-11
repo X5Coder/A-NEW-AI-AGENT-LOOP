@@ -159,10 +159,14 @@ def get_status() -> dict:
 
 
 def _set_state(state: str, detail: str = "") -> None:
+    # Status reporting must NEVER trigger device detection: detect_device()
+    # imports torch (tens of seconds, or a frozen import under memory
+    # pressure - this exact hang). Report the cached device, default cpu;
+    # real detection still happens where the model is actually loaded.
     try:
         with _lock:
             _progress["state"] = state
-            _progress["device"] = detect_device()
+            _progress["device"] = _DEVICE_CACHE or "cpu"
             if detail:
                 _progress["detail"] = detail[:200]
     except Exception:
