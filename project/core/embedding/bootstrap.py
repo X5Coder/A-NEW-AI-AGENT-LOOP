@@ -62,15 +62,26 @@ def embedding_dir() -> Path:
 
 
 def detect_device() -> str:
-    """Cached device: checked once, then reused. cuda when usable, else cpu."""
+    """Cached device: checked once, then reused. cuda when usable, else cpu.
+
+    Fast gate first: importing torch takes tens of seconds, so on machines
+    with no NVIDIA driver (no nvidia-smi) the answer is cpu without
+    importing torch at all.
+    """
     global _DEVICE_CACHE
     if _DEVICE_CACHE in ("cuda", "cpu"):
         return _DEVICE_CACHE
     device = "cpu"
     try:
-        import torch
-        if torch.cuda.is_available():
-            device = "cuda"
+        import shutil as _shutil
+
+        if _shutil.which("nvidia-smi") is None:
+            device = "cpu"
+        else:
+            import torch
+
+            if torch.cuda.is_available():
+                device = "cuda"
     except Exception:
         device = "cpu"
     _DEVICE_CACHE = device
@@ -86,6 +97,23 @@ def is_complete() -> bool:
     d = embedding_dir()
     try:
         return d.exists() and (d / MARKER).exists() and any(d.iterdir())
+    except Exception:
+        return False
+
+
+SYNC_RECHECK_DAYS = 7  # install/update re-verifies against HF at most weekly
+
+
+def _recently_checked(target: Path) -> bool:
+    """True when the ready marker was written within SYNC_RECHECK_DAYS.
+
+    A successful snapshot refresh rewrites the marker, so routine
+    install/update runs skip the ~1min network re-verify and return
+    instantly. Never raises (False = verify online, the safe default).
+    """
+    try:
+        age_days = (time.time() - (target / MARKER).stat().st_mtime) / 86400
+        return 0 <= age_days <= SYNC_RECHECK_DAYS
     except Exception:
         return False
 
@@ -145,15 +173,17 @@ def ensure_embedding_model(sync: bool = False, timeout_seconds: int = 3600) -> P
     """Check-first loader for the bundled embedding model.
 
     - ready + sync=False -> return instantly, zero network (normal startup).
-    - missing/incomplete, or sync=True (install/update) -> verify against
+    - ready + sync=True + checked within SYNC_RECHECK_DAYS -> return
+      instantly (routine install/update; the marker proves a recent verify).
+    - missing/incomplete, or sync=True with a stale check -> verify against
       HuggingFace and fetch ONLY missing/changed files (resume, progress,
       max 3 attempts). Re-installs cost ~zero traffic when files are current.
     """
     _ = timeout_seconds  # kept for signature compatibility; checks are fast.
     target = embedding_dir()
-    if not sync and _local_state(target) == "ready":
+    if _local_state(target) == "ready" and (not sync or _recently_checked(target)):
         _set_state("ready")
-        print(f"[OK] Embedding model ready. Device: {detect_device()} (auto).")
+        print("[OK] Embedding model ready (current, no download needed).")
         return target
     if sync:
         print("[..] Checking embedding model (current files are skipped, only deltas download)…")

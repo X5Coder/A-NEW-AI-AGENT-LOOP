@@ -246,8 +246,7 @@ def check_environment() -> bool:
 
         print(f"  embedding device: {detect_device()} (detected once, cached)")
     else:
-        print("  device: cpu (no NVIDIA GPU)")
-        print("  embedding device: cpu (no NVIDIA GPU)")
+        print("  hardware: CPU only - no GPU on this machine, everything runs on CPU")
     if not ensure_dependencies():
         return False
     _ok("dependencies present")
