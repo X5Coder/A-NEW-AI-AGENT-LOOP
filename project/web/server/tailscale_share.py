@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -134,6 +135,61 @@ def _extract_login_url(text: str) -> str | None:
     return match.group(0) if match else None
 
 
+class _Spinner:
+    """Live progress ticker for one blocking call (stdlib only).
+
+    `with _Spinner("enabling funnel"):` ticks a spinner plus elapsed seconds
+    on the same terminal line until the block ends, then clears the line (the
+    caller prints its own OK/WARN line after). Daemon thread, always joined
+    in __exit__ - no orphaned threads. On non-terminal output it prints the
+    message once and stays silent (clean logs).
+    """
+    def __init__(self, message: str):
+        self._message = message
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _live(self) -> bool:
+        try:
+            return sys.stdout.isatty()
+        except Exception:
+            return False
+
+    def __enter__(self):
+        if self._live():
+            self._thread = threading.Thread(target=self._tick, daemon=True)
+            self._thread.start()
+        else:
+            print(f"  {self._message} ...")
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+            try:
+                sys.stdout.write("\r" + " " * 72 + "\r")
+                sys.stdout.flush()
+            except Exception:
+                pass
+        return False
+
+    def _tick(self):
+        frames = "|/-\\"
+        start = time.time()
+        i = 0
+        while not self._stop.wait(0.5):
+            try:
+                elapsed = int(time.time() - start)
+                sys.stdout.write(
+                    f"\r  {self._message} {frames[i % 4]} {elapsed}s")
+                sys.stdout.flush()
+            except Exception:
+                break
+            i += 1
+
+
 def _open_url_best_effort(url: str) -> bool:
     """Try to open a URL in a browser. Best-effort, never raises.
 
@@ -177,6 +233,7 @@ def login_interactive(bin_path: str) -> bool:
         return False
     opened = False
     start = time.time()
+    last_beat = start
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -197,7 +254,13 @@ def login_interactive(bin_path: str) -> bool:
                           "into your own browser)")
             if login_status(bin_path).get("logged_in"):
                 break
-            if time.time() - start > LOGIN_WAIT_SEC:
+            now = time.time()
+            if now - last_beat >= 20:
+                last_beat = now
+                left = max(0, int(LOGIN_WAIT_SEC - (now - start)))
+                print(f"  still waiting for the browser login ... "
+                      f"({left // 60}:{left % 60:02d} left)")
+            if now - start > LOGIN_WAIT_SEC:
                 break
     except Exception:
         pass
@@ -228,16 +291,21 @@ def enable_funnel(bin_path: str, port: int = 7777) -> str | None:
         [bin_path, "funnel", "--bg", str(port)],
         [bin_path, "funnel", str(port)],
     ]
-    for args in variants:
-        proc = _run(args, timeout=60)
-        if proc is not None and proc.returncode == 0:
-            print(f"  OK: funnel on ({' '.join(args[1:])})")
-            break
-        print(f"  funnel variant failed ({' '.join(args[1:])}), trying next ...")
+    chosen = None
+    with _Spinner("enabling funnel"):
+        for args in variants:
+            proc = _run(args, timeout=60)
+            if proc is not None and proc.returncode == 0:
+                chosen = args
+                break
+            print(f"  funnel variant failed ({' '.join(args[1:])}), trying next ...")
+    if chosen is not None:
+        print(f"  OK: funnel on ({' '.join(chosen[1:])})")
     else:
         # Funnel blocked (ACL/plan) -> tailnet-only serve, still useful.
         print("  funnel refused - falling back to tailnet-only serve ...")
-        _run([bin_path, "serve", "--bg", target], timeout=60)
+        with _Spinner("enabling tailnet serve"):
+            _run([bin_path, "serve", "--bg", target], timeout=60)
         print("  WARN: funnel refused (check admin: HTTPS + funnel in ACL) — using tailnet-only serve")
     info = login_status(bin_path)
     dns = info.get("dns")
