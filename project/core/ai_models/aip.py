@@ -1372,7 +1372,17 @@ def canonical_from_loop(messages: Any, tools_openai: Any) -> dict:
             role = m.get("role")
             if role not in ROLES:
                 continue
-            canon_msgs.append({k: m[k] for k in ("role", "content") if k in m})
+            # Pass the OpenAI conversation fields through untouched. In
+            # particular tool_call_id (tool results) and tool_calls
+            # (assistant turns) MUST survive: providers reject tool results
+            # without a matching id (HTTP 400). Only known wire-safe keys.
+            item = {k: m[k] for k in ("role", "content", "name") if k in m}
+            if isinstance(m.get("tool_call_id"), str) and m["tool_call_id"].strip():
+                item["tool_call_id"] = m["tool_call_id"]
+            tcs = m.get("tool_calls")
+            if isinstance(tcs, list) and tcs:
+                item["tool_calls"] = [tc for tc in tcs if isinstance(tc, dict)][:64]
+            canon_msgs.append(item)
     except Exception:
         canon_msgs = []
     canon_tools: list = []

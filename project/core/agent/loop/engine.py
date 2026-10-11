@@ -922,7 +922,8 @@ def run_loop(
         except Exception as e:
             # Provider failed even after retries - treat as tool error and continue
             err_msg = f"Provider error at step {step}: {e}"
-            print(f"[loop] {err_msg}")
+            tech = str(getattr(e, "technical", "") or "")[:300]
+            print(f"[loop] {err_msg}" + (f" | {tech}" if tech else ""))
             # Empty replies: retry briefly, then say so plainly instead of
             # persisting silence (500 silent steps help nobody).
             if "empty reply with no usable tool calls" in str(e):

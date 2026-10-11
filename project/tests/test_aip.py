@@ -455,3 +455,19 @@ def test_execute_end_to_end_mock():
         assert out["response_id"] == "r9"
     finally:
         srv.shutdown()
+
+
+def test_canonical_keeps_tool_wiring():
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "tool_search", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "tool_search",
+         "content": '{"tools": []}', "internal_note": "must not leak"},
+    ]
+    out = A.canonical_from_loop(msgs, [])
+    assert out["messages"][1]["tool_calls"][0]["function"]["name"] == "tool_search"
+    assert out["messages"][2]["tool_call_id"] == "c1"
+    assert "internal_note" not in out["messages"][2]
+    assert out["messages"][2]["content"] == '{"tools": []}'
