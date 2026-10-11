@@ -790,6 +790,16 @@ def main(argv=None) -> int:
         return 1
     check_project_state()
     code_updated = update_source()
+    if code_updated and not os.environ.get("X5_UPDATED"):
+        # The pull just replaced this very file on disk: the running
+        # process still executes the OLD code. Re-exec so the new code
+        # takes over from a clean state (same CLI args). The marker env
+        # var stops any repeat (pulls are idempotent afterwards anyway).
+        print("  source updated mid-run - restarting installer with the new code ...")
+        os.environ["X5_UPDATED"] = "1"
+        script = str(Path(__file__).resolve())
+        cli_args = list(argv) if argv is not None else sys.argv[1:]
+        os.execv(sys.executable, [sys.executable, script, *cli_args])
     if not ensure_resources(hf_token=args.hf_token):
         return 1
     if not args.skip_browser:
