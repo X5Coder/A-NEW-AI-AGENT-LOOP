@@ -146,6 +146,12 @@ def get_model(kind: str = "text") -> dict | None:
     cfg = parser or legacy
     if not isinstance(cfg, dict):
         return None
+    if cfg.get("kind") != kind:
+        # Heal old records saved before kind was stamped: the engine reads
+        # kind from inside the config, so a missing one fails every call.
+        # Copy-on-read: stored data is never mutated here.
+        cfg = dict(cfg)
+        cfg["kind"] = kind
     return {
         "model_name": str(rec.get("model_name") or ""),
         "server_url": str(rec.get("server_url") or ""),

@@ -874,6 +874,7 @@ def run_loop(
     # Discovered tools become directly callable once tool_search returns their specs
     known_tool_names = {t.get("function", {}).get("name") for t in core_tools}
     dynamic_tools: list[dict] = []
+    empty_strikes = 0
 
     for step in range(1, max_steps + 1):
         steps = step
@@ -907,17 +908,29 @@ def run_loop(
                 _res = _aip_run.execute_compiled(_compiled, _canonical)
                 content_text = _res.get("text") or ""
                 _emit_token(content_text)
+                response = {"content": content_text,
+                            "tool_calls": _res.get("tool_calls") or []}
             else:
                 content_text = _universal_chat(
                     _model_record, messages,
                     {"on_chunk": _emit_chunk if on_token is not None else None,
                      "cancel_event": cancel_flag},
                 )
-            response = {"content": content_text, "tool_calls": []}
+                response = {"content": content_text, "tool_calls": []}
+            if not response.get("tool_calls") and not (response.get("content") or "").strip():
+                raise RuntimeError("model returned an empty reply with no usable tool calls")
         except Exception as e:
             # Provider failed even after retries - treat as tool error and continue
             err_msg = f"Provider error at step {step}: {e}"
             print(f"[loop] {err_msg}")
+            # Empty replies: retry briefly, then say so plainly instead of
+            # persisting silence (500 silent steps help nobody).
+            if "empty reply with no usable tool calls" in str(e):
+                empty_strikes += 1
+                if empty_strikes >= 3:
+                    final_answer = ("The model returned empty replies several times. "
+                                    "Please try again or check the AI model connection.")
+                    break
             # Add an assistant error note to messages so next iteration can recover
             messages.append({"role": "assistant", "content": f"[System note: provider temporarily unavailable: {str(e)[:200]}. Will retry.]"})
             # Small backoff
@@ -928,15 +941,20 @@ def run_loop(
             continue
 
         content = response.get("content")
-        tool_calls = response.get("tool_calls") or []
+        # normalize() contract: flat calls [{id, name, arguments, ...}].
+        # Drop malformed entries (nameless) - never execute nor persist them.
+        tool_calls = [tc for tc in (response.get("tool_calls") or [])
+                      if isinstance(tc, dict) and isinstance(tc.get("name"), str)
+                      and tc.get("name").strip()]
         if verbose:
             if content:
                 print(f"[LLM content] {str(content)[:300]}")
             if tool_calls:
-                print(f"[LLM tool_calls] {[tc['function']['name'] for tc in tool_calls]}")
+                print(f"[LLM tool_calls] {[tc.get('name') for tc in tool_calls]}")
 
         if not tool_calls:
             # No tools requested - final answer is agent content only.
+            # (Empty replies never reach here: they raise into recovery above.)
             final_answer = content if isinstance(content, str) and content.strip() else ""
             messages.append({"role": "assistant", "content": final_answer})
             if verbose:
@@ -944,16 +962,18 @@ def run_loop(
             break
 
         # Execute each tool call
-        # First, add assistant message with tool_calls (OpenAI format requires raw)
-        # Reconstruct raw tool_calls for history
+        # First, add assistant message with tool_calls (OpenAI wire format
+        # needs nested calls for history resubmission - rebuilt from the
+        # flat normalize() contract here, in this one place only)
         raw_tool_calls = []
         for tc in tool_calls:
+            targs = tc.get("arguments", {})
             raw_tool_calls.append({
-                "id": tc["id"],
-                "type": tc.get("type", "function"),
+                "id": str(tc.get("id") or f"{step}-{tc.get('name')}"),
+                "type": "function",
                 "function": {
-                    "name": tc["function"]["name"],
-                    "arguments": json.dumps(tc["function"]["arguments"], ensure_ascii=False) if isinstance(tc["function"]["arguments"], dict) else str(tc["function"]["arguments"])
+                    "name": tc["name"],
+                    "arguments": json.dumps(targs, ensure_ascii=False) if isinstance(targs, dict) else str(targs)
                 }
             })
         messages.append({"role": "assistant", "content": content or "", "tool_calls": raw_tool_calls})
@@ -961,8 +981,8 @@ def run_loop(
         # No narration for tool calls: tools run silently, only their event
         # line is shown. An optional `reason` arg is stripped before execute.
         for tc in tool_calls:
-            name = tc["function"]["name"]
-            args = tc["function"]["arguments"]
+            name = tc.get("name")
+            args = tc.get("arguments", {})
             call_key = str(tc.get("id") or f"{step}-{name}")
             # Reason node: optional model-supplied `reason` (stripped, tools
             # never accept it). Empty when the model wrote none.

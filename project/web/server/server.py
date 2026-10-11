@@ -109,7 +109,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml and updates.json at the repo root).
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.12.0"
 
 UPDATE_REPO = "X5Coder/X5Agent"
 
@@ -3032,6 +3032,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 raise _ChatError("Parser Definition is not valid JSON.")
         if not isinstance(config, dict):
             raise _ChatError("Parser Definition must be an object.")
+        # The engine reads kind from INSIDE the config: stamp it so pasted
+        # parsers (which never contain it) and old records keep working.
+        config = dict(config)
+        config["kind"] = kind
         api_url = str(payload.get("api_url") or "")
         if len(api_url) > 2000:
             raise _ChatError("API URL too long.")

@@ -5,6 +5,9 @@
 > `image`, `tts`, `stt`). The server serves one section per dialog; the
 > "configuration prompt" copy button copies that section verbatim.
 > Every prompt is written in English and always replies in English.
+> Every generated Configuration Protocol JSON MUST include its kind
+> top-level (e.g. {"kind": "text", "language": "AIP/1", ...}) matching its
+> ## KIND section — the app refuses kind-less configurations.
 
 ## KIND: text
 
