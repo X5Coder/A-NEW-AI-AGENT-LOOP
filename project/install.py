@@ -1,9 +1,10 @@
 """X5Agent single install/update command.
 
 Flow (exactly, nothing else):
-  1. python install.py [--yes] [--email E --password P] [--public|--no-public]
-   2. environment check (python, CPU/GPU, disk, dependencies; below 3.12 warns:
-      x5browser 1.5.1 runs on 3.10+, 3.12 recommended for full browser support)
+  1. python install.py [--run] [--yes] [--email E --password P] [--public|--no-public]
+  2. environment check (python, CPU/GPU, disk, dependencies auto-installed
+     via `pip install -e .` when missing; below 3.12 warns:
+     x5browser 1.5.1 runs on 3.10+, 3.12 recommended for full browser support)
   3. project state check (missing / complete / has live data; latest version
      read from raw updates.json on GitHub — no releases needed)
   4. source-only update (git pull --ff-only: tracked code only,
@@ -17,9 +18,12 @@ Flow (exactly, nothing else):
   9. public link via Tailscale Funnel (install check -> login URL
      shown + opened -> funnel on -> permanent public URL printed)
   10. opens the console in the browser + prints local and public URLs
+  11. with --run: replaces itself with the console server
+     (same as `python -m web.server.server`) so install+start is one command.
 
-Run from the project/ directory:  python install.py
-Start the console after:          python -m web.server.server
+Run from the project/ directory:  python install.py --run
+Start the console only after:     python -m web.server.server
+One-liner from any VPS:  curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bash
 """
 from __future__ import annotations
 
@@ -50,10 +54,10 @@ def parse_args(argv=None):
     """Non-interactive flags so the installer is fully automatable.
 
     Examples:
-      python install.py --yes
-      python install.py --email owner@mail.com --password S3cret123 --public
-      HF_TOKEN=hf_xxx python install.py --email a@b.c --password S3cret123 --no-public
-      X5_EMAIL=a@b.c X5_PASSWORD=S3cret123 python install.py --yes
+      python install.py --run
+      python install.py --run --email owner@mail.com --password S3cret123 --public
+      HF_TOKEN=hf_xxx python install.py --run --email a@b.c --password S3cret123 --no-public
+      X5_EMAIL=a@b.c X5_PASSWORD=S3cret123 python install.py --run --yes
     Env fallbacks: X5_EMAIL / X5_PASSWORD / HF_TOKEN.
     """
     import argparse
@@ -78,7 +82,54 @@ def parse_args(argv=None):
                         "downloads get higher rate limits on slow networks")
     p.add_argument("--no-open-browser", action="store_true",
                    help="Do not open the console URL in a browser at the end")
+    p.add_argument("--run", action="store_true",
+                   help="Start the console server after a successful install "
+                        "(same as running python -m web.server.server afterwards)")
     return p.parse_args(argv)
+
+
+def ensure_dependencies() -> bool:
+    """Install project dependencies once when missing (pip install -e .).
+
+    This is what collapses the old 2-step flow
+    (`pip install -e .` then `python install.py`) into a single command.
+    Bounded: one pip run, 10-minute timeout, never retries in a loop.
+    Returns True when the required packages import cleanly afterwards.
+    """
+    missing = []
+    for pkg in ("sentence_transformers", "numpy"):
+        try:
+            __import__(pkg)
+        except Exception:
+            missing.append(pkg)
+    if not missing:
+        return True
+    print(f"  installing missing packages: {', '.join(missing)} (pip install -e .)...")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-e", "."],
+            cwd=str(PROJECT_ROOT), timeout=600,
+        )
+        if proc.returncode != 0:
+            print("  ERROR: pip install -e . failed "
+                  f"(exit {proc.returncode})", file=sys.stderr)
+            print("  run manually: pip install -e .  (from project/) "
+                  "then re-run install", file=sys.stderr)
+            return False
+    except Exception as e:
+        print(f"  ERROR: pip install failed ({str(e)[:120]})", file=sys.stderr)
+        return False
+    still_missing = []
+    for pkg in ("sentence_transformers", "numpy"):
+        try:
+            __import__(pkg)
+        except Exception:
+            still_missing.append(pkg)
+    if still_missing:
+        print(f"  ERROR: still missing: {', '.join(still_missing)}", file=sys.stderr)
+        return False
+    _ok("dependencies installed")
+    return True
 
 
 def _step(title: str) -> None:
@@ -121,15 +172,7 @@ def check_environment() -> bool:
     from core.embedding.bootstrap import detect_device  # noqa: E402
 
     print(f"  embedding device: {detect_device()} (detected once, cached)")
-    missing = []
-    for pkg in ("sentence_transformers", "numpy"):
-        try:
-            __import__(pkg)
-        except Exception:
-            missing.append(pkg)
-    if missing:
-        print(f"  ERROR: missing packages: {', '.join(missing)}", file=sys.stderr)
-        print("  run: pip install -e .  (from project/) then re-run install", file=sys.stderr)
+    if not ensure_dependencies():
         return False
     _ok("dependencies present")
     try:
@@ -512,7 +555,16 @@ def main(argv=None) -> int:
     print(f"  Console (local):  {UI_URL}")
     print("  Console (public): python -m web.server.server --public  (from project/)")
     print("  Start it: python -m web.server.server  (from project/)")
+    print("  Start it now: python install.py --run  (install + start in one command)")
     print("=" * 70)
+    if args.run:
+        print("\n[install] starting console now (--run)...")
+        cmd = [sys.executable, "-m", "web.server.server",
+               "--host", "0.0.0.0", "--port", 7777]
+        if args.public:
+            cmd.append("--public")
+        os.chdir(str(PROJECT_ROOT))
+        os.execv(sys.executable, cmd)
     return 0
 
 

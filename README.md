@@ -11,15 +11,35 @@ connections to any AI model through **AI Models** templates.
 runs on 3.10+, 3.12 recommended), TCP port **7777** (the installer opens it via `ufw`/`firewalld`
 automatically; else `sudo ufw allow 7777/tcp`).
 
-**Linux / Mac**
+**One command (Linux / Mac, fresh VPS)**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bash
+```
+
+Non-interactive (email/password/public passed through to the installer):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bash -s -- --email owner@mail.com --password S3cret123 --public
+```
+
+What the one-liner does: clones (or fast-forward updates) the repo into
+`~/X5Agent`, auto-installs dependencies (`pip install -e .` inside
+`install.py` when missing), runs the full installer (env + browser doctor +
+owner + firewall), then starts the console on `0.0.0.0:7777`.
+Re-running it only updates the source (`git pull --ff-only`, data untouched).
+
+**Manual (Linux / Mac)**
 
 ```bash
 git clone https://github.com/X5Coder/X5Agent.git
 cd X5Agent/project
-python3.12 -m pip install -e .
-python3.12 install.py
-python3.12 -m web.server.server
+python3.12 install.py --run
 ```
+
+`install.py --run` = install + start in one step (dependencies auto-install,
+server binds `0.0.0.0:7777` so the VPS public IP works). Without `--run` it
+only installs; then start manually with `python3.12 -m web.server.server`.
 
 **Windows**
 
