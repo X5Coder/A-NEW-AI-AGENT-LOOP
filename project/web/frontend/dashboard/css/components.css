@@ -79,9 +79,9 @@
 }
 
 /* ---------- buttons ---------- */
-/* Default white button, now professional glass (Cancel / secondary actions):
+/* White buttons, now professional glass (default + primary):
    same glass tokens as .glass-btn — blurred translucent surface, bright top
-   edge, soft depth shadow. .btn-primary (black) and .btn-danger keep theirs. */
+   edge, soft depth shadow. .btn-danger keeps its own look. */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -131,15 +131,19 @@
 }
 
 .btn-primary {
-  background: var(--Button-black);
-  border-color: var(--Button-black);
-  color: var(--text-onblack);
-  text-shadow: none;
+  background: var(--glass-bg), var(--background-menu-white);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-color: var(--glass-border);
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--glass-hi), var(--glass-lo), var(--glass-sh);
 }
 .btn-primary:hover {
-  background: var(--Button-black);
-  border-color: var(--Button-black);
-  opacity: 0.85;
+  background: var(--glass-bg), var(--background-menu-white);
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: var(--glass-hi), var(--glass-lo), 0 12px 32px rgba(0, 0, 0, 0.42);
+  opacity: 1;
 }
 
 .btn-danger {
