@@ -158,10 +158,76 @@ function bindTabClampOnce() {
   });
 }
 
+let schedPull = null; // active horizontal pull-out gesture {sx, sy, fresh}
+let schedPullSX = 0; // pull gesture start X (module-level: shared by tab handlers)
+let schedSeq = 0; // lifecycle generation: every open/dock/pull bumps it so a stale timer from rapid open/close can never kill a newer state
+
+function schedGuard() {
+  // Visibility watchdog: after every transition settles, one of the two must
+  // be usable — the open window (miniOpen) or the rail tab (parked). If rapid
+  // open/close left both gone/stuck, rebuild the correct one. Converges: a
+  // fix schedules no further work beyond one quiet re-check.
+  try {
+    if (!jobs.length) return;
+    const tab = document.getElementById("scheduleTab");
+    const mini = document.getElementById("scheduleMini");
+    const miniShown = !!(mini && !mini.classList.contains("mini-hidden"));
+    if (miniOpen) {
+      if (!miniShown) {
+        miniOpen = false;
+        try { setSchedTabOff(false); } catch (_) {}
+        openMini(); // reopens at a safe spot (bumps the generation)
+      }
+    } else {
+      if (tab) {
+        tab.classList.remove("pulling", "dragging");
+        tab.style.opacity = "";
+        tab.style.transform = "";
+        try { setSchedTabOff(false); } catch (_) {}
+      } else {
+        try { ensureTab(); } catch (_) {} // recreates the tab if removed
+      }
+      if (mini && !mini.classList.contains("mini-hidden")) {
+        try { schedDockToTab(mini.getBoundingClientRect().top); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+}
+
+function schedGuardSoon() {
+  // Re-check after transitions settle (850ms > longest 720ms flight).
+  // Generation-captured: a newer lifecycle invalidates the pending check so
+  // the guard never yanks a fresh pull mid-gesture.
+  try { const g = schedSeq; setTimeout(() => { if (g === schedSeq) schedGuard(); }, 850); } catch (_) {}
+}
+
+function schedKillAnims(mini) {
+  // A superseded suck/bloom (fill:forwards) would otherwise pin the window
+  // invisible under the new state — always kill before reusing the node.
+  try {
+    const anims = mini && mini.getAnimations ? mini.getAnimations() : [];
+    anims.forEach((a) => { try { a.cancel(); } catch (_) {} });
+  } catch (_) {}
+}
+
+function schedTabReset() {
+  // The tab is hidden ONLY via .off — never leave a stale inline push/fade
+  // that would keep it half-gone while parked.
+  try {
+    const tab = document.getElementById("scheduleTab");
+    if (!tab) return;
+    tab.classList.remove("pulling", "dragging");
+    tab.style.transform = "";
+    tab.style.opacity = "";
+  } catch (_) {}
+}
+
 function initSchedTabDrag(tab) {
-  // Vertical-only right rail (same gestures as #browserTab): a tap opens the
-  // floating window at the tap height, a drag slides the tab up/down.
-  // Touch gets a wider tap threshold than the mouse (finger jitter).
+  // Right-rail gestures (schedule ONLY, the browser tab is never touched):
+  // tap opens, vertical drag slides the tab up/down, horizontal pull-left
+  // draws the window out of the right edge like a drawer and releasing it
+  // opens the window where it was pulled. Hover never moves the tab (CSS
+  // hover only tints). Touch gets a wider tap threshold (finger jitter).
   let sy = 0;
   let oy = 0;
   let moved = false;
@@ -171,7 +237,9 @@ function initSchedTabDrag(tab) {
   tab.addEventListener("pointerdown", (e) => {
     dragging = true;
     moved = false;
+    schedPull = null;
     tapLimit = e.pointerType === "touch" ? 14 : 6;
+    schedPullSX = e.clientX;
     sy = e.clientY;
     oy = tabY !== null ? tabY : tab.getBoundingClientRect().top;
     tab.classList.add("dragging");
@@ -182,19 +250,54 @@ function initSchedTabDrag(tab) {
   });
   tab.addEventListener("pointermove", (e) => {
     if (!dragging) return;
-    if (Math.abs(e.clientY - sy) > tapLimit) moved = true;
-    if (moved) placeSchedTab(oy + e.clientY - sy);
+    const dx = e.clientX - schedPullSX;
+    const dy = e.clientY - sy;
+    // Pull threshold follows the pointer: touch jitters, so it needs the full
+    // run-up; a mouse engages almost immediately (no tap risk: a tap never
+    // travels 12px purely horizontal). Past 60px left always wins.
+    const need = e.pointerType === "touch" ? 24 : 12;
+    if (!schedPull && dx < -need && (Math.abs(dx) > Math.abs(dy) * 1.15 + 8 || dx < -60)) {
+      // Pull-out takes over: freeze vertical sliding, start the drawer
+      // preview emerging from the right edge at the pointer height.
+      schedPull = { sx: schedPullSX, sy, fresh: !document.getElementById("scheduleMini") };
+      tab.classList.add("pulling");
+      schedPullPreview(e.clientX, e.clientY);
+    }
+    if (schedPull) {
+      // Cache coords, paint once per frame (never style-thrash per event).
+      schedPull.lx = e.clientX;
+      schedPull.ly = e.clientY;
+      schedPullSchedule();
+    } else {
+      if (Math.abs(dy) > tapLimit || Math.abs(dx) > tapLimit) moved = true;
+      if (moved) placeSchedTab(oy + e.clientY - sy);
+    }
     e.preventDefault();
   });
   const end = (e) => {
     if (!dragging) return;
     dragging = false;
     tab.classList.remove("dragging");
-    if (!moved) {
+    const isUp = !e || e.type === "pointerup";
+    if (schedPull) {
+      // Cancel never opens (interrupted gesture just slides back).
+      const pull = schedPull;
+      schedPull = null;
+      tab.classList.remove("pulling");
+      const far = isUp && e && typeof e.clientX === "number" ? pull.sx - e.clientX : 0;
+      const px = isUp && e && typeof e.clientX === "number" ? e.clientX : pull.sx;
+      const py = isUp && e && typeof e.clientY === "number" ? e.clientY : pull.sy;
+      // Magnetic catch: a partial pull (~48px, a third of the bloom run) is
+      // enough — no need to drag to the middle, release grabs it open.
+      if (far > 48) schedPullCommit(px, py, far);
+      else schedPullCancel(pull);
+      return;
+    }
+    if (isUp && !moved) {
       const px = e && typeof e.clientX === "number" ? e.clientX : undefined;
       const py = e && typeof e.clientY === "number" ? e.clientY : undefined;
       openMini(px, py);
-    } else {
+    } else if (moved) {
       enforceTabSeparation();
     }
   };
@@ -229,16 +332,289 @@ function schedClampPos(l, t, w, h) {
   }
 }
 
-function schedReplayOpen(mini) {
-  // Replay the x5-rise open animation on every open (fresh + reopen), like
-  // the browser template: restart the CSS animation with a forced reflow so
-  // the rise is always seen (a reused node would otherwise pop in instantly).
+function schedReducedMotion() {
+  try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
+  catch (_) { return false; }
+}
+
+function schedTabDelta(mini) {
+  // Vector from the window's right-center to the collapsed tab's center —
+  // the black-hole axis (dock/suck-back) and its reverse (bloom open).
+  // Measured while the tab is still visible. Falls back to a plain
+  // rightward nudge when the tab is gone.
   try {
-    if (!mini) return;
-    mini.style.animation = "none";
+    const r = mini.getBoundingClientRect();
+    const tab = document.getElementById("scheduleTab");
+    if (!tab) return { dx: Math.max(120, Math.round(r.width * 0.6)), dy: 0 };
+    const t = tab.getBoundingClientRect();
+    return {
+      dx: Math.round((t.left + t.width / 2) - r.right + 4),
+      dy: Math.round((t.top + t.height / 2) - (r.top + r.height / 2)),
+    };
+  } catch (_) { return { dx: 160, dy: 0 }; }
+}
+
+function schedBloomFromTab(mini, delta, ms) {
+  // Reverse black hole: the window blooms OUT of the tab point with the
+  // same expo-out curve as the suck-in (~520ms). The tab must be visible
+  // when `delta` is measured; it hides at bloom time (caller order).
+  // .sched-anim stays ON afterwards forever: removing it would let the base
+  // x5-rise replay and blink the window (same-task restart only).
+  try {
+    if (!mini || typeof mini.animate !== "function" || schedReducedMotion()) return;
+    const d = delta || schedTabDelta(mini);
+    const dur = ms || 520;
+    mini.classList.remove("sched-anim");
     void mini.offsetWidth;
-    mini.style.animation = "";
+    mini.classList.add("sched-anim");
+    try { mini.dataset.schedDrag = "1"; } catch (_) {} // 1s tick never yanks mid-bloom
+    mini.style.transformOrigin = "100% 50%";
+    const g = schedSeq; // stale bloom must not drop a newer pull's guard flag
+    mini.animate(
+      [
+        { transform: `translateX(${d.dx}px) translateY(${d.dy}px) scale(0.05)`, opacity: 0, offset: 0 },
+        { transform: `translateX(${Math.round(d.dx * 0.52)}px) translateY(${Math.round(d.dy * 0.52)}px) scale(0.55)`, opacity: 0.92, offset: 0.45 },
+        { transform: "translateX(0px) scale(1)", opacity: 1, offset: 1 },
+      ],
+      { duration: dur, easing: "cubic-bezier(0.32, 0.72, 0, 1)" }
+    );
+    setTimeout(() => { if (g === schedSeq) { try { delete mini.dataset.schedDrag; } catch (_) {} } }, dur + 30);
   } catch (_) {}
+}
+
+function schedSettleFrom(mini, fromLeft, fromTop, fromScale, fromO, ms) {
+  // FLIP settle after a pull release: continues EXACTLY from the pull's
+  // visual state (same scale + opacity the finger left) and glides+grows
+  // into the parked spot — zero jump in place, zero pop.
+  try {
+    if (!mini || typeof mini.animate !== "function" || schedReducedMotion()) return;
+    const r = mini.getBoundingClientRect();
+    const ddx = Math.round(fromLeft - r.left);
+    const ddy = Math.round(fromTop - r.top);
+    const s = Number(fromScale);
+    const o = Number(fromO);
+    if (!ddx && !ddy && !(Number.isFinite(s) && s < 0.999)) return;
+    const dur = ms || 280;
+    mini.classList.remove("sched-anim");
+    void mini.offsetWidth;
+    mini.classList.add("sched-anim");
+    try { mini.dataset.schedDrag = "1"; } catch (_) {}
+    mini.style.transformOrigin = "100% 50%"; // same origin as the pull bloom
+    const g2 = schedSeq;
+    mini.animate(
+      [
+        { transform: `translateX(${ddx}px) translateY(${ddy}px) scale(${Number.isFinite(s) ? s : 1})`, opacity: Number.isFinite(o) ? o : 1, offset: 0 },
+        { transform: "translateX(0px) translateY(0px) scale(1)", opacity: 1, offset: 1 },
+      ],
+      { duration: dur, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+    );
+    setTimeout(() => {
+      if (g2 !== schedSeq) return;
+      try { delete mini.dataset.schedDrag; } catch (_) {}
+      try { mini.style.transformOrigin = ""; } catch (_) {}
+    }, dur + 30);
+  } catch (_) {}
+}
+
+function schedPullTop(y, h) {
+  // Vertical-only clamp while pulling: the window may hang past the right
+  // edge mid-gesture (it is coming out from behind it) — strictly parked
+  // only on release.
+  try {
+    const vh = window.innerHeight || 480;
+    return Math.min(Math.max(70, y), Math.max(70, vh - (h || 220) - 8));
+  } catch (_) { return 70; }
+}
+
+function schedPullProgress(pulled) {
+  // One continuous birth curve for the whole pull (preview → move → commit
+  // settle): starts a ghost at the tab point, full-size past ~140px.
+  const p = Math.min(1, Math.max(0, pulled) / 140);
+  const e = 1 - (1 - p) * (1 - p);
+  return { p, s: 0.05 + 0.95 * e, o: 0.05 + 0.95 * p };
+}
+
+function schedPullPreview(px, pointerY) {
+  // The window is born at the tab and comes out WITH the finger: its center
+  // tracks the pointer while it grows out of the tab point (scale + opacity
+  // over the first ~140px). Same task as the build — no paint, no flash.
+  ++schedSeq; // invalidate any pending dock/cancel finish
+  let mini = document.getElementById("scheduleMini");
+  schedKillAnims(mini); // a mid-flight suck must not pin the reborn window
+  if (!mini) {
+    mini = schedBuildMini();
+    if (!mini) { schedPull = null; return; } // build failed — stay a tab tap
+  }
+  try {
+    mini.classList.remove("docking", "mini-hidden", "sched-emerge", "sched-anim");
+    delete mini.dataset.docking;
+    mini.classList.add("sched-pulling");
+    try { mini.dataset.schedDrag = "1"; } catch (_) {} // 1s tick never fights the finger
+    // The tab itself stays put until the first move drives it out (below).
+    mini.style.visibility = "";
+    const w = mini.offsetWidth || 272;
+    const h = mini.offsetHeight || 220;
+    // Anchor geometry parked ONCE — every later frame moves via transform
+    // only (compositor), left/top are never touched again mid-pull.
+    schedPull.w = w;
+    schedPull.h = h;
+    schedPull.left0 = schedPull.sx - w / 2;
+    schedPull.top0 = schedPullTop(pointerY - 90, h);
+    schedPull.lx = px;
+    schedPull.ly = pointerY;
+    schedPull.raf = 0;
+    mini.style.left = `${schedPull.left0}px`;
+    mini.style.top = `${schedPull.top0}px`;
+    mini.style.right = "auto";
+    mini.style.transformOrigin = "100% 50%";
+    schedPullApply(); // first frame, same task — no flash
+    renderMini();
+  } catch (_) {}
+}
+
+function schedPullApply() {
+  // ONE compositor-cheap frame for the whole pull: position via transform
+  // only (left/top stay parked from preview) + opacity + tab slide-out. No
+  // layout reads, no layout writes — mid-pull jank is impossible.
+  const pull = schedPull;
+  const mini = pull && document.getElementById("scheduleMini");
+  if (!pull || !mini || typeof pull.left0 !== "number") return;
+  try {
+    const g = schedPullProgress(pull.sx - pull.lx);
+    const tx = Math.round(pull.lx - pull.sx);
+    const ty = Math.round(schedPullTop(pull.ly - 90, pull.h || 220) - pull.top0);
+    mini.style.transform = `translate(${tx}px, ${ty}px) scale(${g.s.toFixed(3)})`;
+    mini.style.opacity = String(g.o);
+    // The collapsed tab slides OUT to the right as its window leaves it —
+    // pure outward motion driven by the finger (fully out past ~80%), never
+    // a blink: the base transform transition glides every step.
+    try {
+      const tab = document.getElementById("scheduleTab");
+      if (tab) tab.style.transform = `translateX(${(g.p * 130).toFixed(1)}%)`;
+    } catch (_) {}
+  } catch (_) {}
+}
+
+function schedPullSchedule() {
+  // Coalesce bursts of pointermove into one rAF frame (many moves per paint
+  // would otherwise stack style recalcs and stutter).
+  if (!schedPull || schedPull.raf) return;
+  try {
+    schedPull.raf = requestAnimationFrame(() => {
+      try { if (schedPull) schedPull.raf = 0; } catch (_) {}
+      schedPullApply();
+    });
+  } catch (_) { schedPullApply(); }
+}
+
+function schedPullCommit(px, py, far) {
+  // Released far enough: park strictly inside (out from under the browser
+  // template) continuing the pull's own scale/opacity (no pop), then a
+  // normal floating window, draggable by its head right away.
+  ++schedSeq; // this commit owns the window now; stale finishes stay dead
+  const mini = document.getElementById("scheduleMini");
+  let from = null;
+  try {
+    if (mini) {
+      schedKillAnims(mini); // measure the real rect, not a stale suck's ghost
+      const r = mini.getBoundingClientRect();
+      from = { left: r.left, top: r.top };
+    }
+  } catch (_) { from = null; }
+  try {
+    if (mini) {
+      const w = mini.offsetWidth || 272;
+      const h = mini.offsetHeight || 220;
+      let [left, top] = schedClampPos(px - w / 2, py - 90, w, h);
+      [left, top] = avoidBrowserOverlap(left, top, w, h);
+      mini.style.left = `${left}px`;
+      mini.style.top = `${top}px`;
+      mini.style.right = "auto";
+      mini.style.transform = "";
+      mini.style.opacity = "";
+      mini.classList.remove("sched-pulling");
+      try { delete mini.dataset.schedDrag; } catch (_) {}
+      renderMini();
+      try { enforceMiniSeparation(); } catch (_) {}
+      // Continue the pull's own scale/opacity into the settle (origin stays
+      // right-center until the settle releases it) — no pop, no jump.
+      const cg = schedPullProgress(Number(far) || 0);
+      if (from) schedSettleFrom(mini, from.left, from.top, cg.s, cg.o);
+    }
+  } catch (_) {}
+  miniOpen = true;
+  try {
+    const tab = document.getElementById("scheduleTab");
+    if (tab) {
+      // Release: the tab keeps flying out to the right and fades (smooth
+      // continuation of the pull, no jump) while .off kills pointer events.
+      tab.style.transform = "translateX(130%)";
+      tab.style.opacity = "0";
+    }
+  } catch (_) {}
+  setSchedTabOff(true);
+  schedGuardSoon();
+}
+
+function schedPullCancel(pull) {
+  // Short pull: sucked back into the tab (fast mirror of the dock suck),
+  // then parked — the collapsed tab never moved.
+  ++schedSeq; // this cancel owns the outcome; a newer pull/open overrules it
+  const mySeq = schedSeq;
+  const mini = document.getElementById("scheduleMini");
+  const hide = () => {
+    if (mySeq !== schedSeq) return; // superseded — leave the newer state alone
+    try {
+      const m = document.getElementById("scheduleMini");
+      if (m && pull && pull.fresh) m.remove();
+      else if (m) {
+        const anims = m.getAnimations ? m.getAnimations() : [];
+        anims.forEach((a) => { try { a.cancel(); } catch (_) {} });
+        try { delete m.dataset.schedDrag; } catch (_) {}
+        m.classList.remove("sched-pulling", "docking", "sched-anim", "sched-emerge");
+        m.style.transformOrigin = "";
+        m.style.transform = "";
+        m.style.opacity = "";
+        m.classList.add("mini-hidden");
+      }
+    } catch (_) {}
+    miniOpen = false;
+    try {
+      const tab = document.getElementById("scheduleTab");
+      if (tab) {
+        // Glide back IN from the right: clear the inline push in the same
+        // task as .off removal → one smooth slide-in + fade-in.
+        tab.style.transform = "";
+        tab.style.opacity = "";
+      }
+    } catch (_) {}
+    setSchedTabOff(false);
+    schedGuardSoon(); // watchdog: the rail tab must be back and alive
+  };
+  try {
+    if (!mini) { hide(); return; }
+    if (!schedReducedMotion() && typeof mini.animate === "function") {
+      const fromT = mini.style.transform && mini.style.transform !== "none"
+        ? mini.style.transform : "scale(1)";
+      const fromO = Number(mini.style.opacity);
+      const d = schedTabDelta(mini);
+      mini.classList.remove("sched-pulling");
+      mini.classList.add("docking");
+      mini.style.transformOrigin = "100% 50%";
+      mini.style.transform = "";
+      mini.style.opacity = "";
+      mini.animate(
+        [
+          { transform: fromT, opacity: Number.isFinite(fromO) ? fromO : 1, offset: 0 },
+          { transform: `translateX(${d.dx}px) translateY(${d.dy}px) scale(0.05)`, opacity: 0, offset: 1 },
+        ],
+        { duration: 320, easing: "cubic-bezier(0.32, 0.72, 0, 1)", fill: "forwards" }
+      );
+      setTimeout(hide, 340);
+      return;
+    }
+  } catch (_) {}
+  hide();
 }
 
 function avoidBrowserOverlap(left, top, w, h) {
@@ -258,6 +634,7 @@ function avoidBrowserOverlap(left, top, w, h) {
     const bottom = Math.max(...blocks.map((r) => r.bottom));
     const topMost = Math.min(...blocks.map((r) => r.top));
     const leftEdge = Math.min(...blocks.map((r) => r.left));
+    const maxTop = Math.max(70, window.innerHeight - h - 8);
     const cands = [
       [left, top],
       [left, bottom + 12],
@@ -448,38 +825,94 @@ function tickCountdowns() {
 }
 
 function schedDockToTab(top) {
-  // Back to the right edge with the same glide as #liveMini: the window
-  // slides off first, then parks alive (same node kept, reopen is instant).
+  // Back to the right edge with an iPhone-like black-hole suck: the window
+  // shrinks into the collapsed tab point (slow ~700ms, expo-out ease —
+  // transform + opacity only, so it stays on the compositor and glides).
+  // The tab slides back in from the right as the visible target while the
+  // window drops to the same Y — the tab itself stays rock steady.
   // The scheduler tab never hides — it stays on the rail while jobs exist.
+  ++schedSeq; // this dock owns the outcome; a newer open/pull overrules it
+  const mySeq = schedSeq;
+  try {
+    if (typeof top === "number" && Number.isFinite(top)) placeSchedTab(top);
+  } catch (_) {}
+  try { enforceTabSeparation(); } catch (_) {}
   const mini = document.getElementById("scheduleMini");
+  try {
+    // The tab re-enters from the right: drop any stale inline push first so
+    // the .off removal below glides it in (never a blink).
+    const tab = document.getElementById("scheduleTab");
+    if (tab) {
+      tab.style.transform = "";
+      tab.style.opacity = "";
+    }
+  } catch (_) {}
+  setSchedTabOff(false);
   const finish = () => {
+    if (mySeq !== schedSeq) return; // superseded by a newer open/pull — hands off
     const m = document.getElementById("scheduleMini");
     if (m) {
-      try { delete m.dataset.docking; } catch (_) {}
+      try {
+        delete m.dataset.docking;
+        const anims = m.getAnimations ? m.getAnimations() : [];
+        anims.forEach((a) => { try { a.cancel(); } catch (_) {} });
+      } catch (_) {}
       m.classList.remove("docking");
       m.classList.add("mini-hidden");
+      m.style.transformOrigin = "";
     }
     miniOpen = false;
-    setSchedTabOff(false);
+    schedGuardSoon(); // watchdog: tab back on the rail, window parked
   };
   if (mini && !mini.dataset.docking) {
     mini.dataset.docking = "1";
-    mini.classList.add("docking");
-    setTimeout(finish, 300);
+    schedKillAnims(mini); // never stack a new suck over a stale one
+    mini.classList.remove("sched-anim", "sched-pulling");
+    mini.style.opacity = "";
+    mini.style.transform = "";
+    const reduce = schedReducedMotion();
+    let sucked = false;
+    if (!reduce && typeof mini.animate === "function") {
+      try {
+        // Right-center of the window must land on the tab center (measured
+        // AFTER the tab was parked at the drop Y above).
+        const d = schedTabDelta(mini);
+        const mx = Math.round(d.dx * 0.52);
+        const my = Math.round(d.dy * 0.52);
+        const ex = d.dx;
+        const ey = d.dy;
+        mini.style.transformOrigin = "100% 50%";
+        mini.classList.add("docking");
+        mini.animate(
+          [
+            { transform: "translateX(0px) scale(1)", opacity: 1, offset: 0 },
+            { transform: "translateX(-12px) scale(0.988)", opacity: 1, offset: 0.3 },
+            { transform: `translateX(${mx}px) translateY(${my}px) scale(0.58)`, opacity: 0.94, offset: 0.62 },
+            { transform: `translateX(${ex}px) translateY(${ey}px) scale(0.05)`, opacity: 0, offset: 1 },
+          ],
+          { duration: 700, easing: "cubic-bezier(0.32, 0.72, 0, 1)", fill: "forwards" }
+        );
+        sucked = true;
+      } catch (_) { sucked = false; }
+    }
+    if (!sucked) {
+      try { mini.classList.add("docking"); } catch (_) {}
+    }
+    setTimeout(finish, sucked ? 720 : 60);
   } else {
     finish();
   }
 }
 
 function schedMaybeDock(mini, wasMoved) {
-  // Dock ONLY on a forceful shove to the right (same rule as the browser
-  // player): the window must end up half or more past the viewport's right
-  // edge. Anything else snaps fully back inside — never outside the frame.
+  // Dock priority: pushing the window a quarter or more past the right edge
+  // docks it (the suck wins) — only a smaller nudge snaps back inside.
+  // Anything else snaps fully back inside — never outside the frame.
   try {
     const r = mini.getBoundingClientRect();
     const w = r.width || mini.offsetWidth || 300;
     const h = r.height || mini.offsetHeight || 200;
-    if (wasMoved && r.left >= window.innerWidth - w / 2) {
+    if (wasMoved && r.left >= window.innerWidth - w * 0.75) {
       schedDockToTab(r.top);
       return;
     }
@@ -492,6 +925,8 @@ function schedMaybeDock(mini, wasMoved) {
 
 function initMiniDrag(mini) {
   // Free smooth drag anywhere via the head (same as the browser player).
+  // A fast rightward fling also docks (the window gets sucked in no matter
+  // where the throw ends) — velocity is sampled from the last moves.
   const head = mini.querySelector(".sched-mini-head");
   if (!head) return;
   let sx = 0;
@@ -500,12 +935,14 @@ function initMiniDrag(mini) {
   let oy = 0;
   let dragging = false;
   let moved = false;
+  let samples = []; // {x, t} of the last moves for fling detection
   head.style.touchAction = "none";
   head.style.cursor = "grab";
   head.addEventListener("pointerdown", (e) => {
     if (e.target && e.target.closest && e.target.closest("button")) return;
     dragging = true;
     moved = false;
+    samples = [{ x: e.clientX, t: performance.now() }];
     try { mini.dataset.schedDrag = "1"; } catch (_) {}
     sx = e.clientX;
     sy = e.clientY;
@@ -524,20 +961,39 @@ function initMiniDrag(mini) {
     const elW = mini.offsetWidth || 272;
     const elH = mini.offsetHeight || 200;
     // Like the browser player: while dragging the window may be pushed half
-    // past the right edge — only a drop there docks (see schedMaybeDock).
-    // Anything else snaps strictly back inside on release.
+    // past the right edge — a drop a quarter-or-more out docks (suck wins),
+    // anything less snaps strictly back inside on release.
     const nx = Math.min(Math.max(8, ox + e.clientX - sx), Math.max(8, window.innerWidth - elW / 2));
     const ny = Math.min(Math.max(70, oy + e.clientY - sy), Math.max(70, window.innerHeight - elH - 8));
     mini.style.left = `${nx}px`;
     mini.style.top = `${ny}px`;
     mini.style.right = "auto";
+    try {
+      samples.push({ x: e.clientX, t: performance.now() });
+      if (samples.length > 6) samples.shift();
+    } catch (_) {}
     e.preventDefault();
   });
-  const stop = () => {
+  const stop = (e) => {
     if (!dragging) return;
     dragging = false;
     head.style.cursor = "grab";
     try { delete mini.dataset.schedDrag; } catch (_) {}
+    try {
+      // Fling: a fast rightward throw docks from anywhere (suction).
+      let fling = false;
+      if (moved && samples.length >= 2) {
+        const a = samples[0];
+        const b = samples[samples.length - 1];
+        const dt = Math.max(1, b.t - a.t);
+        const endX = e && typeof e.clientX === "number" ? e.clientX : b.x;
+        fling = (b.x - a.x) / dt > 0.9 && endX - sx > 40;
+      }
+      if (fling) {
+        schedDockToTab(mini.getBoundingClientRect().top);
+        return;
+      }
+    } catch (_) {}
     try {
       schedMaybeDock(mini, moved);
     } catch (_) {}
@@ -567,31 +1023,10 @@ function bindMiniClampOnce() {
   });
 }
 
-function openMini(atX, atY) {
-  // Reopen reuses the SAME node with no rebuild (parked alive on minimize,
-  // like the browser player) — instant, keeps scroll and size.
-  let mini = document.getElementById("scheduleMini");
-  if (mini) {
-    try {
-      mini.classList.remove("mini-hidden");
-      delete mini.dataset.docking;
-      mini.classList.remove("docking");
-      const w = mini.offsetWidth || 300;
-      const h = mini.offsetHeight || 200;
-      const r = mini.getBoundingClientRect();
-      const [nx, ny] = schedClampPos(r.left, r.top, w, h);
-      mini.style.left = `${nx}px`;
-      mini.style.top = `${ny}px`;
-      mini.style.right = "auto";
-      schedReplayOpen(mini);
-    } catch (_) {}
-    miniOpen = true;
-    setSchedTabOff(true);
-    renderMini();
-    try { enforceMiniSeparation(); } catch (_) {}
-    return;
-  }
-  mini = document.createElement("div");
+function schedBuildMini() {
+  // Single builder for the floating window (tap-open, pull preview, reopen
+  // all share the SAME node shape + minimize-into-tab behavior).
+  const mini = document.createElement("div");
   mini.id = "scheduleMini";
   mini.innerHTML = `
     <div class="sched-mini-head" data-drag>
@@ -612,9 +1047,52 @@ function openMini(atX, atY) {
     }
   });
   document.body.appendChild(mini);
+  initMiniDrag(mini);
+  bindMiniClampOnce();
+  return mini;
+}
+
+function openMini(atX, atY) {
+  // Reopen reuses the SAME node with no rebuild (parked alive on minimize,
+  // like the browser player) — instant, keeps scroll and size.
+  ++schedSeq; // this open owns the window; any pending dock/cancel dies
+  let mini = document.getElementById("scheduleMini");
+  if (mini) {
+    // Tap reopens with the reverse-black-hole bloom out of the tab point.
+    // Single-motion order: kill strays → reset tab → render content → park
+    // final spot (separation included) → measure the tab delta → ONE bloom.
+    // Nothing moves after.
+    try {
+      schedKillAnims(mini);
+      schedTabReset();
+      mini.classList.remove("mini-hidden", "sched-pulling", "docking", "sched-emerge", "sched-anim");
+      delete mini.dataset.docking;
+      mini.style.opacity = "";
+      mini.style.transform = "";
+      mini.style.transformOrigin = "";
+      renderMini(); // content first: clamp + measure see the final size
+      const w = mini.offsetWidth || 300;
+      const h = mini.offsetHeight || 200;
+      const r = mini.getBoundingClientRect();
+      const [nx, ny] = schedClampPos(r.left, r.top, w, h);
+      mini.style.left = `${nx}px`;
+      mini.style.top = `${ny}px`;
+      mini.style.right = "auto";
+      try { enforceMiniSeparation(); } catch (_) {}
+      const delta = schedTabDelta(mini);
+      setSchedTabOff(true);
+      schedBloomFromTab(mini, delta, 520);
+    } catch (_) {}
+    miniOpen = true;
+    schedGuardSoon();
+    return;
+  }
+  mini = schedBuildMini();
+  if (!mini) return;
   // Free-floating window: opens around the tap point when the tab was tapped
   // (otherwise docked on the right rail under the tab), clamped on-screen.
   mini.style.visibility = "hidden";
+  renderMini(); // content first: measure sees the final size (hidden still lays out)
   const mw = mini.offsetWidth || 300;
   const mh = mini.offsetHeight || 220;
   let [left, top] = schedClampPos(
@@ -627,14 +1105,14 @@ function openMini(atX, atY) {
   mini.style.top = `${top}px`;
   mini.style.right = "auto";
   mini.style.visibility = "";
-  // Fresh nodes rise with the same x5-rise animation as the browser player.
-  schedReplayOpen(mini);
-  setSchedTabOff(true);
-  initMiniDrag(mini);
-  bindMiniClampOnce();
-  miniOpen = true;
-  renderMini();
+  // Fresh nodes bloom out of the tab point (reverse black hole, tap path).
+  // Same single-motion order as reopen: render → park → measure → bloom.
   try { enforceMiniSeparation(); } catch (_) {}
+  const delta = schedTabDelta(mini);
+  setSchedTabOff(true);
+  schedBloomFromTab(mini, delta, 520);
+  miniOpen = true;
+  schedGuardSoon();
 }
 
 /* ---------- detail dialog: full task + Task Instructions + runs ---------- */
@@ -1848,8 +2326,9 @@ function onSchedPush(data) {
     jobs = list.filter((j) => j && typeof j.job_id === "string");
     ensureTab();
     // Closed by default: never auto-pop. Only refresh the list when the
-    // window already exists (open or parked).
-    if (document.getElementById("scheduleMini")) {
+    // window already exists (open or parked) — never rebuild the DOM under
+    // an active pull gesture (the release re-renders with fresh data).
+    if (document.getElementById("scheduleMini") && !schedPull) {
       miniOpen = true;
       renderMini();
     }

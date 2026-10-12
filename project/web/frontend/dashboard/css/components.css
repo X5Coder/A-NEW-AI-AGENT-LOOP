@@ -10101,3 +10101,86 @@ body:not(.sched-visible) #scheduleMini {
     animation: none;
   }
 }
+/* ---------- scheduler tab: pull-follow + black-hole motion (schedule ONLY) ---
+   The collapsed tab never leaves its rail spot: hover only tints it, never
+   translates it. Pulling it leftward births the window at the tab and drags
+   it out under the finger (1:1 follow + bloom); releasing far parks it with
+   a short FLIP settle, a short pull sucks it back in. Closing sucks the
+   whole window into the tab point (WAAPI ~700ms, iPhone-like). Opening
+   blooms it back out of the same point (~520ms, tap or pull). Opening,
+   closing, and pull all share one expo-out curve. #browserTab / #liveMini
+   are untouched. */
+#scheduleTab {
+  /* Opacity joins the transition so the tab can fade with the pull gesture
+     (and in/out of .off) instead of blinking. */
+  transition: background 250ms var(--ease), transform 300ms var(--ease), opacity 180ms var(--ease);
+}
+#scheduleTab:not(.dragging):not(.pulling):hover {
+  transform: none;
+  background: var(--fill-tsp-gray-main);
+  border-color: var(--border-dark);
+  box-shadow: var(--sh-2), inset 2px 0 0 var(--brand);
+}
+#scheduleTab.pulling {
+  cursor: grabbing;
+  background: var(--fill-tsp-gray-main);
+  border-color: var(--brand);
+  box-shadow: var(--sh-2), inset 2px 0 0 var(--brand);
+}
+#scheduleMini.sched-pulling {
+  animation: none !important;
+  transition: none !important;
+  pointer-events: none;
+}
+#scheduleMini.sched-anim {
+  /* WAAPI owns the motion (bloom / settle) — silence the base x5-rise so it
+     never replays under the scripted animation and makes the window jump. */
+  animation: none !important;
+}
+#scheduleMini.docking {
+  /* The black-hole suck runs on WAAPI (measured toward the tab point);
+     the class only resets the old static end-state and blocks input. */
+  transform: none;
+  opacity: 1;
+  animation: none;
+  pointer-events: none;
+}
+/* ---------- browser tab: same pull + black-hole language (browser ONLY) ---
+   Same contract as the scheduler template, other ids: the rail tab never
+   leaves its spot on hover (tint only), a left pull births the player under
+   the finger, release grabs it open, closing sucks it into the tab point.
+   #scheduleTab / #scheduleMini are untouched. */
+#browserTab {
+  /* Opacity joins the transition so tab show/hide glides instead of blinking. */
+  transition: background 250ms var(--ease), transform 300ms var(--ease), opacity 180ms var(--ease);
+}
+#browserTab:not(.off):not(.dragging):not(.pulling):hover {
+  transform: none;
+  background: var(--fill-tsp-gray-main);
+  border-color: var(--border-dark);
+  box-shadow: var(--sh-2), inset 2px 0 0 var(--brand);
+}
+#browserTab.pulling {
+  cursor: grabbing;
+  background: var(--fill-tsp-gray-main);
+  border-color: var(--brand);
+  box-shadow: var(--sh-2), inset 2px 0 0 var(--brand);
+}
+#liveMini.live-pulling {
+  animation: none !important;
+  transition: none !important;
+  pointer-events: none;
+}
+#liveMini.live-anim {
+  /* WAAPI owns the motion (bloom / settle) — silence x5-rise so it never
+     replays under the scripted animation and blinks the player. Stays on. */
+  animation: none !important;
+}
+#liveMini.docking {
+  /* The black-hole suck runs on WAAPI (measured toward the tab point);
+     the class only resets the old static end-state and blocks input. */
+  transform: none;
+  opacity: 1;
+  animation: none;
+  pointer-events: none;
+}

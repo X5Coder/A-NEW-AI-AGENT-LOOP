@@ -4596,36 +4596,41 @@ function openLivePlayer(atX, atY) {
   } catch (_) {}
 }
 
-function _buildLivePlayer(atX, atY) {
+function _buildLivePlayer(atX, atY, forPull) {
   if (!browserStreamUrl) return;
+  ++liveSeq; // this open owns the player; any pending dock finish dies
   // Sticky frame: reopening (minimize -> maximize) reuses the SAME iframe
   // with no reload — only a real error rebuilds it. The URL is adopted when
   // it actually changed (fresh session), never re-pointed blindly.
   const existing = document.getElementById("liveMini");
   if (existing) {
+    // Reopen blooms out of the tab point (single motion: kill strays, park
+    // final spot, measure, ONE bloom — nothing moves after).
     try {
-      // Minimize -> maximize restores the SAME live frame with no reload.
-      // Never re-point src here; manual reload adopts fresh links.
+      liveKillAnims(existing);
+      liveTabReset();
+      existing.classList.remove("mini-hidden", "docking", "live-pulling", "live-anim");
+      try { delete existing.dataset.docking; } catch (_) {}
+      existing.style.opacity = "";
+      existing.style.transform = "";
+      existing.style.transformOrigin = "";
       // Re-clamp inside the viewport: a docked-away position must never
       // restore half off-screen.
-      existing.classList.remove("mini-hidden");
-      try {
-        const _w = existing.offsetWidth || 264;
-        const _h = existing.offsetHeight || 160;
-        const _r = existing.getBoundingClientRect();
-        existing.style.left = `${Math.min(Math.max(8, _r.left), Math.max(8, window.innerWidth - _w - 8))}px`;
-        existing.style.top = `${Math.min(Math.max(70, _r.top), Math.max(70, window.innerHeight - _h - 8))}px`;
-      } catch (_) {}
-      try {
-        existing.classList.remove("docking");
-        delete existing.dataset.docking;
-      } catch (_) {}
+      const _w = existing.offsetWidth || 264;
+      const _h = existing.offsetHeight || 160;
+      const _r = existing.getBoundingClientRect();
+      existing.style.left = `${Math.min(Math.max(8, _r.left), Math.max(8, window.innerWidth - _w - 8))}px`;
+      existing.style.top = `${Math.min(Math.max(70, _r.top), Math.max(70, window.innerHeight - _h - 8))}px`;
+      existing.style.right = "auto";
+      const delta = liveTabDelta(existing);
       document.getElementById("browserTab")?.classList.add("off");
+      if (!forPull) liveBloomFromTab(existing, delta, 520);
       startLiveWatch();
     } catch (_) {}
+    if (!forPull) liveGuardSoon();
     return;
   }
-  document.getElementById("browserTab")?.classList.add("off");
+  if (!forPull) document.getElementById("browserTab")?.classList.add("off");
   const mini = document.createElement("div");
   mini.id = "liveMini";
   mini.innerHTML = `
@@ -4654,20 +4659,13 @@ function _buildLivePlayer(atX, atY) {
   mini.querySelector(".live-mini-body").appendChild(freshFrame);
   mini.querySelector('[data-act="reload"]').addEventListener("click", () => reloadLiveFrame());
   mini.querySelector('[data-act="close"]').addEventListener("click", () => {
-    // Player × parks the player off-screen (SAME iframe kept alive, stream
-    // keeps running, reopen is instant with no Loading). The watch keeps
-    // running so a flap heals silently while hidden. Real closing = edge tab ×.
+    // Player × sucks the player back into the edge tab (same black-hole
+    // language): SAME iframe kept alive, stream keeps running, reopen is
+    // instant with no Loading. Real closing = edge tab ×.
     try {
-      mini.classList.add("mini-hidden");
-      document.getElementById("browserTab")?.classList.remove("off");
-      refreshEdgeTab();
+      dockPlayerToTab(mini.getBoundingClientRect().top);
     } catch (_) {
-      try {
-        const r = mini.getBoundingClientRect();
-        dockPlayerToTab(r.top);
-      } catch (_) {
-        dockPlayerToTab(0);
-      }
+      dockPlayerToTab(0);
     }
   });
   syncPlayerContinue(mini);
@@ -4695,6 +4693,12 @@ function _buildLivePlayer(atX, atY) {
   makeDraggable(mini, mini.querySelector("[data-drag]"));
   makeResizable(mini);
   bindMiniClampOnce();
+  if (!forPull) {
+    // Fresh nodes bloom out of the tab point (reverse black hole).
+    const delta = liveTabDelta(mini);
+    liveBloomFromTab(mini, delta, 520);
+    liveGuardSoon();
+  }
 }
 
 const TAKE_CONTROL_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l7 17 2.5-7.5L22 10z" /><path d="M14.5 13.5L19 18" /></svg>`;
@@ -4843,55 +4847,108 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function dockPlayerToTab(top) {
-  // Back to the right edge with a smooth slide-out: the player glides off
-  // screen first, then the peeking tab returns. The player is PARKED alive
-  // (same iframe, stream keeps running) — never destroyed, so reopening is
-  // instant with no Loading. Only a real browser close destroys it.
-  const mini = document.getElementById("liveMini");
-  const finish = () => {
-    const m = document.getElementById("liveMini");
-    if (m) {
-      try { delete m.dataset.docking; } catch (_) {}
-      m.classList.remove("docking");
-      m.classList.add("mini-hidden");
-    }
-    const tab = document.getElementById("browserTab");
-    if (!tab && browserStreamUrl) {
-      showEdgeTab(browserStreamUrl);
-      return;
-    }
-    if (!tab) return;
+  // Back to the right edge with the same iPhone-like black-hole suck as the
+  // scheduler template: the edge tab slides back in first as the visible
+  // target at the drop Y, the player shrinks into it (~700ms expo-out,
+  // compositor-only), then parks alive (SAME iframe, stream keeps running) —
+  // never destroyed, so reopening is instant with no Loading. Only a real
+  // browser close destroys it.
+  ++liveSeq; // this dock owns the outcome; a newer open/pull overrules it
+  const mySeq = liveSeq;
+  try {
     const y = Math.min(Math.max(70, top), Math.max(70, window.innerHeight - 140));
     if (browserTabY !== null) placeTab(0, y);
     else {
-      tab.style.left = "auto";
-      tab.style.right = "0";
-      tab.style.top = `${y}px`;
-      tab.style.bottom = "auto";
+      const tab0 = document.getElementById("browserTab");
+      if (tab0) {
+        tab0.style.left = "auto";
+        tab0.style.right = "0";
+        tab0.style.top = `${y}px`;
+        tab0.style.bottom = "auto";
+      }
     }
-    tab.classList.remove("off");
+  } catch (_) {}
+  const mini = document.getElementById("liveMini");
+  try {
+    // The tab re-enters from the right: drop any stale inline push first so
+    // the .off removal below glides it in (never a blink).
+    const tab = document.getElementById("browserTab");
+    if (tab) {
+      tab.style.transform = "";
+      tab.style.opacity = "";
+    }
+  } catch (_) {}
+  try { document.getElementById("browserTab")?.classList.remove("off"); } catch (_) {}
+  const finish = () => {
+    if (mySeq !== liveSeq) return; // superseded by a newer open/pull — hands off
+    const m = document.getElementById("liveMini");
+    if (m) {
+      try {
+        delete m.dataset.docking;
+        const anims = m.getAnimations ? m.getAnimations() : [];
+        anims.forEach((a) => { try { a.cancel(); } catch (_) {} });
+      } catch (_) {}
+      m.classList.remove("docking");
+      m.classList.add("mini-hidden");
+      m.style.transformOrigin = "";
+    }
+    const tab = document.getElementById("browserTab");
+    if (!tab && browserStreamUrl) {
+      try { showEdgeTab(browserStreamUrl); } catch (_) {}
+      return;
+    }
+    try { refreshEdgeTab(); } catch (_) {}
+    liveGuardSoon(); // watchdog: tab back on the rail, player parked
   };
   if (mini && !mini.dataset.docking) {
     mini.dataset.docking = "1";
-    mini.classList.add("docking");
-    setTimeout(finish, 300);
+    liveKillAnims(mini); // never stack a new suck over a stale one
+    mini.classList.remove("live-anim", "live-pulling");
+    mini.style.opacity = "";
+    mini.style.transform = "";
+    let sucked = false;
+    if (!liveReducedMotion() && typeof mini.animate === "function") {
+      try {
+        // Right-center of the player must land on the tab center (measured
+        // AFTER the tab was parked at the drop Y above).
+        const d = liveTabDelta(mini);
+        const mx = Math.round(d.dx * 0.52);
+        const my = Math.round(d.dy * 0.52);
+        mini.style.transformOrigin = "100% 50%";
+        mini.classList.add("docking");
+        mini.animate(
+          [
+            { transform: "translateX(0px) scale(1)", opacity: 1, offset: 0 },
+            { transform: "translateX(-12px) scale(0.988)", opacity: 1, offset: 0.3 },
+            { transform: `translateX(${mx}px) translateY(${my}px) scale(0.58)`, opacity: 0.94, offset: 0.62 },
+            { transform: `translateX(${d.dx}px) translateY(${d.dy}px) scale(0.05)`, opacity: 0, offset: 1 },
+          ],
+          { duration: 700, easing: "cubic-bezier(0.32, 0.72, 0, 1)", fill: "forwards" }
+        );
+        sucked = true;
+      } catch (_) { sucked = false; }
+    }
+    if (!sucked) {
+      try { mini.classList.add("docking"); } catch (_) {}
+    }
+    setTimeout(finish, sucked ? 720 : 60);
   } else {
     finish();
   }
 }
 
 function maybeDockPlayer(mini, wasMoved) {
-  // Dock ONLY on a forceful shove to the right: the player must end up half
-  // or more past the viewport's right edge — then it glides off with the
-  // docking animation (CSS .docking) and the edge tab returns. A tap, a
-  // leftward move, or a gentle drop never hides it: it snaps fully inside.
-  // NOTE: `>=` is deliberate — the drag clamp parks left at exactly this
-  // boundary at full shove, so strict `>` would never fire.
+  // Dock priority: pushing the player a quarter or more past the viewport's
+  // right edge docks it (the suck wins) — then it shrinks into the edge tab
+  // with the black-hole animation and the tab returns at the drop height. A
+  // tap, a leftward move, or a gentle drop never hides it: it snaps inside.
+  // NOTE: `>=` is deliberate — the drag clamp parks left at exactly the half
+  // boundary at full shove, so strict `>` would never fire there.
   try {
     const r = mini.getBoundingClientRect();
     const w = r.width || mini.offsetWidth || 264;
     const h = r.height || mini.offsetHeight || 160;
-    if (wasMoved && r.left >= window.innerWidth - w / 2) {
+    if (wasMoved && r.left >= window.innerWidth - w * 0.75) {
       dockPlayerToTab(r.top);
       return;
     }
@@ -4902,11 +4959,329 @@ function maybeDockPlayer(mini, wasMoved) {
   } catch (_) {}
 }
 
+/* ---------- edge motion: same black-hole/pull language as the scheduler template (browser ids) ----------
+   Mirrors schedule.js one-to-one (pull-follow + reverse bloom open + FLIP
+   settle + black-hole suck dock + generation guard + watchdog), only the
+   node ids differ (#browserTab / #liveMini). Kept beside the player on
+   purpose: the player owns iframe/resize/live-watch lifecycles that must
+   never tangle with the scheduler template. */
+let liveSeq = 0; // lifecycle generation: stale timers never kill newer state
+let livePull = null; // active horizontal pull-out gesture {sx, sy}
+let livePullSX = 0; // pull gesture start X
+
+function liveReducedMotion() {
+  try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
+  catch (_) { return false; }
+}
+
+function liveGuard() {
+  // Visibility watchdog: repair stuck states only — never resurrect a real
+  // close (clearLiveUI removes both nodes deliberately: both-missing = gone).
+  try {
+    if (livePull) return;
+    if (typeof manualControlOpen !== "undefined" && manualControlOpen) return;
+    const tab = document.getElementById("browserTab");
+    const mini = document.getElementById("liveMini");
+    if (!tab && !mini) return;
+    const shown = !!(mini && !mini.classList.contains("mini-hidden"));
+    if (shown) {
+      if (tab && !tab.classList.contains("off")) {
+        try { tab.classList.add("off"); } catch (_) {}
+      }
+      return;
+    }
+    if (tab) {
+      tab.classList.remove("pulling", "dragging");
+      tab.style.opacity = "";
+      tab.style.transform = "";
+      try { tab.classList.remove("off"); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+function liveGuardSoon() {
+  // Re-check after transitions settle; generation-captured so a newer
+  // lifecycle invalidates the pending check (never yanks a fresh pull).
+  try { const g = liveSeq; setTimeout(() => { if (g === liveSeq) liveGuard(); }, 850); } catch (_) {}
+}
+
+function liveKillAnims(mini) {
+  // A superseded suck/bloom (fill:forwards) would pin the player invisible
+  // under the new state — always kill before reusing the node.
+  try {
+    const anims = mini && mini.getAnimations ? mini.getAnimations() : [];
+    anims.forEach((a) => { try { a.cancel(); } catch (_) {} });
+  } catch (_) {}
+}
+
+function liveTabReset() {
+  // The tab hides ONLY via .off — never leave a stale inline push/fade.
+  try {
+    const tab = document.getElementById("browserTab");
+    if (!tab) return;
+    tab.classList.remove("pulling", "dragging");
+    tab.style.transform = "";
+    tab.style.opacity = "";
+  } catch (_) {}
+}
+
+function liveTabDelta(mini) {
+  // Vector from the player's right-center to the edge tab's center — the
+  // black-hole axis (dock/suck-back) and its reverse (bloom open).
+  try {
+    const r = mini.getBoundingClientRect();
+    const tab = document.getElementById("browserTab");
+    if (!tab) return { dx: Math.max(120, Math.round(r.width * 0.6)), dy: 0 };
+    const t = tab.getBoundingClientRect();
+    return {
+      dx: Math.round((t.left + t.width / 2) - r.right + 4),
+      dy: Math.round((t.top + t.height / 2) - (r.top + r.height / 2)),
+    };
+  } catch (_) { return { dx: 160, dy: 0 }; }
+}
+
+function liveBloomFromTab(mini, delta, ms) {
+  // Reverse black hole out of the tab point, same expo-out curve as the suck.
+  // .live-anim stays ON afterwards forever (removing it would replay x5-rise).
+  try {
+    if (!mini || typeof mini.animate !== "function" || liveReducedMotion()) return;
+    const d = delta || liveTabDelta(mini);
+    const dur = ms || 520;
+    mini.classList.remove("live-anim");
+    void mini.offsetWidth;
+    mini.classList.add("live-anim");
+    mini.style.transformOrigin = "100% 50%";
+    mini.animate(
+      [
+        { transform: `translateX(${d.dx}px) translateY(${d.dy}px) scale(0.05)`, opacity: 0, offset: 0 },
+        { transform: `translateX(${Math.round(d.dx * 0.52)}px) translateY(${Math.round(d.dy * 0.52)}px) scale(0.55)`, opacity: 0.92, offset: 0.45 },
+        { transform: "translateX(0px) scale(1)", opacity: 1, offset: 1 },
+      ],
+      { duration: dur, easing: "cubic-bezier(0.32, 0.72, 0, 1)" }
+    );
+  } catch (_) {}
+}
+
+function liveSettleFrom(mini, fromLeft, fromTop, fromScale, fromO, ms) {
+  // FLIP settle after a pull release: continues EXACTLY from the pull's
+  // visual state (same scale + opacity the finger left) and glides+grows
+  // into the parked spot — zero jump in place, zero pop.
+  try {
+    if (!mini || typeof mini.animate !== "function" || liveReducedMotion()) return;
+    const r = mini.getBoundingClientRect();
+    const ddx = Math.round(fromLeft - r.left);
+    const ddy = Math.round(fromTop - r.top);
+    const s = Number(fromScale);
+    const o = Number(fromO);
+    if (!ddx && !ddy && !(Number.isFinite(s) && s < 0.999)) return;
+    const dur = ms || 280;
+    mini.classList.remove("live-anim");
+    void mini.offsetWidth;
+    mini.classList.add("live-anim");
+    mini.style.transformOrigin = "100% 50%"; // same origin as the pull bloom
+    mini.animate(
+      [
+        { transform: `translateX(${ddx}px) translateY(${ddy}px) scale(${Number.isFinite(s) ? s : 1})`, opacity: Number.isFinite(o) ? o : 1, offset: 0 },
+        { transform: "translateX(0px) translateY(0px) scale(1)", opacity: 1, offset: 1 },
+      ],
+      { duration: dur, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+    );
+    setTimeout(() => { try { mini.style.transformOrigin = ""; } catch (_) {} }, dur + 30);
+  } catch (_) {}
+}
+
+function livePullTop(y, h) {
+  // Vertical-only clamp mid-pull: the player may hang past the right edge
+  // (coming out from behind it) — strictly parked only on release.
+  try {
+    const vh = window.innerHeight || 480;
+    return Math.min(Math.max(70, y), Math.max(70, vh - (h || 160) - 8));
+  } catch (_) { return 70; }
+}
+
+function livePullProgress(pulled) {
+  // One continuous birth curve for the whole pull (preview → move → commit
+  // settle): starts a ghost at the tab point, full-size past ~140px.
+  const p = Math.min(1, Math.max(0, pulled) / 140);
+  const e = 1 - (1 - p) * (1 - p);
+  return { p, s: 0.05 + 0.95 * e, o: 0.05 + 0.95 * p };
+}
+
+function livePullPreview(px, pointerY) {
+  // Born at the tab, out WITH the finger: center tracks the pointer while it
+  // grows (scale + opacity over ~140px). Same task as the build — no flash.
+  ++liveSeq; // invalidate any pending dock finish
+  let mini = document.getElementById("liveMini");
+  if (!mini) {
+    if (!browserStreamUrl || !livePull) return;
+    _buildLivePlayer(livePull.sx - 132, pointerY, true); // built for pull: no bloom, tab stays
+    mini = document.getElementById("liveMini");
+    if (!mini) { livePull = null; return; }
+  }
+  try {
+    liveKillAnims(mini);
+    liveTabReset();
+    mini.classList.remove("docking", "mini-hidden", "live-pulling", "live-anim");
+    try { delete mini.dataset.docking; } catch (_) {}
+    mini.classList.add("live-pulling");
+    mini.style.visibility = "";
+    const w = mini.offsetWidth || 264;
+    const h = mini.offsetHeight || 160;
+    // Anchor geometry parked ONCE — every later frame moves via transform
+    // only (compositor), left/top are never touched again mid-pull.
+    livePull.w = w;
+    livePull.h = h;
+    livePull.left0 = livePull.sx - w / 2;
+    livePull.top0 = livePullTop(pointerY - 90, h);
+    livePull.lx = px;
+    livePull.ly = pointerY;
+    livePull.raf = 0;
+    mini.style.left = `${livePull.left0}px`;
+    mini.style.top = `${livePull.top0}px`;
+    mini.style.right = "auto";
+    mini.style.transformOrigin = "100% 50%";
+    livePullApply(); // first frame, same task — no flash
+  } catch (_) {}
+}
+
+function livePullApply() {
+  // ONE compositor-cheap frame for the whole pull: position via transform
+  // only (left/top stay parked from preview) + opacity + tab slide-out. No
+  // layout reads, no layout writes — mid-pull jank is impossible.
+  const pull = livePull;
+  const mini = pull && document.getElementById("liveMini");
+  if (!pull || !mini || typeof pull.left0 !== "number") return;
+  try {
+    const g = livePullProgress(pull.sx - pull.lx);
+    const tx = Math.round(pull.lx - pull.sx);
+    const ty = Math.round(livePullTop(pull.ly - 90, pull.h || 160) - pull.top0);
+    mini.style.transform = `translate(${tx}px, ${ty}px) scale(${g.s.toFixed(3)})`;
+    mini.style.opacity = String(g.o);
+    try {
+      const tab = document.getElementById("browserTab");
+      if (tab) tab.style.transform = `translateX(${(g.p * 130).toFixed(1)}%)`;
+    } catch (_) {}
+  } catch (_) {}
+}
+
+function livePullSchedule() {
+  // Coalesce bursts of pointermove into one rAF frame (many moves per paint
+  // would otherwise stack style recalcs and stutter).
+  if (!livePull || livePull.raf) return;
+  try {
+    livePull.raf = requestAnimationFrame(() => {
+      try { if (livePull) livePull.raf = 0; } catch (_) {}
+      livePullApply();
+    });
+  } catch (_) { livePullApply(); }
+}
+
+function livePullCommit(px, py, far) {
+  // Magnetic catch: parked strictly inside continuing the pull's own
+  // scale/opacity (no pop, no jump) — then a normal player, draggable away.
+  ++liveSeq; // this commit owns the player now
+  const mini = document.getElementById("liveMini");
+  let from = null;
+  try {
+    if (mini) {
+      liveKillAnims(mini); // measure the real rect, not a stale suck's ghost
+      const r = mini.getBoundingClientRect();
+      from = { left: r.left, top: r.top };
+    }
+  } catch (_) { from = null; }
+  try {
+    if (mini) {
+      const w = mini.offsetWidth || 264;
+      const h = mini.offsetHeight || 160;
+      const maxLeft = Math.max(8, window.innerWidth - w - 8);
+      const maxTop = Math.max(70, window.innerHeight - h - 8);
+      mini.style.left = `${Math.min(Math.max(8, px - w / 2), maxLeft)}px`;
+      mini.style.top = `${Math.min(Math.max(70, py - 90), maxTop)}px`;
+      mini.style.right = "auto";
+      mini.style.transform = "";
+      mini.style.opacity = "";
+      mini.classList.remove("live-pulling");
+      // Continue the pull's own scale/opacity into the settle (origin stays
+      // right-center until the settle releases it) — no pop, no jump.
+      const cg = livePullProgress(Number(far) || 0);
+      if (from) liveSettleFrom(mini, from.left, from.top, cg.s, cg.o);
+    }
+  } catch (_) {}
+  try {
+    const tab = document.getElementById("browserTab");
+    if (tab) {
+      // The tab keeps flying out right and fades while .off kills its clicks.
+      tab.style.transform = "translateX(130%)";
+      tab.style.opacity = "0";
+      tab.classList.add("off");
+    }
+  } catch (_) {}
+  liveGuardSoon();
+}
+
+function livePullCancel(pull) {
+  // Short pull: sucked back into the tab (fast mirror of the dock suck).
+  // The player node is never removed (same iframe stays alive).
+  ++liveSeq; // this cancel owns the outcome; a newer pull/open overrules it
+  const mySeq = liveSeq;
+  const mini = document.getElementById("liveMini");
+  const hide = () => {
+    if (mySeq !== liveSeq) return; // superseded — leave the newer state alone
+    try {
+      const m = document.getElementById("liveMini");
+      if (m) {
+        const anims = m.getAnimations ? m.getAnimations() : [];
+        anims.forEach((a) => { try { a.cancel(); } catch (_) {} });
+        m.classList.remove("live-pulling", "docking", "live-anim");
+        m.style.transformOrigin = "";
+        m.style.transform = "";
+        m.style.opacity = "";
+        m.classList.add("mini-hidden");
+      }
+    } catch (_) {}
+    try {
+      const tab = document.getElementById("browserTab");
+      if (tab) {
+        // Glide back IN from the right in the same task as .off removal.
+        tab.style.transform = "";
+        tab.style.opacity = "";
+        tab.classList.remove("off");
+      }
+    } catch (_) {}
+    liveGuardSoon(); // watchdog: the rail tab must be back and alive
+  };
+  try {
+    if (!mini) { hide(); return; }
+    if (!liveReducedMotion() && typeof mini.animate === "function") {
+      const fromT = mini.style.transform && mini.style.transform !== "none"
+        ? mini.style.transform : "scale(1)";
+      const fromO = Number(mini.style.opacity);
+      const d = liveTabDelta(mini);
+      mini.classList.remove("live-pulling");
+      mini.classList.add("docking");
+      mini.style.transformOrigin = "100% 50%";
+      mini.style.transform = "";
+      mini.style.opacity = "";
+      mini.animate(
+        [
+          { transform: fromT, opacity: Number.isFinite(fromO) ? fromO : 1, offset: 0 },
+          { transform: `translateX(${d.dx}px) translateY(${d.dy}px) scale(0.05)`, opacity: 0, offset: 1 },
+        ],
+        { duration: 320, easing: "cubic-bezier(0.32, 0.72, 0, 1)", fill: "forwards" }
+      );
+      setTimeout(hide, 340);
+      return;
+    }
+  } catch (_) {}
+  hide();
+}
+
 function initTabDrag(tab) {
-  // Vertical-only rail (mouse + touch via Pointer Events): a tap opens the
-  // player at the tap height, a drag slides the tab up/down along the right
-  // edge and never leaves it. Presses starting on the × button are left
-  // alone so closing keeps working.
+  // Right-rail gestures: tap opens the player, vertical drag slides the tab,
+  // horizontal pull-left draws the player out from behind the edge (release
+  // past ~48px grabs it open, shorter sucks back). Hover never moves the tab
+  // (CSS hover only tints). Presses starting on the × button are left alone
+  // so closing keeps working. Touch gets a wider tap threshold (jitter).
   let sy = 0;
   let oy = 0;
   let moved = false;
@@ -4921,7 +5296,9 @@ function initTabDrag(tab) {
     const r = tab.getBoundingClientRect();
     dragging = true;
     moved = false;
+    livePull = null;
     tapLimit = e.pointerType === "touch" ? 14 : 6;
+    livePullSX = e.clientX;
     sy = e.clientY;
     oy = r.top;
     tab.classList.add("dragging");
@@ -4932,15 +5309,48 @@ function initTabDrag(tab) {
   });
   tab.addEventListener("pointermove", (e) => {
     if (!dragging) return;
-    if (Math.abs(e.clientY - sy) > tapLimit) moved = true;
-    if (moved) placeTab(0, oy + e.clientY - sy);
+    const dx = e.clientX - livePullSX;
+    const dy = e.clientY - sy;
+    // Pull threshold follows the pointer: touch jitters, so it needs the full
+    // run-up; a mouse engages almost immediately (a tap never travels 12px
+    // purely horizontal). Past 60px left always wins.
+    const need = e.pointerType === "touch" ? 24 : 12;
+    if (!livePull && dx < -need && (Math.abs(dx) > Math.abs(dy) * 1.15 + 8 || dx < -60)) {
+      // Pull-out takes over: freeze vertical sliding, birth the player at
+      // the tab and drag it out under the finger.
+      livePull = { sx: livePullSX, sy };
+      tab.classList.add("pulling");
+      livePullPreview(e.clientX, e.clientY);
+    }
+    if (livePull) {
+      // Cache coords, paint once per frame (never style-thrash per event).
+      livePull.lx = e.clientX;
+      livePull.ly = e.clientY;
+      livePullSchedule();
+    } else {
+      if (Math.abs(dy) > tapLimit || Math.abs(dx) > tapLimit) moved = true;
+      if (moved) placeTab(0, oy + e.clientY - sy);
+    }
     e.preventDefault();
   });
   const end = (e) => {
     if (!dragging) return;
     dragging = false;
     tab.classList.remove("dragging");
-    if (!moved) {
+    const isUp = !e || e.type === "pointerup";
+    if (livePull) {
+      // Cancel never opens (interrupted gesture just sucks back).
+      const pull = livePull;
+      livePull = null;
+      tab.classList.remove("pulling");
+      const far = isUp && e && typeof e.clientX === "number" ? pull.sx - e.clientX : 0;
+      const px = isUp && e && typeof e.clientX === "number" ? e.clientX : pull.sx;
+      const py = isUp && e && typeof e.clientY === "number" ? e.clientY : pull.sy;
+      if (far > 48) livePullCommit(px, py, far);
+      else livePullCancel(pull);
+      return;
+    }
+    if (isUp && !moved) {
       const px = e && typeof e.clientX === "number" ? e.clientX : undefined;
       const py = e && typeof e.clientY === "number" ? e.clientY : undefined;
       openLivePlayer(px, py);
@@ -4967,6 +5377,7 @@ function makeDraggable(el, handle) {
   let oy = 0;
   let dragging = false;
   let moved = false;
+  let samples = []; // {x, t} of the last moves — fling detection for liveMini
   handle.style.touchAction = "none";
   handle.style.cursor = "grab";
   handle.addEventListener("pointerdown", (e) => {
@@ -4974,6 +5385,7 @@ function makeDraggable(el, handle) {
     if (el.classList.contains("docked")) return;
     dragging = true;
     moved = false;
+    samples = [{ x: e.clientX, t: performance.now() }];
     sx = e.clientX;
     sy = e.clientY;
     const r = el.getBoundingClientRect();
@@ -4996,12 +5408,29 @@ function makeDraggable(el, handle) {
     const ny = Math.min(Math.max(0, oy + e.clientY - sy), Math.max(0, window.innerHeight - elH - 8));
     el.style.left = `${nx}px`;
     el.style.top = `${ny}px`;
+    try {
+      samples.push({ x: e.clientX, t: performance.now() });
+      if (samples.length > 6) samples.shift();
+    } catch (_) {}
     e.preventDefault();
   });
-  const stop = () => {
+  const stop = (e) => {
     if (dragging && el.id === "liveMini") {
       try {
-        maybeDockPlayer(el, moved);
+        // Fling: a fast rightward throw docks from anywhere (suction).
+        let fling = false;
+        if (moved && samples.length >= 2) {
+          const a = samples[0];
+          const b = samples[samples.length - 1];
+          const dt = Math.max(1, b.t - a.t);
+          const endX = e && typeof e.clientX === "number" ? e.clientX : b.x;
+          fling = (b.x - a.x) / dt > 0.9 && endX - sx > 40;
+        }
+        if (fling) {
+          dockPlayerToTab(el.getBoundingClientRect().top);
+        } else {
+          maybeDockPlayer(el, moved);
+        }
       } catch (_) {}
     }
     dragging = false;
