@@ -12,7 +12,8 @@ let wsPath = "";
 let wsVersion = 0;
 let wsBusy = false;
 let wsFile = null; // opened file view { full, name, meta, kind } — null = folder listing
-let wsReadOnly = false; // browser-downloads area: no upload / mkdir / delete
+let wsReadOnly = false; // browser-downloads area: no upload / mkdir
+let wsDeleteBlocked = false; // true only inside the VIRTUAL downloads view (server read_only flag)
 let wsReveal = null; // {dir, name} from chat blue-token click — reveal once, then clear
 
 function fmtSize(bytes) {
@@ -107,10 +108,15 @@ async function loadWorkspace() {
       });
     } catch (_) {}
 
-    // Browser downloads are read-only: no upload / new-folder / delete inside them.
+    // Browser downloads: upload / new-folder stay hidden inside downloads
+    // (the folder is sync-managed), but delete is allowed for anything
+    // INSIDE a real Workspace/downloads/ — only the virtual (library) view
+    // is fully read-only, flagged by the server's read_only marker.
+    // The top-level downloads folder itself is never deletable (protected).
     try {
       const inDl = wsPath === "downloads" || wsPath.startsWith("downloads/");
       wsReadOnly = inDl;
+      wsDeleteBlocked = inDl && data?.read_only === true;
       const up = document.getElementById("wsUploadBtn");
       const mk = document.getElementById("wsMkdirBtn");
       if (up) up.style.display = inDl ? "none" : "";
@@ -217,8 +223,10 @@ async function loadWorkspace() {
       const badge = isExt ? `<span class="ws-ext">browser</span>` : "";
       const go = isFolder ? arrowSvg() : downloadSvg();
       // The top-level downloads folder is essential: never offer delete for it.
+      // Anything INSIDE a real downloads/ is user-deletable; only the
+      // virtual (library) view blocks delete.
       const isProtected = wsPath === "" && (e?.name || "") === "downloads";
-      const del = (wsReadOnly || isProtected) ? "" : `<button type="button" class="ws-del" title="Delete ${escName(e?.name || "")}" aria-label="Delete ${escName(e?.name || "")}">${trashSvg()}</button>`;
+      const del = (wsDeleteBlocked || isProtected) ? "" : `<button type="button" class="ws-del" title="Delete ${escName(e?.name || "")}" aria-label="Delete ${escName(e?.name || "")}">${trashSvg()}</button>`;
       btn.innerHTML = `
         ${thumb}
         <span class="ws-info">
@@ -478,7 +486,7 @@ function renderFileView(list, file) {
     <p class="ws-preview-note">Preview isn't available for this file here.</p>
     <span class="ws-file-actions">
       <button type="button" class="glass-btn" id="wsFileBack">Back</button>
-      ${wsReadOnly ? "" : `<button type="button" class="glass-btn danger" id="wsFileDelete">Delete</button>`}
+      ${wsDeleteBlocked ? "" : `<button type="button" class="glass-btn danger" id="wsFileDelete">Delete</button>`}
       <button type="button" class="glass-btn" id="wsFileDownload">Download</button>
     </span>`;
   view.querySelector(".ws-file-name").textContent = file.name;

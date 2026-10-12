@@ -1,6 +1,6 @@
 {
   "name": "trigger_search",
-  "description": "The single trigger tool: searches ALL available event trigger types (library + project, by embedding) AND manages trigger instances (create, list, get, update, delete). Use action=search first to find a valid trigger type, then action=create with that trigger_name plus task and config to arm a one-time reactive skill. Use list/get/update/delete to manage armed triggers.",
+  "description": "The single trigger tool: searches ALL available event trigger types (library + project, by embedding) AND manages trigger instances (create, list, get, update, delete). Unified model for every trigger: action=search finds the event (trigger_name), then action=create takes that event plus task and config — the task is sent to the same text model (system prompt + last-10 chat + todo) which creates a temporary Skill under skills/trigger_skills; when the event fires the Skill runs once, then the trigger dies and its skill is deleted. Library page monitor (manage_triggers): create with config {\"url\": \"https://...\", \"kind\": ..., \"value\": ...} or {\"url\": ..., \"conditions\": [{...}]} — one entry owns one library trigger plus one Skill; create one entry per event for a dedicated Skill each (same url, different kind/value).",
   "inputs": {
     "action": {
       "type": "string",

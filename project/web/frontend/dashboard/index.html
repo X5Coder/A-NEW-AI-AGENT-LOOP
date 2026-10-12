@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="/css/tokens.css?v=13" />
   <link rel="stylesheet" href="/css/base.css?v=9" />
   <link rel="stylesheet" href="/css/layout.css?v=20" />
-  <link rel="stylesheet" href="/css/components.css?v=103" />
+  <link rel="stylesheet" href="/css/components.css?v=110" />
   <link rel="stylesheet" href="/css/responsive.css?v=22" />
 </head>
 <body>
@@ -317,9 +317,6 @@
               <button class="icon-btn" id="schedRunBack" type="button" aria-label="Back to agent">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
               </button>
-              <div class="schedrun-titles">
-                <h2 id="schedRunTitle" dir="auto">Scheduled run</h2>
-              </div>
             </div>
             <div class="chat-scroll" id="schedRunScroll">
               <div class="chat-inner" id="schedRunLog"></div>
@@ -361,7 +358,7 @@
                   <div class="attach-menu mode-menu" id="schedRunModeMenu"></div>
                 </div>
 
-                <textarea id="schedRunInput" rows="1" dir="auto" placeholder="راسل لاستكمال المهمة…"></textarea>
+                <textarea id="schedRunInput" rows="1" dir="auto" placeholder="Follow up on this task…"></textarea>
 
                 <div class="composer-send-group">
                   <button type="button" class="composer-btn mic" id="schedRunMicBtn" aria-label="Voice input">
@@ -457,8 +454,16 @@
                   <p>Source repository and installed console version.</p>
                 </div>
               </div>
-              <div class="settings-row">
-                <a class="settings-link" href="https://github.com/X5Coder/X5Agent" target="_blank" rel="noopener">X5Coder / X5Agent</a>
+              <div class="settings-row proj-row">
+                <span class="proj-mark" aria-hidden="true">
+                  <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="6" y="6" width="20" height="20" rx="4" fill="#fff" />
+                  </svg>
+                </span>
+                <span class="proj-meta">
+                  <a class="settings-link" href="https://github.com/X5Coder/X5Agent" target="_blank" rel="noopener">X5Coder / X5Agent</a>
+                  <span class="proj-sub">Installed console version</span>
+                </span>
                 <span class="settings-version" id="projVersion">v0.7.0</span>
               </div>
             </div>
@@ -516,7 +521,26 @@
             <div class="card settings-card" data-anim>
               <div class="settings-head">
                 <div class="settings-icon danger" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+                </div>
+                <div class="settings-head-text">
+                  <h3>Chat history</h3>
+                  <p>Delete the main agent chat and its search index. Your saved memories stay untouched.</p>
+                </div>
+              </div>
+              <div class="settings-row chat-clear-row">
+                <button class="btn btn-primary settings-btn chat-clear-btn" id="clearChatBtn" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+                  Delete chat history
+                </button>
+                <span class="settings-version" id="chatCountBadge" title="Messages in the main chat">…</span>
+              </div>
+            </div>
+
+            <div class="card settings-card" data-anim>
+              <div class="settings-head">
+                <div class="settings-icon danger" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 1-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
                 </div>
                 <div class="settings-head-text">
                   <h3>Account</h3>
@@ -590,6 +614,6 @@
   <div class="chart-tip" id="chartTip"></div>
   <div class="toast-wrap" id="toastWrap"></div>
 
-  <script type="module" src="/js/app.js?v=63"></script>
+  <script type="module" src="/js/app.js?v=67"></script>
 </body>
 </html>

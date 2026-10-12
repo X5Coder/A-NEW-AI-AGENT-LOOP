@@ -54,7 +54,12 @@ def library_downloads_dir() -> Path | None:
 
 
 def workspace_downloads_dir() -> Path:
-    """X5Agent/Workspace/downloads/ (created on demand)."""
+    """X5Agent/Workspace/downloads/ path (never created here).
+
+    An empty real folder would shadow the live virtual downloads/ view
+    forever, so the directory is created lazily inside sync_once() only
+    when the first settled file is actually moved.
+    """
     try:
         import sys as _sys
 
@@ -63,14 +68,9 @@ def workspace_downloads_dir() -> Path:
             _sys.path.insert(0, str(proj))
         from core.paths import workspace_root as _ws
 
-        target = _ws() / "downloads"
+        return _ws() / "downloads"
     except Exception:
-        target = Path(__file__).resolve().parents[3] / "X5Agent" / "Workspace" / "downloads"
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    return target
+        return Path(__file__).resolve().parents[3] / "X5Agent" / "Workspace" / "downloads"
 
 
 def unique_target(dst_dir: Path, name: str) -> Path:
@@ -112,10 +112,7 @@ def sync_once(src: Path | None = None, dst: Path | None = None,
         if not src_dir.is_dir():
             return 0
         dst_dir = dst if dst is not None else workspace_downloads_dir()
-        try:
-            dst_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            return 0
+        dst_ready = False
         limit = MAX_SINGLE_FILE_BYTES if max_bytes is None else max_bytes
         try:
             entries = sorted(
@@ -149,6 +146,12 @@ def sync_once(src: Path | None = None, dst: Path | None = None,
                 _seen[name] = fingerprint
                 continue  # first sighting (or still writing) — move next cycle
             try:
+                if not dst_ready:
+                    try:
+                        dst_dir.mkdir(parents=True, exist_ok=True)
+                    except Exception:
+                        return moved
+                    dst_ready = True
                 target = unique_target(dst_dir, name)
                 shutil.move(str(entry), str(target))
             except Exception:

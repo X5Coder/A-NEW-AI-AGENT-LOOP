@@ -1,174 +1,193 @@
-import sys, os, json, time, wave, struct, math
+"""New-layers tests: concurrent scheduler execution, STT fallback, chat vectors.
+
+Safe: no network (LLM/STT/embeddings are mocked), no import-time side
+effects, real Data files are snapshotted and restored. The old script
+version wiped scheduler.json + conversation.json at import, deleted every
+real scheduled skill, made real LLM calls, and imported modules that no
+longer exist (triage) — never do that again.
+"""
+import json
+import sys
+import time
+import wave
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
-os.environ.setdefault("OPENROUTER_API_KEY", "test-dummy-key")
 
-# Unified test paths: fixtures live in X5Agent/Data (same single source of truth as runtime)
-_REPO = Path(__file__).resolve().parents[2]
-DATA_DB = _REPO / "X5Agent" / "Data" / "database"
-DATA_VEC = _REPO / "X5Agent" / "Data" / "vector"
-DATA_AUDIO = _REPO / "X5Agent" / "Data" / "files" / "audio"
-DATA_DB.mkdir(parents=True, exist_ok=True)
-DATA_VEC.mkdir(parents=True, exist_ok=True)
-DATA_AUDIO.mkdir(parents=True, exist_ok=True)
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-print("=== 1) Concurrent scheduler test ===")
-from core.scheduler.engine import check_and_execute_due_jobs
-import pathlib
-pathlib.Path(str(DATA_DB / "scheduler.json")).write_text("[]", encoding="utf-8")
-from core.tools.scheduler.tool import execute as sch
-from core.tools.todo_list.tool import execute as todo
-# Create 3 due jobs at same time
-for i in range(3):
-    r = sch("create", task=f"مهمة متزامنة {i+1} - in 1m", start_at="in 1m", repeat="every 1m")
-    print(f" created {r['job']['job_id']}")
-# Make all due now
-import json as js
-from datetime import datetime, timezone, timedelta
-db = Path(str(DATA_DB / "scheduler.json"))
-jobs = js.loads(db.read_text(encoding="utf-8"))
-for j in jobs:
-    j["next_run"] = (datetime.now(timezone.utc)-timedelta(seconds=10)).isoformat()
-    j["status"]="active"
-db.write_text(js.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
-import unittest.mock as mock, time as tm
-start = tm.time()
-with mock.patch("core.agent.loop.engine.run_loop") as ml:
-    def fake_run(*args, **kwargs):
-        tm.sleep(0.5)  # simulate work
-        return {"final_answer":"done","steps":2}
-    ml.side_effect = fake_run
-    executed = check_and_execute_due_jobs(api_key="dummy", verbose=True)
-elapsed = tm.time()-start
-print(f" executed {len(executed)} jobs in {elapsed:.2f}s")
-# Sequential would be 3*0.5=1.5s + overhead, concurrent with 3 workers should be ~0.5-0.8s
-if elapsed < 1.0:
-    print(" ✅ concurrent (ThreadPool) works - parallel")
-else:
-    print(" ⚠️ sequential? elapsed", elapsed)
-# cleanup
-pathlib.Path(str(DATA_DB / "scheduler.json")).write_text("[]", encoding="utf-8")
-for p in Path("skills/scheduled_skills").iterdir():
-    if p.is_dir() and p.name != ".gitkeep":
-        import shutil; shutil.rmtree(str(p))
+import pytest
 
-print("\n=== 2) STT filter layer ===")
-from core.agent.filters.stt_correction import transcribe_audio, correct_text, process_audio_record
-from PIL import Image  # not needed
-# Create dummy wav silence
-dummy = Path(str(DATA_AUDIO / "test_audio.wav"))
-with wave.open(str(dummy),"w") as wf:
-    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
-    wf.writeframes(b"\x00\x00"*8000)
-print(" transcribing dummy...")
-raw = transcribe_audio(str(dummy))
-print(f" raw: '{raw[:50]}'")
-if os.environ.get("OPENROUTER_API_KEY", "test-dummy-key") in ("", "test-dummy-key", "dummy"):
-    print(" ⏭️ skipped STT-correction/triage/pipeline live checks (no real OPENROUTER_API_KEY)")
-    dummy.unlink(missing_ok=True)
-    print("\n=== SKIPPED LIVE-API PARTS (dummy key) ===")
-    sys.exit(0)
-clean = correct_text("اممم اهلااا كيف حالكك اليوم امم", api_key=os.environ["OPENROUTER_API_KEY"])
-print(f" corrected: '{clean[:100]}'")
-assert "اهلا" in clean or "كيف حالك" in clean
-assert "امم" not in clean.lower()
-print(" ✅ STT correction removes filler and fixes errors, no invention")
-# test via process_audio_record
-res = process_audio_record(str(dummy))
-print(f" process_audio_record raw {res['raw_text'][:30]} clean {res['clean_text'][:30]}")
-dummy.unlink(missing_ok=True)
+GUARD_DB_FILES = ("scheduler.json", "todos.json", "conversation.json")
+GUARD_VECTOR_FILES = ("chat_embeddings.json",)
 
-print("\n=== 3) Triage filter layer ===")
-from core.agent.filters.triage import triage_user_message
-# Simple greeting should answer directly without routing
-r1 = triage_user_message("اهلا", api_key=os.environ["OPENROUTER_API_KEY"])
-print(f" triage 'اهلا' -> {r1['action']} content {r1.get('content','')[:50]}")
-assert r1["action"]=="answer"
-print(" ✅ triage saves tokens for simple greeting")
-# Task should route
-r2 = triage_user_message("اعملي ملف hello.txt بمحتوى test", api_key=os.environ["OPENROUTER_API_KEY"])
-print(f" triage task -> {r2['action']}")
-assert r2["action"]=="route"
-print(" ✅ triage routes task to main workflow")
-# Uncertain should route
-r3 = triage_user_message("ممكن تحلل الملف اللي عندي؟", api_key=os.environ["OPENROUTER_API_KEY"])
-print(f" triage uncertain -> {r3['action']}")
-assert r3["action"]=="route"
-print(" ✅ triage strict - uncertain routes too")
 
-print("\n=== 3b) Pipeline integration ===")
-from core.agent.filters.pipeline import handle_user_input
-# Simple via pipeline should answer without loop
-res = handle_user_input(user_input="اهلا", api_key=os.environ["OPENROUTER_API_KEY"], verbose=False)
-print(f" pipeline simple -> {res['action']} saved_tokens {res.get('saved_tokens')}")
-assert res["action"]=="answer"
-# Task via pipeline should route to loop (mock loop to avoid real call)
-with mock.patch("core.agent.loop.engine.run_loop") as ml2:
-    ml2.return_value = {"final_answer":"تم انشاء الملف","steps":2}
-    res2 = handle_user_input(user_input="اعملي ملف test.txt", api_key=os.environ["OPENROUTER_API_KEY"], verbose=False)
-    print(f" pipeline task -> {res2['action']} loop steps {res2.get('loop_result',{}).get('steps')}")
-    assert res2["action"]=="route"
-print(" ✅ pipeline saves tokens for simple, routes tasks")
+@pytest.fixture
+def guard():
+    from core.paths import data_db_dir, data_vector_dir
+    db, vec = data_db_dir(), data_vector_dir()
+    before_db = {}
+    for name in GUARD_DB_FILES:
+        p = db / name
+        before_db[name] = p.read_bytes() if p.is_file() else None
+    before_vec = {}
+    for name in GUARD_VECTOR_FILES:
+        p = vec / name
+        before_vec[name] = p.read_bytes() if p.is_file() else None
+    proj = Path(__file__).resolve().parents[1]
+    skills = proj / "skills" / "scheduled_skills"
+    skills_before = set(p.name for p in skills.iterdir()) if skills.is_dir() else None
+    sessions = db / "scheduler_sessions"
+    sessions_before = set(p.name for p in sessions.iterdir()) if sessions.is_dir() else None
+    yield
+    import shutil
+    for name, content in before_db.items():
+        p = db / name
+        if content is None:
+            if p.is_file():
+                p.unlink()
+        else:
+            p.write_bytes(content)
+    for name, content in before_vec.items():
+        p = vec / name
+        if content is None:
+            if p.is_file():
+                p.unlink()
+        else:
+            p.write_bytes(content)
+    if skills_before is None:
+        if skills.is_dir():
+            shutil.rmtree(str(skills))
+    else:
+        if skills.is_dir():
+            for p in skills.iterdir():
+                if p.name not in skills_before:
+                    shutil.rmtree(str(p)) if p.is_dir() else p.unlink()
+    if sessions_before is None:
+        if sessions.is_dir():
+            shutil.rmtree(str(sessions))
+    else:
+        if sessions.is_dir():
+            for p in sessions.iterdir():
+                if p.name not in sessions_before:
+                    p.unlink()
 
-print("\n=== 4) Chat vector per-message embeddings ===")
-from core.agent.memory.chat_vector_store import add_message, delete_message, update_message, search, ensure_synced, clear_all
-from pathlib import Path as P
-# Clear
-clear_all()
-P(str(DATA_DB / "conversation.json")).write_text("[]", encoding="utf-8")
-# Add 3 messages
-import uuid, json as js2, time as tm2
-conv_path = Path(str(DATA_DB / "conversation.json"))
-msgs = [
-    {"id": "msg1", "role":"user", "content":"احب البرمجة بلغة بايثون", "ts":"2026-09-22T00:00:00Z"},
-    {"id": "msg2", "role":"assistant", "content":"بايثون لغة رائعة للذكاء الاصطناعي", "ts":"2026-09-22T00:01:00Z"},
-    {"id": "msg3", "role":"user", "content":"كيف اطبخ المكرونة؟", "ts":"2026-09-22T00:02:00Z"},
-]
-conv_path.write_text(js2.dumps(msgs, ensure_ascii=False, indent=2), encoding="utf-8")
-# Ensure synced will create embeddings
-ensure_synced()
-from pathlib import Path as PP
-vec_path = PP(str(DATA_VEC / "chat_embeddings.json"))
-vecs = js2.loads(vec_path.read_text(encoding="utf-8"))
-print(f" vectors after add {len(vecs)} (should 3)")
-assert len(vecs)==3
-# Search
-res = search("بايثون برمجة", k=2)
-print(f" search 'بايثون' -> {[r['message']['id'] for r in res]} scores {[r['score'] for r in res]}")
-assert res[0]["message"]["id"] in ["msg1","msg2"]
-print(" ✅ search works")
-# Delete msg2
-delete_message("msg2")
-vecs2 = js2.loads(vec_path.read_text(encoding="utf-8"))
-print(f" after delete msg2 vectors {len(vecs2)} (should 2)")
-assert len(vecs2)==2 and "msg2" not in vecs2
-conv2 = js2.loads(conv_path.read_text(encoding="utf-8"))
-print(f" conversation after delete {len(conv2)} (should 2)")
-assert len(conv2)==2
-# Search again should not return deleted
-res2 = search("بايثون", k=2)
-print(f" search after delete -> {[r['message']['id'] for r in res2]}")
-assert all(r["message"]["id"]!="msg2" for r in res2)
-print(" ✅ delete removes embedding automatically")
-# Edit msg3
-update_message("msg3", "كيف اطبخ المكرونة بالصلصة؟")
-vecs3 = js2.loads(vec_path.read_text(encoding="utf-8"))
-print(f" after edit msg3 still 2 vectors, content updated? {vecs3['msg3']['content'][:20]}")
-assert "بالصلصة" in vecs3["msg3"]["content"]
-res3 = search("صلصة", k=2)
-print(f" search 'صلصة' -> {[r['message']['id'] for r in res3]} scores {[r['score'] for r in res3]}")
-# msg3 should be in top 2 after edit (contains بالصلصة)
-assert any(r["message"]["id"]=="msg3" for r in res3), f"msg3 not in results {res3}"
-print(" ✅ edit deletes old embedding and creates new")
 
-# Test via vector_chat_search tool
-from core.tools.vector_chat_search.tool import execute as vcs
-r = vcs("بايثون", k=2)
-print(f" vector_chat_search tool -> {[x['message']['id'] for x in r['results']]}")
-print(" ✅ vector_chat_search uses persistent store")
+@pytest.fixture
+def mock_skill_llm(monkeypatch):
+    import core.ai_models.aip as aip_mod
+    monkeypatch.setattr(
+        aip_mod, "execute",
+        lambda record, canonical, kind=None: {"status": "ok", "text": "# Test Skill"})
 
-# cleanup
-clear_all()
-P(str(DATA_DB / "conversation.json")).write_text("[]", encoding="utf-8")
-print("\n=== ALL NEW LAYERS PASSED ===")
+
+def test_scheduler_executes_concurrently(guard, mock_skill_llm, monkeypatch):
+    import time as tm
+    import core.agent.loop.engine as loop_mod
+    from core.scheduler.engine import check_and_execute_due_jobs
+    from core.tools.scheduler.tool import execute as sch
+
+    for i in range(3):
+        sch("create", task=f"TEST concurrent job {i}", start_at="in 1m", repeat="every 1m")
+    from core.paths import data_db_dir
+    db = data_db_dir() / "scheduler.json"
+    jobs = json.loads(db.read_text(encoding="utf-8"))
+    test_jobs = [j for j in jobs if j["task"].startswith("TEST concurrent job")]
+    assert len(test_jobs) == 3
+    for j in test_jobs:
+        j["next_run"] = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+        j["status"] = "active"
+    db.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def fake_run(**kwargs):
+        tm.sleep(0.3)
+        return {"final_answer": "done", "steps": 2}
+
+    monkeypatch.setattr(loop_mod, "run_loop", fake_run)
+    start = tm.time()
+    executed = check_and_execute_due_jobs(verbose=False)
+    elapsed = tm.time() - start
+    ours = [e for e in executed if e["job_id"] in {j["job_id"] for j in test_jobs}]
+    assert len(ours) == 3
+    assert elapsed < 0.85, f"expected parallel (~0.3s), took {elapsed:.2f}s"
+
+
+def _make_wav(path: Path):
+    with wave.open(str(path), "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * 8000)
+
+
+def test_stt_transcribe_wiring_without_network(guard, monkeypatch, tmp_path):
+    import core.ai_models.engine as engine_mod
+    import core.ai_models.store as store_mod
+    from core.agent.filters.stt_correction import transcribe_audio
+    # No STT model is configured in this environment; stub the lookup so the
+    # test exercises local wiring (file read + call shape), never the network.
+    monkeypatch.setattr(store_mod, "require_model", lambda kind: {"model_name": "TEST"})
+    monkeypatch.setattr(engine_mod, "transcribe", lambda record, inputs, options=None: "TEST spoken words")
+    wav = tmp_path / "t.wav"
+    _make_wav(wav)
+    assert transcribe_audio(wav) == "TEST spoken words"
+
+
+def test_stt_correction_falls_back_without_model(guard, monkeypatch):
+    import core.ai_models.store as store_mod
+    from core.agent.filters.stt_correction import correct_text
+    monkeypatch.setattr(store_mod, "get_text_model", lambda: None)
+    clean = correct_text("امم اهلا كيف حالك امم")
+    assert "اهلا" in clean
+    assert "امم" not in clean
+    assert correct_text("   ") == ""
+
+
+def _fake_vectors(monkeypatch):
+    import core.embedding.service as emb_mod
+
+    def vec_for(text):
+        t = text.lower()
+        return [1.0, 0.0] if "testpython" in t else [0.0, 1.0]
+
+    monkeypatch.setattr(emb_mod, "embed_texts", lambda texts: [vec_for(t) for t in texts])
+    monkeypatch.setattr(emb_mod, "embed_query", vec_for)
+
+
+def test_chat_vector_crud_and_search(guard, monkeypatch):
+    _fake_vectors(monkeypatch)
+    from core.agent.memory import chat_vector_store as cvs
+    from core.paths import data_db_dir
+    cvs.clear_all()
+    conv_path = data_db_dir() / "conversation.json"
+    msgs = [
+        {"id": "tmsg1", "role": "user", "content": "I love testpython coding", "ts": "2026-01-01T00:00:00Z"},
+        {"id": "tmsg2", "role": "assistant", "content": "testpython is great", "ts": "2026-01-01T00:00:01Z"},
+        {"id": "tmsg3", "role": "user", "content": "how to cook pasta", "ts": "2026-01-01T00:00:02Z"},
+    ]
+    conv_path.write_text(json.dumps(msgs, ensure_ascii=False), encoding="utf-8")
+    synced = cvs.ensure_synced()
+    assert synced["vector_count"] == 3, synced
+    res = cvs.search("testpython code", k=2)
+    assert res and res[0]["message"]["id"] in ("tmsg1", "tmsg2")
+    assert cvs.delete_message("tmsg2") is True
+    res2 = cvs.search("testpython", k=5)
+    assert all(r["message"]["id"] != "tmsg2" for r in res2)
+    cvs.update_message("tmsg3", "how to cook pasta with testsauce")
+    res3 = cvs.search("testsauce", k=5)
+    assert any(r["message"]["id"] == "tmsg3" for r in res3)
+
+
+def test_vector_chat_search_tool_uses_store(guard, monkeypatch):
+    _fake_vectors(monkeypatch)
+    from core.agent.memory import chat_vector_store as cvs
+    from core.tools.vector_chat_search.tool import execute as vcs
+    from core.paths import data_db_dir
+    cvs.clear_all()
+    (data_db_dir() / "conversation.json").write_text(json.dumps(
+        [{"id": "tq1", "role": "user", "content": "testpython question", "ts": "2026-01-01T00:00:00Z"}],
+        ensure_ascii=False), encoding="utf-8")
+    cvs.ensure_synced()
+    r = vcs("testpython", k=2)
+    assert r["results"], "tool must return store results"

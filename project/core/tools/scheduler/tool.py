@@ -144,7 +144,13 @@ def _load_chat_snippet(limit: int = 30) -> str:
 
 
 def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_snippet: str) -> str:
-    """Internal LLM request using scheduler_skill_system.md. Returns skill markdown or raises with actual error (per situation)."""
+    """Internal LLM request using scheduler_skill_system.md. Returns skill markdown.
+
+    SAME routing the agent loop itself uses: AIP/1 records go through the
+    interpreter (compile-once, cached); legacy connection-JSON records use
+    the legacy engine. Raises RuntimeError with actionable guidance when
+    generation fails.
+    """
     system_path = Path(__file__).resolve().parents[3] / "prompts" / "scheduler_skill_system.md"
     system_prompt = ""
     if system_path.exists():
@@ -160,19 +166,52 @@ def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_
         steps = todo_snapshot.get("steps") or []
         parts.append(f"Todo plan: {todo_snapshot.get('task')} - Steps: {'; '.join(steps)}")
     if chat_snippet:
-        parts.append(f"Chat context (last messages with all details):\n{chat_snippet[:2000]}")
+        parts.append(f"Chat context (last 10 messages with all details):\n{chat_snippet[:2000]}")
     parts.append("Generate the skill markdown now.")
     user_prompt = "\n\n".join(parts)
 
     # Universal text model (AI Models section); refuses clearly when none configured.
     from core.ai_models.store import require_text_model
-    from core.ai_models.engine import chat as universal_chat
+    from core.ai_models.engine import is_aip_record
     _record = require_text_model()
-    content = universal_chat(
-        _record,
-        [{"role": "user", "content": user_prompt}],
-        {"system": system_prompt},
-    )
+    if is_aip_record(_record):
+        # Canonical request exactly like the loop builds it: system prompt first,
+        # then the user message (task + last-10 chat + todo). No tools needed —
+        # the model just returns the organized skill text. execute() compiles the
+        # record once (cached per kind) and retries provider-side failures
+        # internally (bounded, max 3).
+        from core.ai_models import aip as _aip
+        canonical = {
+            "version": 1,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        try:
+            res = _aip.execute(_record, canonical, "text")
+            content = (res.get("text") if isinstance(res, dict) else "") or ""
+        except Exception as e:
+            raise RuntimeError(
+                f"Skill generation failed ({e}). "
+                "Do NOT call scheduler create again right away — tell the user the AI model "
+                "service is unreachable right now and to try again in a few minutes."
+            ) from e
+    else:
+        # Legacy connection-JSON record: same request through the legacy engine.
+        from core.ai_models.engine import chat as _legacy_chat
+        try:
+            content = _legacy_chat(
+                _record,
+                [{"role": "user", "content": user_prompt}],
+                {"system": system_prompt},
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Skill generation failed ({e}). "
+                "Do NOT call scheduler create again right away — tell the user the AI model "
+                "service is unreachable right now and to try again in a few minutes."
+            ) from e
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("Skill generation returned empty content from the configured text model.")
     return content.strip()
@@ -180,7 +219,7 @@ def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_
 
 def _save_scheduled_skill(job_id: str, task: str, todo_snapshot: dict | None) -> tuple[str, str]:
     """Create skill under skills/scheduled_skills/<safe_name> via internal LLM request.
-    On any failure, the actual provider error is propagated to the original workflow (no fixed error type).
+    On failure a RuntimeError with retry guidance is raised (job is never saved half-built).
     Returns (safe_name, skill_content) on success.
     """
     project_root = Path(__file__).resolve().parents[3]
@@ -199,9 +238,9 @@ def _save_scheduled_skill(job_id: str, task: str, todo_snapshot: dict | None) ->
         safe = f"{safe}_{str(uuid.uuid4())[:4]}"
         target = base_dir / safe
 
-    chat_snippet = _load_chat_snippet(limit=30)
-    # This will raise with the real provider error per situation (missing key, timeout, 429, empty content, etc.)
-    # No fallback - error is returned to original workflow
+    chat_snippet = _load_chat_snippet(limit=10)
+    # Same-model skill generation (AIP/1 path, like the loop). Raises
+    # RuntimeError with guidance when the service is unreachable.
     llm_content = _generate_skill_content_via_llm(task, todo_snapshot, chat_snippet)
 
     target.mkdir(parents=True, exist_ok=True)
@@ -242,6 +281,40 @@ def _delete_scheduled_skill(skill_ref: str) -> bool:
         return False
 
 
+def _validate_repeat(v: Any) -> str | None:
+    """Accept only repeat shapes the engine can actually schedule.
+
+    Unknown patterns used to arm a job that silently ran once and completed
+    (e.g. "every 30s" before seconds existed). Fail clearly instead.
+    Engine ticks every 60s, so sub-minute cadences run once per tick.
+    """
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise TypeError("repeat must be string")
+    r = v.strip()
+    if not r:
+        raise ValueError("repeat must be non-empty")
+    if len(r) > 100:
+        raise ValueError("repeat too long")
+    low = r.lower()
+    if low == "daily" or low.startswith("daily at"):
+        m = re.match(r"daily at\s+(\d{1,2}):(\d{2})$", low)
+        if low.startswith("daily at") and not m:
+            raise ValueError("repeat must be 'daily' or 'daily at HH:MM'")
+        if m and (int(m.group(1)) > 23 or int(m.group(2)) > 59):
+            raise ValueError("repeat time out of range (HH 0-23, MM 0-59)")
+        return r
+    m = re.match(r"every\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hour|hours|d|day|days)$", low)
+    if m:
+        if int(m.group(1)) < 1:
+            raise ValueError("repeat interval must be at least 1")
+        return r
+    if low in ("every day", "everyday"):
+        return r
+    raise ValueError("repeat not understood (use 'daily', 'daily at HH:MM', or 'every <n> s/m/h/d')")
+
+
 def _parse_next_run(start_at: str | None, repeat: str | None, timezone_str: str | None = None) -> str | None:
     from datetime import datetime, timedelta, timezone
     import re
@@ -250,11 +323,13 @@ def _parse_next_run(start_at: str | None, repeat: str | None, timezone_str: str 
         if not start_at or start_at.strip().lower() == "now":
             base = now
         elif start_at.strip().lower().startswith("in "):
-            m = re.match(r"in\s+(\d+)\s*(m|min|minute|h|hour|d|day)", start_at.strip().lower())
+            m = re.match(r"in\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|minute|h|hour|d|day)", start_at.strip().lower())
             if m:
                 val = int(m.group(1))
                 unit = m.group(2)
-                if unit.startswith("m"):
+                if unit.startswith("s"):
+                    base = now + timedelta(seconds=val)
+                elif unit.startswith("m"):
                     base = now + timedelta(minutes=val)
                 elif unit.startswith("h"):
                     base = now + timedelta(hours=val)
@@ -321,8 +396,7 @@ def execute(action: str, job_id: str | None = None, task: str | None = None, sta
             raise ValueError("repeat_count must be 1..1000")
         if start_at is not None and not isinstance(start_at, str):
             raise TypeError("start_at must be string")
-        if repeat is not None and not isinstance(repeat, str):
-            raise TypeError("repeat must be string")
+        repeat = _validate_repeat(repeat)
         new_id = str(uuid.uuid4())[:8]
         # Practical: for ANY task (small or large) create a scheduled_skill with all details from chat
         todo_snap = _find_recent_todo_for_task(task.strip())
@@ -356,7 +430,12 @@ def execute(action: str, job_id: str | None = None, task: str | None = None, sta
             "skill_path": f"skills/scheduled_skills/{skill_ref}",
         }
         jobs.append(entry)
-        _save_jobs(jobs)
+        try:
+            _save_jobs(jobs)
+        except Exception:
+            # Never leave an orphan skill dir when the entry was not saved.
+            _delete_scheduled_skill(skill_ref)
+            raise
         return {"event": event, "action": act, "job": entry, "skill_ref": skill_ref, "skill_created": True}
 
     if not jid:
@@ -391,27 +470,64 @@ def execute(action: str, job_id: str | None = None, task: str | None = None, sta
         return {"event": event, "action": act, "job": jobs[idx]}
 
     if act == "update":
+        # The skill is the executable form of the task: a task change
+        # regenerates it via the same model, like triggers do.
+        skill_regenerated = False
         if task is not None:
             if not isinstance(task, str) or not task.strip():
                 raise ValueError("task must be non-empty string")
             jobs[idx]["task"] = task.strip()
+            skill_regenerated = True
         if start_at is not None:
             jobs[idx]["start_at"] = start_at
         if repeat is not None:
+            repeat = _validate_repeat(repeat)
             jobs[idx]["repeat"] = repeat
         if repeat_count is not None:
-            if not isinstance(repeat_count, int) or repeat_count < 1:
+            if not isinstance(repeat_count, int) or repeat_count < 1 or repeat_count > 1000:
                 raise ValueError("repeat_count invalid")
             jobs[idx]["repeat_count"] = repeat_count
         if end_at is not None:
             jobs[idx]["end_at"] = end_at
         if timezone is not None:
             jobs[idx]["timezone"] = timezone
+        if skill_regenerated:
+            todo_snap = _find_recent_todo_for_task(jobs[idx].get("task", ""))
+            chat_snippet = _load_chat_snippet(limit=10)
+            skill_content = _generate_skill_content_via_llm(
+                jobs[idx].get("task", ""), todo_snap, chat_snippet)
+            project_root = Path(__file__).resolve().parents[3]
+            target = project_root / "skills" / "scheduled_skills" / (jobs[idx].get("skill_ref") or "")
+            try:
+                target.resolve().relative_to((project_root / "skills" / "scheduled_skills").resolve())
+            except ValueError:
+                raise ValueError("stored skill_ref escapes scheduled_skills")
+            if not target.exists():
+                raise FileNotFoundError("scheduled skill folder missing for update")
+            skill_data = {
+                "name": jobs[idx].get("skill_ref"),
+                "description": jobs[idx].get("task", "")[:200],
+                "content": skill_content,
+                "instructions": skill_content,
+                "scheduled_job_id": jid,
+                "original_task": jobs[idx].get("task"),
+                "todo_snapshot": todo_snap,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "scheduled": True,
+            }
+            (target / "skill.json").write_text(json.dumps(skill_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            (target / "README.md").write_text(f"# {jobs[idx].get('skill_ref')}\n\n{skill_content}\n", encoding="utf-8")
+            jobs[idx]["skill_content_preview"] = skill_content[:200]
+            bundle = jobs[idx].get("task_bundle") or {}
+            bundle["original_user_input"] = jobs[idx].get("task", "")
+            bundle["todo_snapshot"] = todo_snap
+            jobs[idx]["task_bundle"] = bundle
+            jobs[idx]["is_large"] = bool(todo_snap and len(todo_snap.get("steps", [])) > 1)
         jobs[idx]["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         # recompute next_run if timing changed
         if start_at is not None or repeat is not None:
             jobs[idx]["next_run"] = _parse_next_run(jobs[idx].get("start_at"), jobs[idx].get("repeat"), jobs[idx].get("timezone"))
         _save_jobs(jobs)
-        return {"event": event, "action": act, "job": jobs[idx]}
+        return {"event": event, "action": act, "job": jobs[idx], "skill_regenerated": skill_regenerated}
 
     raise ValueError(f"unsupported action: {act}")

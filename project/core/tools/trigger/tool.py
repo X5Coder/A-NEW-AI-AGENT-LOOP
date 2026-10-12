@@ -1,7 +1,22 @@
 """
 Trigger tool - neutral for all plugins, manages event triggers.
-Each trigger (filesystem_new_file, etc.) is stored with task + config, auto-creates Skill in skills/trigger_skills via internal LLM.
-Triggers are one-time, concurrent without limit, die after execution and delete their skill.
+UNIFIED model for every trigger: (event: trigger_name + config) + (task).
+On create, the task is sent to the SAME configured text model with the
+trigger skill system prompt + last-10 chat + todo (SAME AIP/1 path as the
+agent loop), which returns a Skill saved temporarily under
+skills/trigger_skills. When the event fires, the engine runs that Skill
+isolated, then the trigger dies and its skill is deleted (one-time).
+
+Library layer (manage_triggers, from X5Browser): one project entry owns
+exactly ONE library trigger and ONE skill (1:1). The skill is built the
+same way (task + last-10 chat + todo); the library trigger is armed inside
+the browser (own private tab, own cadence) and the binding
+(library_trigger_id) is stored on the entry. When the library reports the
+trigger fired, the engine runs the skill isolated, then deletes both sides.
+Want a dedicated skill per event? Create one entry per event (same url,
+different kind/value) - each gets its own library trigger + skill and fires
+independently. A single entry may still carry several OR conditions, but
+they share that entry's one skill (first hit wins, like the library).
 """
 from __future__ import annotations
 
@@ -15,9 +30,13 @@ from typing import Any
 
 from .events import format_event
 
-MAX_TRIGGERS = 200
+MAX_TRIGGERS = 50  # matches engine MAX_ACTIVE_TRIGGERS: every armed trigger is watched, none silently idle.
 ALLOWED_ACTIONS = {"create", "list", "get", "delete", "update"}
 FILESYSTEM_TRIGGERS = {"filesystem_new_file", "filesystem_file_modified"}
+# The single library trigger type (X5Browser page monitor). The library runs
+# up to 100 concurrent triggers; our cap (50) stays strictly below it, so a
+# project create can never overflow the library side.
+LIBRARY_TRIGGER = "manage_triggers"
 
 
 def _validate_filesystem_config(trigger_name: str, config: dict) -> dict:
@@ -117,7 +136,234 @@ def _load_trigger_specs() -> dict[str, dict]:
                         specs[spec.get("name")] = spec
                     except Exception:
                         continue
+    # Library trigger (X5Browser page monitor): without this, search finds it
+    # but create rejects it as unknown. Read from the catalog (single source).
+    try:
+        import sys as _sys3
+        _proj3 = Path(__file__).resolve().parents[3]
+        if str(_proj3) not in _sys3.path:
+            _sys3.path.insert(0, str(_proj3))
+        from X5Browser.catalog import get_spec as _lib_spec
+        _lib = _lib_spec(LIBRARY_TRIGGER)
+        if isinstance(_lib, dict) and isinstance(_lib.get("description"), str):
+            specs[LIBRARY_TRIGGER] = {
+                "name": LIBRARY_TRIGGER,
+                "description": _lib["description"],
+                "inputs": _lib.get("inputs", {}),
+                "source": "X5Browser",
+            }
+    except Exception:
+        pass
     return specs
+
+
+def _validate_library_config(config: dict) -> dict:
+    """Validate the library trigger config. Returns cleaned start kwargs.
+
+    Mirrors the wrapper bounds (X5Browser/tools.py) so invalid args fail here
+    with a clear message instead of arming half a trigger. Never raises
+    without a reason; never boots the browser (validation only).
+    """
+    cfg = dict(config or {})
+    url = cfg.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("config.url is required for manage_triggers (http(s) site to watch)")
+    url = url.strip()
+    low = url.lower()
+    if not (low.startswith("http://") or low.startswith("https://")):
+        raise ValueError("config.url must be an http(s) URL")
+    if len(url) > 2000:
+        raise ValueError("config.url too long (max 2000)")
+    kind = cfg.get("kind")
+    conditions = cfg.get("conditions")
+    if conditions is not None:
+        if not isinstance(conditions, list) or not conditions:
+            raise ValueError("config.conditions must be a non-empty list of {kind, value}")
+        if len(conditions) > 20:
+            raise ValueError("config.conditions too many (max 20)")
+        cleaned_conds = []
+        for item in conditions:
+            if not isinstance(item, dict):
+                raise ValueError("each condition must be an object {kind, value}")
+            k = item.get("kind")
+            if not isinstance(k, str) or not k.strip():
+                raise ValueError("each condition needs a non-empty kind")
+            m = item.get("match", "contains")
+            if not isinstance(m, str) or m.strip().lower() not in ("contains", "exact"):
+                raise ValueError("condition match must be contains|exact")
+            cleaned_conds.append({"kind": k.strip(), "value": item.get("value"),
+                                  "match": m.strip().lower()})
+    else:
+        if not isinstance(kind, str) or not kind.strip():
+            raise ValueError("config.kind or config.conditions is required for manage_triggers")
+        match = cfg.get("match", "contains")
+        if not isinstance(match, str) or match.strip().lower() not in ("contains", "exact"):
+            raise ValueError("config.match must be contains|exact")
+    match = str(cfg.get("match", "contains")).strip().lower() if isinstance(cfg.get("match"), str) else "contains"
+    timeout = cfg.get("timeout_s", 3600)
+    if timeout is None:
+        timeout = 3600
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+        raise TypeError("config.timeout_s must be a number (0 = persist)")
+    if float(timeout) < 0:
+        raise ValueError("config.timeout_s must be 0 or more")
+    interval = cfg.get("check_interval_s", 5)
+    if interval is None:
+        interval = 5
+    if not isinstance(interval, (int, float)) or isinstance(interval, bool):
+        raise TypeError("config.check_interval_s must be a number 1..30")
+    if not 1 <= float(interval) <= 30:
+        raise ValueError("config.check_interval_s must be 1..30")
+    refresh = cfg.get("refresh_each_cycle", False)
+    if refresh is None:
+        refresh = False
+    if not isinstance(refresh, bool):
+        raise TypeError("config.refresh_each_cycle must be boolean")
+    reason = cfg.get("reason", "")
+    if reason is None:
+        reason = ""
+    if not isinstance(reason, str):
+        raise TypeError("config.reason must be string")
+    if len(reason) > 500:
+        raise ValueError("config.reason too long (max 500)")
+    out: dict = {"url": url, "timeout_s": float(timeout),
+                 "check_interval_s": float(interval),
+                 "refresh_each_cycle": refresh, "reason": reason}
+    if conditions is not None:
+        out["conditions"] = cleaned_conds
+    else:
+        out["kind"] = kind.strip()
+        out["value"] = cfg.get("value")
+        out["match"] = match
+    return out
+
+
+def _library_start(cleaned: dict) -> str:
+    """Arm the library trigger inside the browser. Returns its trigger id.
+
+    Raises RuntimeError with a clear cause when the browser is down or the
+    library refuses (never returns a half-armed id).
+    """
+    try:
+        import sys as _sys4
+        _proj4 = Path(__file__).resolve().parents[3]
+        if str(_proj4) not in _sys4.path:
+            _sys4.path.insert(0, str(_proj4))
+        from X5Browser.service import call_tool as _lib_call
+        raw = _lib_call("manage_triggers", {"action": "start", **cleaned})
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"Library trigger not armed ({e}). Start the browser with "
+            f"open_browser first, then create the trigger again."
+        ) from e
+    except Exception as e:
+        raise RuntimeError(f"Library trigger not armed ({e}).") from e
+    if not isinstance(raw, dict) or not raw.get("ok"):
+        cause = ""
+        if isinstance(raw, dict):
+            cause = str(raw.get("message") or raw.get("error") or "")
+        raise RuntimeError(f"Library trigger refused ({cause or 'unknown cause'}).")
+    lib_id = raw.get("trigger_id") if isinstance(raw, dict) else None
+    if not isinstance(lib_id, str) or not lib_id:
+        raise RuntimeError("Library trigger armed but returned no trigger_id.")
+    return lib_id
+
+
+def _library_stop(lib_id: str) -> bool:
+    """Cancel the library trigger. Best-effort: never raises."""
+    if not isinstance(lib_id, str) or not lib_id:
+        return False
+    try:
+        import sys as _sys5
+        _proj5 = Path(__file__).resolve().parents[3]
+        if str(_proj5) not in _sys5.path:
+            _sys5.path.insert(0, str(_proj5))
+        from X5Browser.service import call_tool as _lib_call2
+        raw = _lib_call2("manage_triggers", {"action": "stop", "trigger_id": lib_id})
+        return bool(isinstance(raw, dict) and raw.get("ok"))
+    except Exception:
+        return False
+
+
+def _library_pending_ids() -> set[str]:
+    """Pending library trigger ids. Empty set when down. Never raises, never boots."""
+    try:
+        import sys as _sys8
+        _proj8 = Path(__file__).resolve().parents[3]
+        if str(_proj8) not in _sys8.path:
+            _sys8.path.insert(0, str(_proj8))
+        from X5Browser.service import is_running as _lib_running2
+        try:
+            if not _lib_running2(quick=True):
+                return set()
+        except Exception:
+            pass
+        from X5Browser.service import call_tool as _lib_call5
+        raw = _lib_call5("manage_triggers", {"action": "list"})
+    except Exception:
+        return set()
+    if not isinstance(raw, dict):
+        return set()
+    pending = raw.get("pending")
+    ids: set[str] = set()
+    if isinstance(pending, list):
+        for item in pending:
+            if isinstance(item, dict) and isinstance(item.get("trigger_id"), str):
+                ids.add(item["trigger_id"])
+            elif isinstance(item, str):
+                ids.add(item)
+    return ids
+
+
+def _library_fired() -> list[dict]:
+    """Recent fired library triggers (for the engine poll). Never raises, never boots."""
+    try:
+        import sys as _sys6
+        _proj6 = Path(__file__).resolve().parents[3]
+        if str(_proj6) not in _sys6.path:
+            _sys6.path.insert(0, str(_proj6))
+        from X5Browser.service import is_running as _lib_running
+        try:
+            if not _lib_running(quick=True):
+                return []
+        except Exception:
+            pass
+        from X5Browser.service import call_tool as _lib_call3
+        raw = _lib_call3("manage_triggers", {"action": "list"})
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    recent = raw.get("recent")
+    return recent if isinstance(recent, list) else []
+
+def _load_todos() -> list[dict]:
+    for p in (_data_path("todos.json"), _legacy_path("todos.json")):
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            continue
+    return []
+
+
+def _find_recent_todo_for_task(task: str) -> dict | None:
+    todos = _load_todos()
+    if not todos:
+        return None
+    task_low = task.lower()
+    for t in reversed(todos[-5:]):
+        t_task = str(t.get("task", "")).lower()
+        if t_task in task_low or task_low in t_task:
+            return t
+    last = todos[-1]
+    if len(task) > 80 and isinstance(last.get("steps"), list) and last.get("steps"):
+        return last
+    return None
+
 
 def _load_chat_snippet(limit: int = 10) -> str:
     legacy_db = Path(__file__).resolve().parents[3] / "storage" / "database"
@@ -143,34 +389,76 @@ def _load_chat_snippet(limit: int = 10) -> str:
                 continue
     return ""
 
-def _generate_trigger_skill(trigger_name: str, task: str, config: dict | None) -> str:
-    """Internal LLM request using trigger_skill_system.md, raises with real error per situation."""
+def _generate_trigger_skill(trigger_name: str, task: str, config: dict | None, todo_snapshot: dict | None = None) -> str:
+    """Internal LLM request using trigger_skill_system.md.
+
+    UNIFIED model for ALL triggers (same as scheduler): event (trigger_name +
+    config) + task -> SAME AIP/1 path as the agent loop (system skill-prompt +
+    task + last-10 chat + todo) sent to the SAME configured text model, which
+    returns the skill. Raises with real error per situation.
+    """
     system_path = Path(__file__).resolve().parents[3] / "prompts" / "trigger_skill_system.md"
     system_prompt = system_path.read_text(encoding="utf-8").strip() if system_path.exists() else "You are a trigger skill generator."
-    # Find trigger spec for description
+    # Find trigger spec for description (the event side)
     specs = _load_trigger_specs()
     trig_desc = specs.get(trigger_name, {}).get("description", "")
     chat_snippet = _load_chat_snippet(limit=10)
-    parts = [f"Trigger: {trigger_name} - {trig_desc}", f"Task to run when triggered: {task}"]
+    parts = [f"Trigger event: {trigger_name} - {trig_desc}"]
     if config:
-        parts.append(f"Config: {json.dumps(config, ensure_ascii=False)}")
+        parts.append(f"Event config: {json.dumps(config, ensure_ascii=False)}")
+    parts.append(f"Task to run when triggered: {task}")
+    if todo_snapshot:
+        steps = todo_snapshot.get("steps") or []
+        parts.append(f"Todo plan: {todo_snapshot.get('task')} - Steps: {'; '.join(steps)}")
     if chat_snippet:
-        parts.append(f"Chat context:\n{chat_snippet[:2000]}")
-    parts.append("Generate skill markdown now.")
+        parts.append(f"Chat context (last 10 messages with all details):\n{chat_snippet[:2000]}")
+    parts.append("Create a skill for this task now (it runs when the event fires).")
     user_prompt = "\n\n".join(parts)
     from core.ai_models.store import require_text_model
-    from core.ai_models.engine import chat as universal_chat
+    from core.ai_models.engine import is_aip_record
     _record = require_text_model()
-    content = universal_chat(
-        _record,
-        [{"role": "user", "content": user_prompt}],
-        {"system": system_prompt},
-    )
+    if is_aip_record(_record):
+        # Canonical request exactly like the loop builds it: system prompt first,
+        # then the user message (event + task + last-10 chat + todo). execute()
+        # compiles the record once (cached per kind) and retries provider-side
+        # failures internally (bounded, max 3).
+        from core.ai_models import aip as _aip
+        canonical = {
+            "version": 1,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        try:
+            res = _aip.execute(_record, canonical, "text")
+            content = (res.get("text") if isinstance(res, dict) else "") or ""
+        except Exception as e:
+            raise RuntimeError(
+                f"Trigger skill generation failed ({e}). "
+                "Do NOT call trigger create again right away — tell the user the AI model "
+                "service is unreachable right now and to try again in a few minutes."
+            ) from e
+    else:
+        # Legacy connection-JSON record: same request through the legacy engine.
+        from core.ai_models.engine import chat as _legacy_chat
+        try:
+            content = _legacy_chat(
+                _record,
+                [{"role": "user", "content": user_prompt}],
+                {"system": system_prompt},
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Trigger skill generation failed ({e}). "
+                "Do NOT call trigger create again right away — tell the user the AI model "
+                "service is unreachable right now and to try again in a few minutes."
+            ) from e
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("Trigger skill generation returned empty content from the configured text model.")
     return content.strip()
 
-def _save_trigger_skill(trigger_id: str, trigger_name: str, task: str, config: dict | None) -> tuple[str, str]:
+def _save_trigger_skill(trigger_id: str, trigger_name: str, task: str, config: dict | None, todo_snapshot: dict | None = None) -> tuple[str, str]:
     project_root = Path(__file__).resolve().parents[3]
     base_dir = project_root / "skills" / "trigger_skills"
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -185,8 +473,9 @@ def _save_trigger_skill(trigger_id: str, trigger_name: str, task: str, config: d
     if target.exists():
         safe = f"{safe}_{str(uuid.uuid4())[:4]}"
         target = base_dir / safe
-    # Generate skill via internal LLM (no fallback, real error per situation)
-    skill_content = _generate_trigger_skill(trigger_name, task, config)
+    # Generate skill via internal LLM on the SAME AIP/1 path as the loop
+    # (event + task + last-10 chat + todo -> same text model). No fallback.
+    skill_content = _generate_trigger_skill(trigger_name, task, config, todo_snapshot)
     target.mkdir(parents=True, exist_ok=True)
     skill_data = {
         "name": safe,
@@ -196,6 +485,7 @@ def _save_trigger_skill(trigger_id: str, trigger_name: str, task: str, config: d
         "trigger_id": trigger_id,
         "trigger_name": trigger_name,
         "original_task": task,
+        "todo_snapshot": todo_snapshot,
         "config": config or {},
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "trigger_skill": True,
@@ -250,10 +540,35 @@ def execute(action: str, trigger_name: str | None = None, task: str | None = Non
         # Basic size check
         if len(json.dumps(cfg, ensure_ascii=False)) > 2000:
             raise ValueError("config too large")
-        cfg = _validate_filesystem_config(trigger_name.strip(), cfg)
+        is_library = trigger_name.strip() == LIBRARY_TRIGGER
+        if is_library:
+            # Library layer: validate first (no side effects), so a bad
+            # config never builds a skill nor arms anything.
+            cleaned_lib = _validate_library_config(cfg)
+        else:
+            cfg = _validate_filesystem_config(trigger_name.strip(), cfg)
+            # Fail fast on unwatchable paths (e.g. absolute outside Workspace):
+            # never arm a trigger that can never fire.
+            try:
+                from core.trigger.engine import validate_watch_path
+                validate_watch_path(str(cfg.get("watch_path") or "inbox/docs"))
+            except ValueError as e:
+                raise ValueError(f"config.watch_path invalid: {e}") from None
         new_id = str(uuid.uuid4())[:8]
-        # Create skill via internal LLM (with whole chat + task)
-        skill_ref, skill_content = _save_trigger_skill(new_id, trigger_name.strip(), task.strip(), cfg)
+        # Unified flow for ALL triggers: event + task -> same-model skill
+        # (AIP/1: system prompt + task + last-10 chat + todo), saved
+        # temporarily under skills/trigger_skills until the event fires.
+        todo_snap = _find_recent_todo_for_task(task.strip())
+        skill_ref, skill_content = _save_trigger_skill(new_id, trigger_name.strip(), task.strip(), cfg, todo_snap)
+        lib_id = ""
+        if is_library:
+            # Arm the library side AFTER the skill exists. On failure the
+            # skill is removed so no orphan skill survives a half-create.
+            try:
+                lib_id = _library_start(cleaned_lib)
+            except Exception:
+                _delete_trigger_skill(skill_ref)
+                raise
         entry = {
             "trigger_id": new_id,
             "trigger_name": trigger_name.strip(),
@@ -266,14 +581,26 @@ def execute(action: str, trigger_name: str | None = None, task: str | None = Non
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "run_count": 0,
         }
+        if is_library:
+            entry["engine"] = "library"
+            entry["library_trigger_id"] = lib_id
+            entry["library_url"] = cleaned_lib.get("url")
         triggers.append(entry)
-        _save_triggers(triggers)
-        # Start watcher for new trigger (single engine, continuous)
         try:
-            from core.trigger.engine import check_and_start_new_trigger
-            check_and_start_new_trigger(entry)
+            _save_triggers(triggers)
         except Exception:
-            pass
+            # Never leave an orphan skill dir when the entry was not saved.
+            _delete_trigger_skill(skill_ref)
+            raise
+        # Start watcher for new trigger (single engine, continuous). Library
+        # entries are already armed above - re-arming here would only add a
+        # redundant library list call on every create.
+        if not is_library:
+            try:
+                from core.trigger.engine import check_and_start_new_trigger
+                check_and_start_new_trigger(entry)
+            except Exception:
+                pass
         return {"event": event, "action": act, "trigger": entry, "skill_ref": skill_ref}
 
     # For get/delete/update need trigger_id
@@ -289,15 +616,20 @@ def execute(action: str, trigger_name: str | None = None, task: str | None = Non
         _save_triggers(triggers)
         skill_ref = removed.get("skill_ref")
         skill_deleted = _delete_trigger_skill(skill_ref) if skill_ref else False
-        # Stop watcher if running
+        # Stop watcher if running (observer or polling marker)
         try:
-            from core.trigger.engine import _WATCHERS
-            watcher = _WATCHERS.pop(removed.get("trigger_id"), None)
-            if watcher:
-                try:
-                    watcher.stop()
-                except Exception:
-                    pass
+            from core.trigger.engine import _stop_watcher
+            _stop_watcher(removed.get("trigger_id"))
+        except Exception:
+            pass
+        # Library side: cancel its trigger too (best-effort; a down browser
+        # must never fail the delete - the entry is already gone).
+        if removed.get("trigger_name") == LIBRARY_TRIGGER:
+            _library_stop(str(removed.get("library_trigger_id") or ""))
+        # Delete the trigger's own hidden branch session with it.
+        try:
+            from core.trigger.session import delete_session as _del_trig_session
+            _del_trig_session(removed.get("trigger_id") or "")
         except Exception:
             pass
         return {"event": event, "action": act, "deleted": removed, "skill_deleted": skill_deleted}
@@ -306,18 +638,116 @@ def execute(action: str, trigger_name: str | None = None, task: str | None = Non
         return {"event": event, "action": act, "trigger": triggers[idx]}
 
     if act == "update":
-        # Allow updating task or config
+        # Allow updating task or config. The skill is the executable form of
+        # (event + task), so any change regenerates it via the same model.
+        skill_regenerated = False
+        new_task = triggers[idx].get("task", "")
         if task is not None:
             if not isinstance(task, str) or not task.strip():
                 raise ValueError("task must be non-empty")
-            triggers[idx]["task"] = task.strip()
+            new_task = task.strip()
+            skill_regenerated = True
+        new_config = triggers[idx].get("config") or {}
+        new_lib_id = str(triggers[idx].get("library_trigger_id") or "")
+        new_lib_url = triggers[idx].get("library_url", "")
         if config is not None:
             if not isinstance(config, dict):
                 raise TypeError("config must be object")
-            config = _validate_filesystem_config(triggers[idx].get("trigger_name", ""), config)
-            triggers[idx]["config"] = config
+            if triggers[idx].get("trigger_name") == LIBRARY_TRIGGER:
+                # Validate first; nothing mutates until the library side
+                # accepts the change (no half-updated entry).
+                cleaned = _validate_library_config(config)
+                old_cfg = triggers[idx].get("config") or {}
+                old_clean = _validate_library_config(old_cfg) if isinstance(old_cfg, dict) and old_cfg.get("url") else {}
+                identity_keys = ("url", "kind", "value", "match", "conditions")
+                identity_changed = any(
+                    json.dumps(cleaned.get(k), ensure_ascii=False, sort_keys=True, default=str)
+                    != json.dumps(old_clean.get(k), ensure_ascii=False, sort_keys=True, default=str)
+                    for k in identity_keys
+                )
+                if identity_changed:
+                    # The library update cannot replace kind/value/url -
+                    # re-arm: stop the old trigger, start a new one.
+                    _library_stop(new_lib_id)
+                    try:
+                        new_lib_id = _library_start(cleaned)
+                    except Exception:
+                        raise RuntimeError(
+                            "Library trigger re-arm failed; the entry was left unchanged."
+                        )
+                    new_lib_url = cleaned.get("url", "")
+                else:
+                    # Tunable-only change: passthrough (best-effort; a down
+                    # browser keeps the entry, the next poll re-arms it).
+                    try:
+                        import sys as _sys7
+                        _proj7 = Path(__file__).resolve().parents[3]
+                        if str(_proj7) not in _sys7.path:
+                            _sys7.path.insert(0, str(_proj7))
+                        from X5Browser.service import call_tool as _lib_call4
+                        _lib_call4("manage_triggers", {
+                            "action": "update", "trigger_id": new_lib_id,
+                            "timeout_s": cleaned.get("timeout_s"),
+                            "check_interval_s": cleaned.get("check_interval_s"),
+                            "refresh_each_cycle": cleaned.get("refresh_each_cycle"),
+                        })
+                    except Exception:
+                        pass
+                new_config = config
+                skill_regenerated = True
+            else:
+                config = _validate_filesystem_config(triggers[idx].get("trigger_name", ""), config)
+                try:
+                    from core.trigger.engine import validate_watch_path
+                    validate_watch_path(str(config.get("watch_path") or "inbox/docs"))
+                except ValueError as e:
+                    raise ValueError(f"config.watch_path invalid: {e}") from None
+                new_config = config
+                skill_regenerated = True
+        triggers[idx]["task"] = new_task
+        triggers[idx]["config"] = new_config
+        if new_lib_id:
+            triggers[idx]["library_trigger_id"] = new_lib_id
+        if new_lib_url:
+            triggers[idx]["library_url"] = new_lib_url
+        if skill_regenerated:
+            todo_snap = _find_recent_todo_for_task(triggers[idx].get("task", ""))
+            skill_content = _generate_trigger_skill(
+                triggers[idx].get("trigger_name", ""), triggers[idx].get("task", ""),
+                triggers[idx].get("config") or {}, todo_snap)
+            project_root = Path(__file__).resolve().parents[3]
+            target = project_root / "skills" / "trigger_skills" / (triggers[idx].get("skill_ref") or "")
+            try:
+                target.resolve().relative_to((project_root / "skills" / "trigger_skills").resolve())
+            except ValueError:
+                raise ValueError("stored skill_ref escapes trigger_skills")
+            if not target.exists():
+                raise FileNotFoundError("trigger skill folder missing for update")
+            skill_data = {
+                "name": triggers[idx].get("skill_ref"),
+                "description": triggers[idx].get("task", "")[:200],
+                "content": skill_content,
+                "instructions": skill_content,
+                "trigger_id": tid,
+                "trigger_name": triggers[idx].get("trigger_name"),
+                "original_task": triggers[idx].get("task"),
+                "todo_snapshot": todo_snap,
+                "config": triggers[idx].get("config") or {},
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "trigger_skill": True,
+            }
+            (target / "skill.json").write_text(json.dumps(skill_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            (target / "README.md").write_text(f"# {triggers[idx].get('skill_ref')}\n\n{skill_content}\n", encoding="utf-8")
+            triggers[idx]["skill_content_preview"] = skill_content[:200]
         triggers[idx]["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         _save_triggers(triggers)
-        return {"event": event, "action": act, "trigger": triggers[idx]}
+        if skill_regenerated:
+            # A new watch path needs a new observer; the old one watched the old path.
+            try:
+                from core.trigger.engine import restart_trigger
+                restart_trigger(triggers[idx])
+            except Exception:
+                pass
+        return {"event": event, "action": act, "trigger": triggers[idx], "skill_regenerated": skill_regenerated}
 
     raise ValueError(f"unsupported action {act}")

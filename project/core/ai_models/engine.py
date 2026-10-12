@@ -1,13 +1,18 @@
 """
-Universal Model Connection Engine - TEXT kind only (protocol v1).
+Universal Model Connection Engine + AIP/1 router (protocol v1).
 
 Single generic core: validate -> substitute -> build request -> send -> parse.
-No provider-specific code anywhere. Dispatch on `kind` so future kinds
-(vision, image, video...) reuse the shared core; only text is implemented.
+No provider-specific code anywhere.
 
-Standard library only (urllib). Never raises on bad user input from
-validate(); chat()/test_connection() raise EngineError with structured,
-redacted, copyable diagnostics.
+Routing: every public function (chat/analyze/generate_image/synthesize/
+transcribe) first checks _is_aip_record() — the SAME check the agent loop
+uses. AIP/1 records go through the AIP/1 interpreter (compile-once, cached
+plan, single-shot JSON); legacy connection-JSON records keep the legacy
+template path below (which also keeps binary-body + submit-then-poll flows
+that AIP/1 explicitly refuses). Callers never branch themselves.
+
+Standard library only (urllib). chat()/test_connection() raise EngineError
+with structured, redacted, copyable diagnostics.
 """
 from __future__ import annotations
 
@@ -54,6 +59,51 @@ class EngineError(Exception):
         self.message = message
         self.technical = technical
         self.copyable = copyable
+
+
+def is_aip_record(model_record: dict) -> bool:
+    """True when the record carries an AIP/1 parser (new system).
+
+    SAME check the agent loop uses to pick its path, so every caller of
+    this engine automatically follows the loop. Import of the interpreter
+    stays lazy (function-level) to avoid a top-level import cycle:
+    aip._send_once reuses engine._send.
+    """
+    try:
+        rec = model_record or {}
+        pdef = rec.get("parser_definition") or rec.get("config_json") or {}
+        return isinstance(pdef, dict) and pdef.get("language") == "AIP/1"
+    except Exception:
+        return False
+
+
+def _aip_messages(system: str, user_content: Any) -> list[dict]:
+    """Canonical messages: optional system first, then one user message."""
+    messages: list[dict] = []
+    if isinstance(system, str) and system.strip():
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
+def _aip_text_out(res: Any) -> str:
+    """Extract text from an AIP result. Empty when the service said nothing."""
+    if isinstance(res, dict):
+        text = res.get("text") or ""
+        if isinstance(text, str):
+            return text
+    return ""
+
+
+def _aip_media_out(res: Any) -> tuple[str, str]:
+    """Extract (media_data, source) from an AIP result. Empty data when absent."""
+    media = res.get("media") if isinstance(res, dict) else None
+    if isinstance(media, dict):
+        data = media.get("data") or ""
+        source = media.get("source") or "base64"
+        if isinstance(data, str) and isinstance(source, str):
+            return data, source
+    return "", "base64"
 
 
 # --------------------------------------------------------------------------
@@ -953,10 +1003,31 @@ def _shape_of(body: bytes, body_type: str) -> str:
 def chat(model_record: dict, messages: list[dict], options: dict | None = None) -> str:
     """Full reply text. options: {system, on_chunk, cancel_event}."""
     options = options or {}
-    cfg = _validated_cfg(model_record, "text")
     system = str(options.get("system") or "")
     on_chunk = options.get("on_chunk")
     cancel_event = options.get("cancel_event")
+    if is_aip_record(model_record):
+        # New system: SAME AIP/1 path as the loop (compile-once, cached plan).
+        if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+            raise EngineError("timeout", "Cancelled.", technical="cancelled",
+                              copyable="Cancelled.")
+        from core.ai_models import aip as _aip
+        built = list(messages or [])
+        if system:
+            built = [{"role": "system", "content": system}] + built
+        res = _aip.execute(model_record, {"version": 1, "messages": built}, "text")
+        reply = _aip_text_out(res)
+        if on_chunk is not None and reply:
+            try:
+                on_chunk(reply)
+            except Exception:
+                pass
+        if not reply.strip():
+            raise EngineError("bad_response", "The service returned an empty reply.",
+                              technical="empty text",
+                              copyable="Bad response: expected text.")
+        return reply
+    cfg = _validated_cfg(model_record, "text")
     url, method, headers, body, _bt, timeout, secrets = build_http_request(
         model_record, messages or [], system)
     if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
@@ -1287,8 +1358,34 @@ def _base_vars(model_record: dict) -> dict:
 def analyze(model_record: dict, inputs: dict, options: dict | None = None) -> str:
     """Vision: describe/answer about an image. inputs: {prompt, image_base64?, image_url?, image_mime?}."""
     options = dict(options or {})
-    cfg = _validated_cfg(model_record, "vision")
     inputs = inputs or {}
+    system = str(options.get("system") or "")
+    if is_aip_record(model_record):
+        # New system: image travels as a canonical typed part (url or data-URL).
+        from core.ai_models import aip as _aip
+        prompt = str(inputs.get("prompt") or "")
+        parts: list[dict] = []
+        if prompt:
+            parts.append({"type": "text", "text": prompt})
+        image_url = str(inputs.get("image_url") or "")
+        image_b64 = str(inputs.get("image_base64") or "")
+        mime = str(inputs.get("image_mime") or "image/png")
+        if image_url:
+            parts.append({"type": "image", "url": image_url, "mime": mime})
+        elif image_b64:
+            parts.append({"type": "image", "data": f"data:{mime};base64,{image_b64}", "mime": mime})
+        res = _aip.execute(model_record, {
+            "version": 1,
+            "messages": _aip_messages(system, parts),
+            "modalities": {"input": ["text", "image"], "output": ["text"]},
+        }, "vision")
+        reply = _aip_text_out(res)
+        if not reply.strip():
+            raise EngineError("bad_response", "The service did not return text.",
+                              technical="empty text",
+                              copyable="Bad response: expected text.")
+        return reply
+    cfg = _validated_cfg(model_record, "vision")
     variables = _base_vars(model_record)
     variables.update({
         "prompt": str(inputs.get("prompt") or ""),
@@ -1306,8 +1403,23 @@ def analyze(model_record: dict, inputs: dict, options: dict | None = None) -> st
 def generate_image(model_record: dict, inputs: dict, options: dict | None = None) -> dict:
     """Image generation: {prompt} -> {"media", "source", "type": "image"} (polls when configured)."""
     options = dict(options or {})
-    cfg = _validated_cfg(model_record, "image")
     inputs = inputs or {}
+    system = str(options.get("system") or "")
+    if is_aip_record(model_record):
+        # New system: single-shot JSON only (AIP/1 refuses async poll flows).
+        from core.ai_models import aip as _aip
+        res = _aip.execute(model_record, {
+            "version": 1,
+            "messages": _aip_messages(system, str(inputs.get("prompt") or "")),
+            "modalities": {"input": ["text"], "output": ["image"]},
+        }, "image")
+        data, source = _aip_media_out(res)
+        if not data:
+            raise EngineError("bad_response", "The service did not return a file.",
+                              technical="missing media",
+                              copyable="Bad response: expected a file (URL or base64).")
+        return {"media": data, "source": source, "type": "image"}
+    cfg = _validated_cfg(model_record, "image")
     variables = _base_vars(model_record)
     variables.update({"prompt": str(inputs.get("prompt") or ""),
                       "system": str(options.get("system") or "")})
@@ -1319,8 +1431,23 @@ def generate_image(model_record: dict, inputs: dict, options: dict | None = None
 def synthesize(model_record: dict, inputs: dict, options: dict | None = None) -> dict:
     """Text-to-speech: {text} -> {"media", "source", "type": "audio"} (polls when configured)."""
     options = dict(options or {})
-    cfg = _validated_cfg(model_record, "tts")
     inputs = inputs or {}
+    system = str(options.get("system") or "")
+    if is_aip_record(model_record):
+        # New system: single-shot JSON only (AIP/1 refuses async poll flows).
+        from core.ai_models import aip as _aip
+        res = _aip.execute(model_record, {
+            "version": 1,
+            "messages": _aip_messages(system, str(inputs.get("text") or "")),
+            "modalities": {"input": ["text"], "output": ["audio"]},
+        }, "tts")
+        data, source = _aip_media_out(res)
+        if not data:
+            raise EngineError("bad_response", "The service did not return a file.",
+                              technical="missing media",
+                              copyable="Bad response: expected a file (URL or base64).")
+        return {"media": data, "source": source, "type": "audio"}
+    cfg = _validated_cfg(model_record, "tts")
     variables = _base_vars(model_record)
     variables.update({"text": str(inputs.get("text") or ""),
                       "system": str(options.get("system") or "")})
@@ -1332,7 +1459,6 @@ def synthesize(model_record: dict, inputs: dict, options: dict | None = None) ->
 def transcribe(model_record: dict, inputs: dict, options: dict | None = None) -> str:
     """Speech-to-text: {audio_bytes, mime?} -> text."""
     options = dict(options or {})
-    cfg = _validated_cfg(model_record, "stt")
     inputs = inputs or {}
     blob = inputs.get("audio_bytes")
     if not isinstance(blob, (bytes, bytearray)) or not blob:
@@ -1344,9 +1470,29 @@ def transcribe(model_record: dict, inputs: dict, options: dict | None = None) ->
                           technical=f"audio {len(blob)} bytes",
                           copyable="Audio too large (max 25 MB).")
     import base64 as _b64
+    raw_b64 = _b64.b64encode(bytes(blob)).decode("ascii")
+    mime = str(inputs.get("mime") or "audio/wav")
+    if is_aip_record(model_record):
+        # New system: audio travels as a canonical typed part (data-URL).
+        from core.ai_models import aip as _aip
+        system = str(options.get("system") or "")
+        res = _aip.execute(model_record, {
+            "version": 1,
+            "messages": _aip_messages(system, [
+                {"type": "audio", "data": f"data:{mime};base64,{raw_b64}", "mime": mime},
+            ]),
+            "modalities": {"input": ["audio"], "output": ["text"]},
+        }, "stt")
+        reply = _aip_text_out(res)
+        if not reply.strip():
+            raise EngineError("bad_response", "The service did not return text.",
+                              technical="empty text",
+                              copyable="Bad response: expected text.")
+        return reply
+    cfg = _validated_cfg(model_record, "stt")
     variables = _base_vars(model_record)
-    variables.update({"audio_base64": _b64.b64encode(bytes(blob)).decode("ascii"),
-                      "audio_mime": str(inputs.get("mime") or "audio/wav"),
+    variables.update({"audio_base64": raw_b64,
+                      "audio_mime": mime,
                       "system": str(options.get("system") or "")})
     options["_record"] = model_record
     ctx = _post_with_vars(model_record, cfg, variables, options)

@@ -7,11 +7,11 @@
 import { initModal } from "./ui.js?v=9";
 import { initNavigation } from "./navigation.js?v=11";
 import { startEvents } from "./events.js?v=4";
-import { initWorkspace } from "./workspace.js?v=14";
+import { initWorkspace } from "./workspace.js?v=15";
 import { initDashboard } from "./dashboard.js?v=10";
 import { initCharts } from "./charts.js?v=12";
-import { initChat } from "./chat.js?v=79";
-import { initSchedule } from "./schedule.js?v=6";
+import { initChat } from "./chat.js?v=80";
+import { initSchedule } from "./schedule.js?v=9";
 import { initPlugins } from "./plugins.js?v=8";
 import { initSkills } from "./skills.js?v=9";
 import { initGateway } from "./gateway.js?v=28";

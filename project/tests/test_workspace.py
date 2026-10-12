@@ -98,6 +98,19 @@ def test_downloads_virtual_merge():
     (lib / "sub" / "disk.iso").write_bytes(b"1" * 32)
     real_fn = _wstool.library_downloads_dir
     _wstool.library_downloads_dir = lambda: lib
+    # Isolate from real user data: a pre-existing Workspace/downloads/
+    # would (correctly) shadow the virtual view under test. Stash it
+    # aside with an atomic rename and restore it in `finally`.
+    stashed = None
+    try:
+        from core.paths import workspace_root as _ws0
+        _real_dl = _ws0() / "downloads"
+        if _real_dl.exists():
+            import time as _t
+            stashed = _real_dl.parent / f"downloads_teststash_{int(_t.time() * 1000)}"
+            _real_dl.rename(stashed)
+    except Exception:
+        stashed = None
     try:
         from core.paths import workspace_root as _ws
         # 1. root merges the virtual folder flagged external
@@ -142,3 +155,27 @@ def test_downloads_virtual_merge():
     finally:
         _wstool.library_downloads_dir = real_fn
         _sh.rmtree(str(lib), ignore_errors=True)
+        if stashed is not None:
+            try:
+                from core.paths import workspace_root as _ws9
+                _back = _ws9() / "downloads"
+                if stashed.exists():
+                    if not _back.exists():
+                        stashed.rename(_back)
+                    else:
+                        # downloads/ reappeared mid-test (e.g. the live
+                        # sync moved a file): merge stash files back in,
+                        # never delete user data.
+                        for _child in list(stashed.iterdir()):
+                            try:
+                                _dest = _back / _child.name
+                                if not _dest.exists():
+                                    _child.rename(_dest)
+                            except Exception:
+                                pass
+                        try:
+                            stashed.rmdir()
+                        except Exception:
+                            print("test stash left at", stashed)
+            except Exception:
+                pass

@@ -942,6 +942,49 @@ function settleThinkingBlock(block, elapsedSec) {
   block.classList.remove("open");
 }
 
+function settleThinkingStopped(thinkingEl) {
+  // STOP mid-task: freeze everything in place — the Working block stays
+  // visible (stops animating, shows elapsed seconds, stays expandable via
+  // its header arrow) and a --- Stopped --- divider is added right below
+  // it. The user bubble + thinking bubble are tagged data-stopped so a
+  // later history reload drops these live artifacts (their persisted copies
+  // own the view from then on — never a duplicate). Idempotent: a second
+  // STOP adds nothing. Never throws.
+  try {
+    if (!thinkingEl || !thinkingEl.isConnected) return false;
+    if (thinkingEl.dataset.stopped === "1") return true;
+    thinkingEl.dataset.stopped = "1";
+    try {
+      if (typeof lastUserEl !== "undefined" && lastUserEl && lastUserEl.isConnected) {
+        lastUserEl.dataset.stopped = "1";
+      }
+    } catch (_) {}
+    const block = thinkingEl._block || thinkingEl.querySelector(":scope > .thinking-block");
+    if (block) {
+      try {
+        block.querySelectorAll(".step-item.running").forEach((it) => {
+          it.classList.remove("running");
+        });
+      } catch (_) {}
+      settleThinkingBlock(block);
+      block.dataset.stopped = "1";
+    }
+    try {
+      const next = thinkingEl.nextElementSibling;
+      if (!next || !next.classList || !next.classList.contains("stopped-line")) {
+        const line = document.createElement("div");
+        line.className = "stopped-line";
+        line.textContent = "Stopped";
+        thinkingEl.after(line);
+      }
+    } catch (_) {}
+    scrollToBottom();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function stepReasonText(step) {
   // Optional Reason node: the model's own words only. Empty when the model
   // wrote none — the step then shows with no arrow (unless output/image).
@@ -1109,6 +1152,13 @@ function completeStepItem(item, { output = "", shot = "" } = {}) {
 }
 
 function addThinking(text) {
+  // A previous STOP keeps its settled bubble on screen — demote it (drop
+  // the live id, content untouched) so the new run owns #thinkingMsg and a
+  // later STOP settles the new task, never the old one. Never throws.
+  try {
+    const prev = document.getElementById("thinkingMsg");
+    if (prev && prev.dataset.stopped === "1") prev.removeAttribute("id");
+  } catch (_) {}
   const el = document.createElement("div");
   el.className = "msg assistant";
   el.id = "thinkingMsg";
@@ -1360,7 +1410,7 @@ function buildHistoryNode(m) {
     }
     const rawText = String(m.content || "");
     const el = document.createElement("div");
-    el.className = "msg agent";
+    el.className = "msg assistant";
     applyMsgDir(el, rawText, "ltr");
     const content = document.createElement("div");
     content.className = "msg-content";
@@ -1437,10 +1487,21 @@ function renderHistoryMessages(msgs) {
     // Refresh mid-run must never wipe in-flight UI: keep the thinking bubble
     // and any optimistic bubble/stream shell not persisted yet (no data-mid),
     // then re-append them after the persisted history renders.
+    // Stopped artifacts are NOT kept: their persisted copies (user request +
+    // stopped note + frozen Working) render from history below — keeping the
+    // live ones would duplicate the task. Their --- Stopped --- dividers go
+    // with them (transient session markers only).
+    try {
+      chatInner.querySelectorAll(":scope > .stopped-line").forEach((d) => {
+        try { d.remove(); } catch (_) {}
+      });
+    } catch (_) {}
     const keep = [];
     chatInner.querySelectorAll(".msg").forEach((m) => {
       try {
-        if (m.id === "thinkingMsg" || !m.dataset.mid) {
+        if (m.dataset.stopped === "1") {
+          m.remove();
+        } else if (m.id === "thinkingMsg" || !m.dataset.mid) {
           keep.push(m);
           m.remove();
         } else {
@@ -1953,10 +2014,9 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
             toast("Question expired — continued without answer");
           }
         } else if (msg2?.type === "cancelled") {
-          // Stopped: a single line with the word Stopped in the middle only.
-          try {
-            thinking.remove();
-          } catch (_) {}
+          // Stopped mid-task: the Working block stays visible (frozen with
+          // elapsed seconds, still expandable) plus a --- Stopped ---
+          // divider below it. Only the empty answer shell is dropped.
           if (shell) {
             try {
               shell.remove();
@@ -1964,11 +2024,7 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
             shell = null;
           }
           try {
-            const line = document.createElement("div");
-            line.className = "stopped-line";
-            line.textContent = "Stopped";
-            chatInner.appendChild(line);
-            scrollToBottom();
+            settleThinkingStopped(thinking);
           } catch (_) {}
           activeThinking = null;
           activeRun = null;
@@ -2313,7 +2369,16 @@ async function executeAgentTurn(value, attachments, opts) {
   catchupResume = false;
   // A new agent turn may legitimately start the browser again.
   clearBrowserClosedFlag();
-  document.getElementById("thinkingMsg")?.remove();
+  // A stopped task stays on screen (settled Working + Stopped line) — only
+  // a live bubble is dropped; a stopped one is demoted (id stripped) and
+  // kept, and the next history reload replaces it with its persisted copy.
+  try {
+    const prev = document.getElementById("thinkingMsg");
+    if (prev) {
+      if (prev.dataset.stopped === "1") prev.removeAttribute("id");
+      else prev.remove();
+    }
+  } catch (_) {}
   activeThinking = null;
   setSending(true);
 
@@ -3182,18 +3247,52 @@ function replaceTriggerToken(text) {
   const pos = composerInput.selectionStart ?? composerInput.value.length;
   const before = composerInput.value.slice(0, pos);
   const after = composerInput.value.slice(pos);
-  const m = before.match(/(^|\s)[@/][^@\n]*$/);
+  // "@" opens mid-word too (كمل@file works, mail@x stays blocked since
+  // Latin word-chars can't precede it); "/" keeps the old space rule so
+  // paths like a/b never open the skills panel. Surrogate halves are
+  // excluded so an emoji before @ can't be split in two.
+  const m = before.match(/(^|[^\w@\uD800-\uDFFF])@([^@\n]*)$/)
+    || before.match(/(^|\s)\/([^@\n]*)$/);
   const head = m ? before.slice(0, m.index + m[1].length) : before;
-  composerInput.value = `${head}${text} ${after}`;
-  // Auto trailing space + caret right after it, so writing continues cleanly.
+  // Trailing space stays in BOTH directions (LTR + Arabic RTL) so typing
+  // continues cleanly after the picked token.
+  const insert = `${text} `;
+  const caret = head.length + insert.length;
   try {
-    const caret = Math.min(head.length + text.length + 1, composerInput.value.length);
-    composerInput.setSelectionRange(caret, caret);
-  } catch (_) {}
+    // setRangeText keeps native bidi/undo state (plain .value assignment
+    // resets it and the caret lands on the wrong visual side in RTL).
+    composerInput.focus();
+    composerInput.setSelectionRange(head.length, pos);
+    composerInput.setRangeText(insert, head.length, pos, "end");
+  } catch (_) {
+    composerInput.value = `${head}${insert}${after}`;
+    try {
+      composerInput.setSelectionRange(caret, caret);
+    } catch (_) {}
+  }
   hideMentionMenu();
-  composerInput.focus();
-  autoResize();
-  renderComposerHL();
+  try {
+    autoResize();
+  } catch (_) {}
+  try {
+    renderComposerHL();
+  } catch (_) {}
+  // Re-assert the caret after layout resolves: in mixed Arabic/Latin lines
+  // the visual caret only settles once direction + wrapping are computed.
+  try {
+    requestAnimationFrame(() => {
+      try {
+        if (!composerInput) return;
+        if (document.activeElement !== composerInput) composerInput.focus();
+        const end = Math.min(caret, composerInput.value.length);
+        composerInput.setSelectionRange(end, end);
+        renderComposerHL();
+        try {
+          composerInput.scrollTop = composerInput.scrollHeight;
+        } catch (_) {}
+      } catch (_) {}
+    });
+  } catch (_) {}
 }
 
 /* Pathbar picker state (breadcrumb bar attached above the composer). */
@@ -3562,7 +3661,7 @@ function renderPathbar(dir, filter, entries) {
   );
   // Strict rule: zero rows = no bar — EXCEPT browse mode (empty filter
   // while navigating folders): an empty folder keeps the panel with its
-  // breadcrumb plus a "فاضي" notice instead of closing it.
+  // breadcrumb plus an upload row instead of closing it.
   if (!upRows.length && !shown.length) {
     if (filter) {
       hideMentionMenu();
@@ -3570,7 +3669,17 @@ function renderPathbar(dir, filter, entries) {
     }
     const d = document.createElement("div");
     d.className = "pk-empty";
-    d.textContent = "فاضي";
+    const t = document.createElement("span");
+    t.textContent = "This folder is empty — upload the first file";
+    d.appendChild(t);
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "pk-empty-add";
+    add.textContent = "+";
+    add.title = "Upload a file here";
+    add.setAttribute("aria-label", "Upload a file to this folder");
+    add.addEventListener("click", () => uploadToPickerDir(dir));
+    d.appendChild(add);
     bar.appendChild(d);
     return;
   }
@@ -3606,6 +3715,52 @@ function pickWorkspaceFile(rel) {
     pendingWsRefs.push({ path: rel, name });
   }
   replaceTriggerToken(`@${name}`);
+}
+
+function uploadToPickerDir(dir) {
+  // "+" on an empty picker folder: opens the file manager, uploads straight
+  // into that Workspace folder, then refreshes the picker instantly. The
+  // server bumps the workspace version on upload, so the Workspace page
+  // updates by itself too (push, no polling).
+  try {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.style.display = "none";
+    document.body.appendChild(input);
+    input.addEventListener("change", async () => {
+      const file = input.files && input.files[0];
+      input.remove();
+      if (!file) return;
+      if (!file.size) {
+        toast("Empty file");
+        return;
+      }
+      if (file.size > 100 * 1024 * 1024) {
+        toast("File too large (max 100MB)");
+        return;
+      }
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(new Error("read failed"));
+          reader.readAsDataURL(file);
+        });
+        const res = await fetch("/api/workspace", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "upload", path: dir || "", name: file.name, data: dataUrl }),
+        });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(out?.error || "upload failed");
+        toast("Uploaded to Workspace");
+        showMentionMenu(wsPickerDir ? `${wsPickerDir}/` : "");
+      } catch (err) {
+        toast(err instanceof Error && err.message ? err.message : "Upload failed");
+      }
+    }, { once: true });
+    input.click();
+  } catch (_) {}
 }
 
 const WS_SKILL_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--icon-secondary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path></svg>';
@@ -3683,7 +3838,9 @@ function checkMention() {
     showSkillsMenu(sm[2]);
     return;
   }
-  const am = before.match(/(^|\s)@([^@\n]*)$/);
+  // Same "@" rule as replaceTriggerToken: fires inside Arabic text
+  // (كمل@file) but never inside Latin words (mail@x = email, blocked).
+  const am = before.match(/(^|[^\w@\uD800-\uDFFF])@([^@\n]*)$/);
   if (am) {
     // Still writing next to a picked (blue) ref: never reopen the panel.
     if (continuesActivePick(am[2], "@")) {
@@ -6121,8 +6278,12 @@ async function stopGeneration() {
     await postCancel();
   } catch (_) {}
   catchupResume = false;
+  // STOP mid-task: freeze the Working block in place (stops animating,
+  // shows elapsed seconds, stays expandable) with a --- Stopped ---
+  // divider below it — never delete it.
   try {
-    document.getElementById("thinkingMsg")?.remove();
+    const thinkingEl = document.getElementById("thinkingMsg");
+    if (thinkingEl) settleThinkingStopped(thinkingEl);
   } catch (_) {}
   activeThinking = null;
   setSending(false);

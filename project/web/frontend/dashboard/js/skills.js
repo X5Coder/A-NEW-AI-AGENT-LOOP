@@ -17,6 +17,9 @@ import { openModal, closeModal, modalShell, toast } from "./ui.js?v=8";
 /* Unified mark for every skill (same layers glyph as the sidebar entry). */
 const SKILL_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z" /><path d="m2 17 10 5 10-5" /><path d="m2 12 10 5 10-5" /></svg>`;
 
+/* Trash glyph for the per-card delete button (inside the skill card only). */
+const TRASH_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6 18 20a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /></svg>`;
+
 const MAX_NAME = 50;
 const MAX_CONTENT = 10000;
 const MAX_DESC = 500;
@@ -288,6 +291,44 @@ function openCreateDialog(onSaved, opts = {}) {
   });
 }
 
+async function deleteSkill(name) {
+  const res = await fetch("/api/skills/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function openDeleteConfirm(name) {
+  openModal(modalShell({
+    icon: TRASH_ICON,
+    title: "Delete skill?",
+    subtitle: escapeHtml(name),
+    body: `<div class="block"><p class="modal-body-text">This removes the skill permanently. This can't be undone.</p></div>`,
+    foot: `
+      <button class="glass-btn" data-close type="button">Cancel</button>
+      <button class="glass-btn danger" id="skillDeleteBtn" type="button">Delete</button>`,
+  }));
+  document.getElementById("skillDeleteBtn")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "Deleting…";
+    try {
+      await deleteSkill(name);
+      closeModal();
+      toast("Skill deleted");
+      window.dispatchEvent(new CustomEvent("x5:skills-dirty"));
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Delete failed");
+      btn.disabled = false;
+      btn.textContent = "Delete";
+    }
+  });
+}
+
 function renderSkills(skills) {
   const grid = document.getElementById("skillsGrid");
   const label = document.getElementById("skillsCountLabel");
@@ -310,9 +351,12 @@ function renderSkills(skills) {
     card.innerHTML = `
       <div class="mini-top">
         <div class="mini-icon skill-copy" title="Copy skill" data-copy>${SKILL_ICON}</div>
-        <svg class="mini-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="9 18 15 12 9 6" />
-        </svg>
+        <div class="mini-actions">
+          <button class="skill-del" title="Delete skill" aria-label="Delete skill" data-del type="button">${TRASH_ICON}</button>
+          <svg class="mini-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </div>
       </div>
       <div class="mini-title">${escapeHtml(s.name)}</div>
       <div class="mini-desc">${escapeHtml(s.description || "")}</div>
@@ -329,6 +373,12 @@ function renderSkills(skills) {
       e.stopPropagation();
       e.preventDefault();
       copySkillText(s.name, s.preview);
+    });
+    // Delete lives inside the card only: confirm first, never opens the skill.
+    card.querySelector("[data-del]")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      openDeleteConfirm(s.name);
     });
     grid.appendChild(card);
   });

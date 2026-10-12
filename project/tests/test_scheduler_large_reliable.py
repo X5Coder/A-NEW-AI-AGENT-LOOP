@@ -1,132 +1,246 @@
-import sys, json, os
+"""Scheduler reliability tests against CURRENT behavior.
+
+Every scheduled job (small or large) creates a Skill via the internal LLM
+path and always executes isolated (no chat). No network calls here: the
+interpreter is mocked. No import-time side effects: nothing runs at import,
+real Data files are snapshotted and restored, created skills/sessions are
+removed. The old script version of this file wiped scheduler.json at import
+and made real LLM calls — never do that again.
+"""
+import json
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 project_root = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(project_root))
-os.environ.setdefault("OPENROUTER_API_KEY", "test-dummy-key")
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Unified test paths: fixtures live in X5Agent/Data (same single source of truth as runtime)
-_REPO = Path(__file__).resolve().parents[2]
-DATA_DB = _REPO / "X5Agent" / "Data" / "database"
-DATA_DB.mkdir(parents=True, exist_ok=True)
+import pytest
 
-print("=== TEST 1: مهمة صغيرة (light) ===")
-from core.tools.scheduler.tool import execute as sch
-# clear
-sch("list")  # just to init
-from pathlib import Path as P
-# clean scheduler
-P(str(DATA_DB / "scheduler.json")).write_text("[]", encoding="utf-8")
-# small task: no todo
-r = sch("create", task="ابعتلي رسالة واتس صباح الخير", repeat="daily at 07:00")
-print(f" small is_large={r['is_large']} bundle={r['bundle_created']} skill={r['skill_ref']}")
-assert r["is_large"]==False and r["bundle_created"]==False
-print(f" next_run {r['job']['next_run']} context_mode {r['job']['context_mode']}")
-assert r["job"]["context_mode"]=="light"
-jid_small = r["job"]["job_id"]
-print(" ✅ small task light mode correct")
+GUARD_DB_FILES = ("scheduler.json", "todos.json", "conversation.json")
 
-print("\n=== TEST 2: مهمة كبيرة مع todo (isolated + skill) ===")
-from core.tools.todo_list.tool import execute as todo
-# create large todo
-t = todo("تحليل مبيعات يومي شامل", ["اقرأ ملف sales.csv", "حللي البيانات", "أنشئ تقرير PDF", "أرسل التقرير واتساب"])
-print(f" todo created {t['todo']['id']}")
-# now schedule large task that matches todo
-large_task = "كل يوم الساعة 8 الصبح حللي ملف sales.csv وطلعي تقرير مفصل وابعتيه واتساب مع تحليل شامل للاتجاهات"
-r2 = sch("create", task=large_task, repeat="daily at 08:00", timezone="Africa/Cairo")
-print(f" large is_large={r2['is_large']} bundle={r2['bundle_created']} skill={r2['skill_ref']}")
-print(f" bundle todo {r2['job']['task_bundle']['todo_snapshot']['id'] if r2['job']['task_bundle'] else None}")
-print(f" context_mode {r2['job']['context_mode']} next_run {r2['job']['next_run']}")
-assert r2["is_large"]==True
-assert r2["bundle_created"]==True
-assert r2["skill_ref"] is not None
-assert r2["job"]["context_mode"]=="isolated"
-jid_large = r2["job"]["job_id"]
-# verify skill exists
-skill_path = project_root / "skills" / r2["skill_ref"]
-print(f" skill dir exists {skill_path.exists()} skill.json { (skill_path/'skill.json').exists() }")
-assert skill_path.exists()
-skill_data = json.loads((skill_path/"skill.json").read_text(encoding="utf-8"))
-print(f" skill content preview {skill_data['content'][:80]}")
-print(" ✅ large task isolated + skill correct")
 
-print("\n=== TEST 3: context builder isolated vs normal ===")
-from core.agent.context.builder import build_context
-sys_p, user_normal, tools = build_context("test")
-print(f" normal contains chat? {'Last 30 messages' in user_normal}")
-sys_i, user_iso, tools_i = build_context(large_task, isolated=True, todo_snapshot=t["todo"])
-print(f" isolated contains chat excluded? {'excluded for isolated' in user_iso}")
-print(f" isolated contains snapshot? {'Todo Snapshot' in user_iso}")
-assert "excluded for isolated" in user_iso
-assert "Todo Snapshot" in user_iso
-print(" ✅ context builder isolated ok")
+@pytest.fixture
+def guard():
+    from core.paths import data_db_dir
+    db = data_db_dir()
+    before = {}
+    for name in GUARD_DB_FILES:
+        p = db / name
+        before[name] = p.read_bytes() if p.is_file() else None
+    proj = Path(__file__).resolve().parents[1]
+    skills = proj / "skills" / "scheduled_skills"
+    skills_before = set(p.name for p in skills.iterdir()) if skills.is_dir() else None
+    sessions = db / "scheduler_sessions"
+    sessions_before = set(p.name for p in sessions.iterdir()) if sessions.is_dir() else None
+    yield
+    import shutil
+    for name, content in before.items():
+        p = db / name
+        if content is None:
+            if p.is_file():
+                p.unlink()
+        else:
+            p.write_bytes(content)
+    if skills_before is None:
+        if skills.is_dir():
+            shutil.rmtree(str(skills))
+    else:
+        if skills.is_dir():
+            for p in skills.iterdir():
+                if p.name not in skills_before:
+                    shutil.rmtree(str(p)) if p.is_dir() else p.unlink()
+    if sessions_before is None:
+        if sessions.is_dir():
+            shutil.rmtree(str(sessions))
+    else:
+        if sessions.is_dir():
+            for p in sessions.iterdir():
+                if p.name not in sessions_before:
+                    p.unlink()
 
-print("\n=== TEST 4: scheduler engine - due execution (mocked loop) ===")
-# Make large job due now: set next_run to past
-import json as js
-from datetime import datetime, timezone, timedelta
-db = Path(str(DATA_DB / "scheduler.json"))
-jobs = js.loads(db.read_text(encoding="utf-8"))
-for j in jobs:
-    if j["job_id"]==jid_large:
-        j["next_run"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
-        j["status"]="active"
-print(f" set large job due past {jobs[1]['next_run'] if len(jobs)>1 else 'x'}")
-db.write_text(js.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
-# Mock run_loop to avoid real API
-import unittest.mock as mock
-with mock.patch("core.agent.loop.engine.run_loop") as mock_loop:
-    mock_loop.return_value = {"final_answer": "تم تنفيذ تحليل المبيعات وإرسال التقرير", "steps": 5}
+
+@pytest.fixture
+def mock_skill_llm(monkeypatch):
+    """Mock the interpreter (AIP path). No network, deterministic skill text."""
+    import core.ai_models.aip as aip_mod
+
+    seen = {}
+
+    def fake_execute(record, canonical, kind=None):
+        seen["kind"] = kind
+        seen["canonical"] = canonical
+        return {"status": "ok", "text": "# Test Skill\n\n## Steps\n1. Do the task."}
+
+    monkeypatch.setattr(aip_mod, "execute", fake_execute)
+    return seen
+
+
+def _create(sch, **kwargs):
+    return sch("create", **kwargs)
+
+
+def test_create_small_task_builds_skill(guard, mock_skill_llm):
+    from core.tools.scheduler.tool import execute as sch
+    r = _create(sch, task="TEST task small ping", repeat="daily at 07:00")
+    job = r["job"]
+    assert r["skill_created"] is True and r["skill_ref"]
+    assert job["context_mode"] == "isolated"
+    assert job["skill_content_preview"].startswith("# Test Skill")
+    assert mock_skill_llm["kind"] == "text"
+    # Chat context + task are composed into the prompt (last-10 + task).
+    user_msg = mock_skill_llm["canonical"]["messages"][1]["content"]
+    assert "TEST task small ping" in user_msg
+
+
+def test_create_with_matching_todo_attaches_snapshot(guard, mock_skill_llm):
+    from core.tools.scheduler.tool import execute as sch
+    from core.tools.todo_list.tool import execute as todo
+    t = todo("TEST sales analysis", ["read file", "summarize", "send report"])
+    task = "TEST please TEST sales analysis of the file and send TEST report"
+    r = _create(sch, task=task, repeat="daily at 08:00", timezone="Africa/Cairo")
+    job = r["job"]
+    assert job["task_bundle"]["todo_snapshot"] is not None
+    assert job["is_large"] is True
+    proj = Path(__file__).resolve().parents[1]
+    skill_data = json.loads((proj / "skills" / "scheduled_skills" / r["skill_ref"] / "skill.json").read_text(encoding="utf-8"))
+    assert skill_data["instructions"].startswith("# Test Skill")
+    assert "Todo plan" in mock_skill_llm["canonical"]["messages"][1]["content"]
+
+
+def test_create_validation(guard, mock_skill_llm):
+    from core.tools.scheduler.tool import execute as sch
+    with pytest.raises(ValueError):
+        _create(sch, task="   ")
+    with pytest.raises(ValueError):
+        _create(sch, task="x" * 2001)
+
+
+def test_skill_generation_legacy_record_path(guard, monkeypatch):
+    """Legacy connection-JSON records generate through the legacy engine."""
+    import core.ai_models.store as store_mod
+    import core.ai_models.engine as engine_mod
+    from core.tools.scheduler.tool import execute as sch
+
+    legacy = {"model_name": "m", "server_url": "http://127.0.0.1:9",
+              "config_json": {"kind": "text", "version": 1}}
+    monkeypatch.setattr(store_mod, "require_text_model", lambda: legacy)
+
+    def fake_chat(record, messages, options=None):
+        assert options.get("system"), "system prompt must reach legacy engine"
+        return "# Legacy Skill"
+
+    monkeypatch.setattr(engine_mod, "chat", fake_chat)
+    r = _create(sch, task="TEST legacy path task")
+    assert r["skill_created"] is True
+    assert r["job"]["skill_content_preview"].startswith("# Legacy Skill")
+
+
+def test_context_builder_isolated_vs_normal():
+    from core.agent.context.builder import build_context
+    sys_p, user_normal, tools = build_context("test")
+    assert "messages - L6" in user_normal
+    todo_snapshot = {"task": "t", "steps": ["a", "b"]}
+    sys_i, user_iso, tools_i = build_context("TEST task", isolated=True, todo_snapshot=todo_snapshot)
+    assert "excluded for isolated" in user_iso
+    assert "Scheduled Todo Snapshot" in user_iso
+
+
+def _make_due(job_id):
+    from core.paths import data_db_dir
+    db = data_db_dir() / "scheduler.json"
+    jobs = json.loads(db.read_text(encoding="utf-8"))
+    for j in jobs:
+        if j["job_id"] == job_id:
+            j["next_run"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+            j["status"] = "active"
+    db.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def test_due_execution_runs_skill_isolated(guard, mock_skill_llm, monkeypatch):
+    import core.agent.loop.engine as loop_mod
     from core.scheduler.engine import check_and_execute_due_jobs
-    executed = check_and_execute_due_jobs(api_key="dummy", verbose=True)
-    print(f" executed {len(executed)} jobs")
-    assert len(executed)==1 and executed[0]["job_id"]==jid_large
-    # verify mock called with isolated=True
-    call_kwargs = mock_loop.call_args[1]
-    print(f" mock called isolated={call_kwargs.get('isolated')} todo_snapshot id {call_kwargs.get('todo_snapshot',{}).get('id') if call_kwargs.get('todo_snapshot') else None}")
-    assert call_kwargs.get("isolated")==True
-    print(" ✅ engine used isolated mode for large task")
-# verify next_run updated to tomorrow
-jobs2 = js.loads(db.read_text(encoding="utf-8"))
-j = next(x for x in jobs2 if x["job_id"]==jid_large)
-print(f" next_run updated {j['next_run']} run_count {j['run_count']} last_run {j['last_run']}")
-assert j["run_count"]==1 and j["next_run"] is not None
-print(" ✅ next_run recomputed for daily")
+    from core.tools.scheduler.tool import execute as sch
 
-print("\n=== TEST 5: small task due execution (light mode) ===")
-# make small due
-jobs = js.loads(db.read_text(encoding="utf-8"))
-for j in jobs:
-    if j["job_id"]==jid_small:
-        j["next_run"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
-        j["status"]="active"
-db.write_text(js.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
-with mock.patch("core.agent.loop.engine.run_loop") as mock_loop2:
-    mock_loop2.return_value = {"final_answer": "صباح الخير واتس", "steps": 2}
-    executed = check_and_execute_due_jobs(api_key="dummy", verbose=True)
-    print(f" executed {len(executed)}")
-    # small should be light
-    call_kwargs = mock_loop2.call_args[1]
-    print(f" light isolated flag {call_kwargs.get('isolated')}")
-    assert call_kwargs.get("isolated")==False or call_kwargs.get("isolated") is None
-    print(" ✅ light mode correct")
+    r = _create(sch, task="TEST due execution task", repeat="daily at 08:00")
+    jid = r["job"]["job_id"]
+    _make_due(jid)
 
-print("\n=== TEST 6: real loop with isolated large task (optional, needs API) ===")
-# Skipped without a real API key: dummy keys must never trigger network calls.
-if os.environ.get("OPENROUTER_API_KEY", "test-dummy-key") in ("", "test-dummy-key", "dummy"):
-    print(" ⏭️ skipped (no real OPENROUTER_API_KEY in env)")
-else:
-    from core.agent.loop.engine import run_loop
-    # Use a simple large-like input but isolated
-    res = run_loop(user_input="هذه مهمة مجدولة كبيرة: حلل ملف sales.csv - الخطوات: 1- اقرأ الملف 2- لخص", max_steps=4, api_key=os.environ["OPENROUTER_API_KEY"], verbose=False, isolated=True, todo_snapshot=t["todo"])
-    print(f" real isolated loop steps {res['steps']} answer {res['final_answer'][:100]}")
-    print(" ✅ real isolated loop works")
+    calls = []
 
-# cleanup
-import shutil
-# keep skill for demonstration but clean scheduler
-# remove test jobs
-jobs = [j for j in js.loads(db.read_text(encoding="utf-8")) if j["job_id"] not in [jid_small, jid_large]]
-db.write_text(js.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
-# clean todos: keep but remove test todo? leave
-print("\n=== ALL SCHEDULER RELIABILITY TESTS PASSED ===")
-print("الخلاصة: النظام البسيط (إنشاء bundle+skill تلقائيًا داخل scheduler بدون أداة إضافية للنموذج) هو الأكثر اعتمادية للمهام الكبيرة، معزول بدون شات، مع next_run دقيق.")
+    def fake_run_loop(**kwargs):
+        calls.append(kwargs)
+        return {"final_answer": "done", "steps": 2}
+
+    monkeypatch.setattr(loop_mod, "run_loop", fake_run_loop)
+    executed = check_and_execute_due_jobs(verbose=False)
+    assert len(executed) == 1 and executed[0]["job_id"] == jid
+    assert calls and calls[0].get("isolated") is True
+
+    from core.paths import data_db_dir
+    jobs = json.loads((data_db_dir() / "scheduler.json").read_text(encoding="utf-8"))
+    j = next(x for x in jobs if x["job_id"] == jid)
+    assert j["run_count"] == 1 and j["next_run"] is not None
+
+
+def test_delete_removes_skill_and_session(guard, mock_skill_llm):
+    from core.tools.scheduler.tool import execute as sch
+    r = _create(sch, task="TEST delete me task")
+    jid, ref = r["job"]["job_id"], r["skill_ref"]
+    proj = Path(__file__).resolve().parents[1]
+    assert (proj / "skills" / "scheduled_skills" / ref).is_dir()
+    d = sch("delete", job_id=jid)
+    assert d["skill_deleted"] is True
+    assert not (proj / "skills" / "scheduled_skills" / ref).exists()
+
+
+def test_update_task_regenerates_skill(guard, monkeypatch):
+    import core.ai_models.aip as aip_mod
+    from core.tools.scheduler.tool import execute as sch
+    texts = iter(["# Skill ONE", "# Skill TWO"])
+
+    def fake_execute(record, canonical, kind=None):
+        return {"status": "ok", "text": next(texts)}
+
+    monkeypatch.setattr(aip_mod, "execute", fake_execute)
+    r = _create(sch, task="TEST original task words")
+    jid, ref = r["job"]["job_id"], r["skill_ref"]
+    proj = Path(__file__).resolve().parents[1]
+    skill_file = proj / "skills" / "scheduled_skills" / ref / "skill.json"
+    assert json.loads(skill_file.read_text(encoding="utf-8"))["instructions"].startswith("# Skill ONE")
+    # update must consume the next generation (TWO), never reuse ONE
+    u = sch("update", job_id=jid, task="TEST changed task words")
+    assert u["skill_regenerated"] is True
+    data = json.loads(skill_file.read_text(encoding="utf-8"))
+    assert data["instructions"].startswith("# Skill TWO"), data["instructions"][:30]
+    assert u["job"]["task_bundle"]["original_user_input"] == "TEST changed task words"
+    assert u["job"]["skill_content_preview"].startswith("# Skill TWO")
+    # timing-only update regenerates nothing
+    u2 = sch("update", job_id=jid, repeat="daily")
+    assert u2["skill_regenerated"] is False
+    assert json.loads(skill_file.read_text(encoding="utf-8"))["instructions"].startswith("# Skill TWO")
+
+
+def test_repeat_validation(guard, mock_skill_llm):
+    from core.tools.scheduler.tool import execute as sch
+    for good in ("daily", "daily at 07:00", "every 30s", "every 1m", "every 2h", "every 1d", "every day"):
+        r = _create(sch, task="TEST repeat shape", repeat=good)
+        assert r["job"]["repeat"] == good
+        sch("delete", job_id=r["job"]["job_id"])
+    for bad in ("sometimes", "daily at 25:99", "every 0m", "every -1h", "every minute", ""):
+        try:
+            _create(sch, task="TEST repeat shape", repeat=bad)
+            raise AssertionError(f"bad repeat accepted: {bad!r}")
+        except (ValueError, TypeError):
+            pass
+
+
+def test_engine_schedules_seconds(guard):
+    from core.scheduler.engine import _compute_next_after_repeat
+    from datetime import datetime, timezone
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    nxt = _compute_next_after_repeat({"repeat": "every 30s"}, base)
+    assert nxt is not None and nxt.startswith("2026-01-01T12:00:30"), nxt
+    assert _compute_next_after_repeat({"repeat": "every 2m"}, base).startswith("2026-01-01T12:02"), nxt
+    assert _compute_next_after_repeat({"repeat": None}, base) is None

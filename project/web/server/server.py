@@ -110,7 +110,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml and updates.json at the repo root).
-APP_VERSION = "0.20.2"
+APP_VERSION = "0.26.0"
 
 UPDATE_REPO = "X5Coder/X5Agent"
 
@@ -1577,6 +1577,7 @@ def _summarize_job(job: dict) -> dict:
             "last_run": str(job.get("last_run") or "")[:40] if job.get("last_run") else None,
             "run_count": int(job.get("run_count") or 0),
             "repeat_count": job.get("repeat_count") if isinstance(job.get("repeat_count"), int) else None,
+            "created_at": str(job.get("created_at") or "")[:40] if job.get("created_at") else None,
             "skill_ref": str(job.get("skill_ref") or "")[:120],
             "skill_preview": str(job.get("skill_content_preview") or "")[:500],
             "run_history": hist_out,
@@ -1727,6 +1728,11 @@ def _start_scheduler_loop() -> None:
                 executed = check_and_execute_due_jobs(
                     api_key=_key, model=_model, verbose=False,
                     on_start=_on_start, on_done=_on_done)
+                try:
+                    from core.trigger.engine import check_library_triggers as _check_lib_trig
+                    _check_lib_trig()
+                except Exception:
+                    pass
                 if executed:
                     try:
                         _events_emit_scheduler(force=True)
@@ -1945,6 +1951,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/message":
             self._handle_message_post()
             return
+        if parsed.path == "/api/conversation/clear":
+            self._handle_conversation_clear_post()
+            return
         if parsed.path == "/api/stt":
             self._handle_stt_post()
             return
@@ -1989,6 +1998,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/skills":
             self._handle_skill_create_post()
+            return
+        if parsed.path == "/api/skills/delete":
+            self._handle_skill_delete_post()
             return
         if parsed.path == "/api/live_state":
             self._handle_live_state_post()
@@ -2207,6 +2219,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     "role": "assistant" if m.get("role") == "assistant" else "user",
                     "content": str(m.get("content") or "")[:2000],
                     "ts": str(m.get("ts") or "")[:40],
+                    "steps": m.get("steps") if isinstance(m.get("steps"), list) else [],
+                    "elapsed": m.get("elapsed") if isinstance(m.get("elapsed"), int) else None,
+                    "images": m.get("images") if isinstance(m.get("images"), list) else [],
+                    "audio": m.get("audio") if isinstance(m.get("audio"), list) else [],
                 } for m in sess if isinstance(m, dict)]
             except Exception:
                 job["session"] = []
@@ -2230,8 +2246,32 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         try:
             action = str(payload.get("action") or "").strip()
-            if action not in ("update_skill", "delete", "chat"):
-                self._send_json({"error": "action update_skill|delete|chat required"}, status=400)
+            if action not in ("update_skill", "delete", "chat", "pause", "resume",
+                              "msg_edit", "msg_delete", "msg_prune"):
+                self._send_json({"error": "action update_skill|delete|chat|pause|resume|msg_edit|msg_delete|msg_prune required"}, status=400)
+                return
+            if action in ("msg_edit", "msg_delete", "msg_prune"):
+                self._handle_scheduler_message(payload, action)
+                return
+            if action in ("pause", "resume"):
+                jid = payload.get("job_id")
+                if not isinstance(jid, str) or not jid.strip() or len(jid.strip()) > 64:
+                    self._send_json({"error": "job_id required"}, status=400)
+                    return
+                if str(PROJECT_ROOT) not in sys.path:
+                    sys.path.insert(0, str(PROJECT_ROOT))
+                from core.tools.scheduler.tool import execute as _sched_execute
+                try:
+                    out = _sched_execute(action, job_id=jid.strip())
+                except FileNotFoundError:
+                    self._send_json({"error": "job not found"}, status=404)
+                    return
+                except (ValueError, TypeError) as e:
+                    self._send_json({"error": str(e)[:200]}, status=400)
+                    return
+                _events_emit_scheduler(force=True)
+                self._send_json({"ok": True, "job_id": jid.strip(),
+                                  "status": (out.get("job") or {}).get("status")})
                 return
             if action == "delete":
                 jid = payload.get("job_id")
@@ -2304,12 +2344,61 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json({"error": "skill save failed", "detail": str(e)[:200]}, status=500)
 
-    def _handle_scheduler_chat(self, payload: dict):
-        """Continue a job's own session branch (never the main chat).
+    def _handle_scheduler_message(self, payload: dict, action: str):
+        """Edit/delete/prune one branch-session message (never the main chat)."""
+        try:
+            jid = payload.get("job_id")
+            if not isinstance(jid, str) or not jid.strip() or len(jid.strip()) > 64:
+                self._send_json({"error": "job_id required"}, status=400)
+                return
+            jid = jid.strip()
+            mid = payload.get("id")
+            if not isinstance(mid, str) or not mid.strip():
+                self._send_json({"error": "id required"}, status=400)
+                return
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.scheduler.session import (
+                update_message as _sched_update,
+                delete_message as _sched_delete,
+                prune_below as _sched_prune,
+            )
+            if action == "msg_edit":
+                content = payload.get("content")
+                if not isinstance(content, str) or not content.strip() or len(content) > 4000:
+                    self._send_json({"error": "content required (max 4000)"}, status=400)
+                    return
+                if not _sched_update(jid, mid.strip(), content.strip()):
+                    self._send_json({"error": "message not found"}, status=404)
+                    return
+                self._send_json({"ok": True})
+                return
+            if action == "msg_delete":
+                if not _sched_delete(jid, mid.strip()):
+                    self._send_json({"error": "message not found"}, status=404)
+                    return
+                self._send_json({"ok": True})
+                return
+            try:
+                removed = _sched_prune(jid, mid.strip())
+            except (ValueError, FileNotFoundError) as e:
+                self._send_json({"error": str(e)[:200]}, status=404)
+                return
+            self._send_json({"ok": True, "removed": removed})
+        except Exception as e:
+            self._send_json({"error": "scheduler message failed", "detail": str(e)[:200]}, status=500)
 
-        Expects {job_id, message, attachments?, mode?}. Runs the real agent
-        loop with session_key=job_id so history + persist stay inside the
-        branch session file.
+    def _handle_scheduler_chat(self, payload: dict):
+        """Continue a job's own session branch as a normal chat (never the main chat).
+
+        Expects {job_id, message, attachments?, mode?, skip_history_ids?}.
+        The message is sent RAW — never wrapped with the skill: the skill
+        already lives inside the branch history (seeded once when the branch
+        is empty), and the loop runs NON-isolated so the agent answers with
+        the same full context as the main chat (L1-L8 + last-30 + the branch
+        layer). History + persist stay inside the branch session file via
+        session_key. Returns the same full shape as the main chat (events +
+        steps + ids + media) so the run page renders a normal session.
         """
         saved_paths: list = []
         try:
@@ -2329,13 +2418,42 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 return
             mode = payload.get("mode", "restricted")
             restricted = mode != "free"
-            skill = _load_job_skill_text(str(job.get("skill_ref") or ""))
-            combined = (f"[متابعة مهمة مجدولة: {str(job.get('task') or jid)}]\n"
-                        f"[تعليمات المهمة]\n{skill[:2000]}\n\n"
-                        f"[رسالة المستخدم]\n{text.strip()}")[:4000]
+            try:
+                skip_ids = payload.get("skip_history_ids") or []
+                skip_ids = [str(i)[:16] for i in skip_ids if isinstance(i, str) and i.strip()][:4]
+            except Exception:
+                skip_ids = []
+            user_text = text.strip()
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.scheduler.session import (
+                load_session as _sess_load,
+                append_session as _sess_append,
+                update_message as _sched_upd,
+                history_block as _sess_hist,
+            )
+            # Edit-regenerate path: the edited text replaces the branch bubble
+            # in place (the loop reuses the id instead of persisting a duplicate).
+            try:
+                if skip_ids:
+                    _sched_upd(jid, skip_ids[0], user_text)
+            except Exception:
+                pass
+            # The skill belongs to the branch history (one of its last 30),
+            # never wrapped around every message: seed it once when the branch
+            # is still empty (a job that never ran yet), so the very first
+            # follow-up already answers with the skill in context.
+            try:
+                if not _sess_load(jid):
+                    skill = _load_job_skill_text(str(job.get("skill_ref") or ""))
+                    if skill.strip():
+                        _sess_append(jid, "user", skill.strip()[:2000])
+            except Exception:
+                pass
             try:
                 loop_input, saved_paths = self._build_loop_input(
-                    {"message": combined, "attachments": payload.get("attachments") or []})
+                    {"message": user_text, "attachments": payload.get("attachments") or [],
+                     "skip_history_ids": skip_ids})
             except _ChatError as e:
                 self._send_json({"error": str(e)}, status=e.status)
                 return
@@ -2344,25 +2462,34 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._cleanup_paths(saved_paths)
                 self._send_json({"error": NO_MODEL_ERROR, "needs_model": True}, status=503)
                 return
-            if str(PROJECT_ROOT) not in sys.path:
-                sys.path.insert(0, str(PROJECT_ROOT))
             from core.agent.loop.engine import run_loop
-            from core.scheduler.session import history_block as _sess_hist
-            bundle = job.get("task_bundle") if isinstance(job.get("task_bundle"), dict) else {}
-            todo_snap = bundle.get("todo_snapshot")
             chat_model, chat_key = _resolve_chat_model()
+            _reuse = self._reuse_user_id()
+            _branch_hist = _sess_hist(jid, limit=30) or None
             result = run_loop(loop_input, max_steps=80, verbose=False,
                              model=chat_model, api_key=chat_key,
-                             isolated=True, todo_snapshot=todo_snap,
                              session_key=jid,
-                             session_history=_sess_hist(jid, limit=12) or None,
-                             restricted=restricted)
-            self._send_json({
+                             session_history=_branch_hist,
+                             restricted=restricted, reuse_user_id=_reuse)
+            events = self._extract_loop_events(result)
+            final = result.get("final_answer") or ""
+            audio_list = result.get("final_audio") or []
+            _need_kind = result.get("needs_model_kind")
+            _out = {
                 "ok": True,
-                "reply": str(result.get("final_answer") or ""),
+                "reply": str(final),
+                "events": events,
                 "steps": result.get("steps", 0),
+                "model": result.get("model_used", ""),
+                "ids": result.get("message_ids"),
+                "images": result.get("final_images") or [],
+                "audio": audio_list,
                 "elapsed": result.get("elapsed_sec", 0),
-            })
+            }
+            if isinstance(_need_kind, str) and _need_kind:
+                _out["needs_model"] = True
+                _out["needs_kind"] = _need_kind
+            self._send_json(_out)
         except (ValueError, RuntimeError) as e:
             self._send_json({"error": "LLM request failed", "detail": str(e)[:200]}, status=502)
         except Exception as e:
@@ -2652,6 +2779,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 if _parts is not None and _dl_active(_wsroot):
                     data = _list_dl(_parts)
                     data["path"] = "downloads" if not _parts else "downloads/" + "/".join(_parts)
+                    # Virtual (library) view is fully read-only; a real
+                    # Workspace/downloads/ folder is user-managed (delete
+                    # allowed inside, the top folder itself stays protected).
+                    data["read_only"] = True
                     self._send_json(data)
                     return
             except _ChatError:
@@ -3186,6 +3317,29 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"ok": True, "skill": result})
         except Exception as e:
             self._send_json({"error": "skill save failed", "detail": str(e)[:200]}, status=500)
+
+    def _handle_skill_delete_post(self):
+        """POST /api/skills/delete {name} — delete one user skill (reserved dirs refused)."""
+        try:
+            payload = self._read_json_body(1000)
+        except _ChatError as e:
+            self._send_json({"error": str(e)}, status=e.status)
+            return
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from plugins.core_plugins.skill_create.tool import delete_skill as _delete
+            try:
+                result = _delete(payload.get("name") if isinstance(payload, dict) else "")
+            except (ValueError, TypeError) as e:
+                self._send_json({"error": str(e)[:200]}, status=400)
+                return
+            except FileNotFoundError as e:
+                self._send_json({"error": str(e)[:200]}, status=404)
+                return
+            self._send_json({"ok": True, "skill": result})
+        except Exception as e:
+            self._send_json({"error": "skill delete failed", "detail": str(e)[:200]}, status=500)
 
     def _handle_models_api(self):
         # Compat shim: the Dashboard "Current Model" card reads /api/models.
@@ -3931,10 +4085,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             import re as _re
 
             def _tok_rx(_name: str, _prefix: str):
+                # Same boundaries as the composer highlight (chat.js
+                # hlTokenRanges/hasToken): Arabic script also ends a token,
+                # so client paint and server injection always agree.
                 try:
                     if _prefix == "@":
-                        return _re.compile(r"(?<![\w@])@" + _re.escape(_name) + r"(?!\w)")
-                    return _re.compile(r"(?<![\w@/])/" + _re.escape(_name) + r"(?!\w)")
+                        return _re.compile(r"(?<![\w@])@" + _re.escape(_name) + r"(?![\w\u0600-\u06FF])")
+                    return _re.compile(r"(?<![\w@/])/" + _re.escape(_name) + r"(?![\w\u0600-\u06FF])")
                 except Exception:
                     return None
 
@@ -4146,6 +4303,32 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"error": "message update failed", "detail": str(e)[:200]}, status=500)
+
+    def _handle_conversation_clear_post(self):
+        """POST /api/conversation/clear — delete the MAIN chat history only.
+
+        Clears conversation.json + its chat embeddings. Saved memories
+        (user/agent/image/important) are never touched.
+        """
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.paths import data_vector_file, read_db_json, write_db_json
+            conv = read_db_json("conversation.json", [])
+            removed = len(conv) if isinstance(conv, list) else 0
+            write_db_json("conversation.json", [])
+            try:
+                data_vector_file("chat_embeddings.json").write_text(
+                    json.dumps({}, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                try:
+                    from core.agent.memory import chat_vector_store as cvs
+                    cvs.clear_all()
+                except Exception:
+                    pass
+            self._send_json({"ok": True, "removed": removed})
+        except Exception as e:
+            self._send_json({"error": "clear failed", "detail": str(e)[:200]}, status=500)
 
     def _reuse_user_id(self) -> str | None:
         """Id of the already-persisted edited user bubble (edit resend).
@@ -5038,6 +5221,29 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
         _start_scheduler_loop()
     except Exception as e:
         print(f"[WARN] Scheduler loop failed to start: {e}", file=sys.stderr)
+
+    # Trigger watchers re-arm (armed triggers persist in triggers.json, but
+    # watchers are in-memory: without this nothing fires after a restart).
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from core.trigger.engine import start_all_triggers as _trig_start
+
+        _trig_start()
+    except Exception as e:
+        print(f"[WARN] Trigger re-arm failed to start: {e}", file=sys.stderr)
+
+    # Browser downloads -> Workspace/downloads instant sync (daemon watcher).
+    # Never fatal: without it finished files still show via the read-only
+    # virtual downloads/ view (core/tools/workspace/tool.py).
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from web.server.download_sync import start_download_sync as _dl_sync_start
+
+        _dl_sync_start()
+    except Exception as e:
+        print(f"[WARN] Downloads sync failed to start: {e}", file=sys.stderr)
 
     # Transport: server -> browser is SSE (GET /api/events), browser ->
     # server is POST (chat + APIs). No WebSocket anywhere.

@@ -79,6 +79,9 @@
 }
 
 /* ---------- buttons ---------- */
+/* Default white button, now professional glass (Cancel / secondary actions):
+   same glass tokens as .glass-btn — blurred translucent surface, bright top
+   edge, soft depth shadow. .btn-primary (black) and .btn-danger keep theirs. */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -86,20 +89,32 @@
   gap: var(--sp-2);
   height: 40px;
   padding: 0 20px;
-  background: var(--background-menu-white);
-  border: 1px solid var(--border-main);
+  overflow: hidden;
+  background: var(--glass-bg), var(--background-menu-white);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
   border-radius: 8px;
-  color: var(--text-primary);
+  color: #fff;
   font-family: inherit;
   font-size: 14px;
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
   cursor: pointer;
   white-space: nowrap;
   position: relative;
-  box-shadow: none;
-  transition: background var(--dur) var(--ease), transform var(--dur) var(--ease);
+  box-shadow: var(--glass-hi), var(--glass-lo), var(--glass-sh);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.btn::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35) 30%, rgba(255, 255, 255, 0.35) 70%, transparent);
+  pointer-events: none;
 }
 .btn svg {
   width: 16px;
@@ -107,13 +122,12 @@
 }
 .btn:hover {
   transform: none;
-  box-shadow: none;
-  background: var(--fill-tsp-white-light);
-  border-color: var(--border-main);
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: var(--glass-hi), var(--glass-lo), 0 12px 32px rgba(0, 0, 0, 0.42);
 }
 .btn:active {
   transform: scale(0.98);
-  box-shadow: none;
+  box-shadow: var(--glass-hi), var(--glass-lo), var(--glass-sh);
 }
 
 .btn-primary {
@@ -767,33 +781,48 @@
   align-items: center;
   gap: 8px;
 }
-/* Sliding segmented switch: ONE glass pill glides under the active segment
+/* Pro segmented switch: ONE centered glass pill glides under the active segment
    (transform-only, GPU-composited). Equal segments keep the travel exact. */
 .range-switch {
   --pill-i: 0;
   position: relative;
   display: inline-flex;
-  align-items: stretch;
+  align-items: center;
+  justify-content: center;
   gap: 0;
-  padding: 2px;
-  background: rgba(0, 0, 0, 0.3);
+  padding: 3px;
+  /* Fixed LTR so the pill travel stays exact in both LTR + RTL pages. */
+  direction: ltr;
+  background: rgba(255, 255, 255, 0.04);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  backdrop-filter: blur(12px) saturate(1.2);
   border: 1px solid var(--border-light);
   border-radius: var(--r-full);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+/* Faint top light: same cue as cards, toned down to blend in. */
+.range-switch::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.14) 30%, rgba(255, 255, 255, 0.14) 70%, transparent);
+  pointer-events: none;
 }
 .range-switch::after {
   content: "";
   position: absolute;
-  top: 2px;
-  bottom: 2px;
-  left: 2px;
-  width: calc((100% - 4px) / 3);
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / 3);
   border-radius: var(--r-full);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.06));
-  -webkit-backdrop-filter: blur(12px) saturate(1.4);
-  backdrop-filter: blur(12px) saturate(1.4);
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 2px 8px rgba(0, 0, 0, 0.35);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.045));
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  backdrop-filter: blur(12px) saturate(1.2);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 1px 4px rgba(0, 0, 0, 0.25);
   transform: translateX(calc(var(--pill-i) * 100%));
   transition: transform 320ms cubic-bezier(0.32, 0.72, 0, 1);
   pointer-events: none;
@@ -805,30 +834,40 @@
   position: relative;
   z-index: 1;
   flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
   background: transparent;
-  height: 28px;
-  padding: 0 14px;
+  height: 30px;
+  min-width: 64px;
+  padding: 0 16px;
   border-radius: var(--r-full);
   font-family: inherit;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   color: var(--text-secondary);
   cursor: pointer;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
   transition: color var(--dur) var(--ease), transform 120ms ease-out;
 }
 .range-switch button:hover {
   color: var(--text-primary);
+}
+.range-switch button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 .range-switch button:active {
   transform: scale(0.95);
 }
 .range-switch button.active {
   background: transparent;
-  color: #fff;
+  color: var(--text-primary);
   font-weight: 600;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  text-shadow: none;
 }
 
 /* Pro flow-chart: responsive SVG area+line, glass panel, touch-first. */
@@ -3787,6 +3826,46 @@
   padding: 4px 12px;
   font-variant-numeric: tabular-nums;
 }
+/* Project card: repo identity row (brand mark + name/version pill). */
+.settings-row.proj-row {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+.proj-mark {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: #000;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.proj-mark svg {
+  width: 22px;
+  height: 22px;
+}
+.proj-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.proj-sub {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+/* Chat-history clear row: full-width black button + live count pill. */
+.settings-row.chat-clear-row {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+.settings-card .settings-btn.chat-clear-btn {
+  width: auto;
+  flex: 1 1 auto;
+  margin-top: 0;
+}
 .settings-status {
   font-size: 13px;
   color: var(--text-secondary);
@@ -6194,11 +6273,31 @@ h4,
   white-space: nowrap;
 }
 .pk-empty {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   padding: 8px 10px;
   font-size: 12px;
   color: var(--text-tertiary);
+}
+.pk-empty-add {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--border-main);
+  background: transparent;
+  color: var(--text-blue);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0 0 1px;
+}
+.pk-empty-add:hover {
+  background: var(--fill-tsp-gray-main);
 }
 
 /* ---------- composer highlight: transparent textarea over colored backdrop ----------
@@ -6238,8 +6337,10 @@ h4,
   color: #fff;
 }
 .composer-hl .hl-tok {
+  /* Color only, NEVER font-weight: the backdrop must stay pixel-exact
+     with the textarea, and 600-weight glyphs are wider — the blue paint
+     then bleeds over following chars and the caret looks misplaced. */
   color: var(--text-blue);
-  font-weight: 600;
 }
 .composer-hl .hl-sel {
   background: rgba(90, 169, 255, 0.35);
@@ -6501,6 +6602,41 @@ h4,
 }
 .mini-icon.skill-copy:hover {
   transform: scale(1.08);
+}
+/* Skill card actions (right side of the card head): delete + open arrow. */
+.mini-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* Skill delete: quiet until hovered, red when armed. Inside the card only. */
+.skill-del {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: var(--icon-tertiary);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease), background var(--dur) var(--ease), transform 120ms ease-out;
+}
+.skill-del svg {
+  width: 14px;
+  height: 14px;
+}
+.skill-del:hover,
+.skill-del:focus-visible {
+  color: var(--red-hi);
+  background: rgba(240, 68, 56, 0.12);
+  border-color: rgba(240, 68, 56, 0.45);
+  outline: none;
+}
+.skill-del:active {
+  transform: scale(0.9);
 }
 .provider-error {
   margin-top: var(--sp-4);
@@ -7953,19 +8089,43 @@ body.shotbox-open {
   color: var(--text-tertiary);
 }
 .sched-card {
+  position: relative;
   border: 1px solid var(--border-light);
-  border-radius: 10px;
-  padding: 9px 10px;
-  background: var(--fill-tsp-white-light);
-  box-shadow: var(--sh-1);
+  border-radius: 14px;
+  padding: 10px 11px 10px 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.015)), var(--fill-tsp-white-light);
+  box-shadow: var(--sh-1), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 10px;
-  transition: transform 220ms var(--ease);
+  overflow: hidden;
+  transition: transform 220ms var(--ease), border-color 220ms var(--ease), box-shadow 220ms var(--ease);
+}
+.sched-card::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--border-dark);
+}
+.sched-card.is-ok::before {
+  background: #22c55e;
+}
+.sched-card.is-fail::before {
+  background: var(--red);
+}
+.sched-card.is-running::before {
+  background: #22c55e;
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.8);
 }
 .sched-card:hover {
   transform: translateY(-1px);
+  border-color: var(--border-dark);
+  box-shadow: var(--sh-2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 .sched-icon {
   width: 32px;
@@ -8323,11 +8483,26 @@ body.shotbox-open {
   background: #22c55e;
   color: #fff;
 }
-/* run page reuses the main chat message shape (.msg) — keep long skill
-   text readable with preserved line breaks */
+/* run page reuses the main chat message shape (.msg) with the same rich
+   formatting — long skill text wraps naturally like the main session */
 #schedRunLog .msg-content {
-  white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
+}
+#schedRunLog .thinking-block,
+#schedRunLog .msg-actions {
+  font-size: inherit;
+}
+.sched-elapsed {
+  align-self: flex-end;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  margin-top: 4px;
+}
+#schedRunLog .msg.assistant .thinking-block {
+  margin-top: 8px;
 }
 #schedRunLog .msg.is-pending {
   opacity: 0.55;
@@ -8490,19 +8665,43 @@ body.shotbox-open {
   color: var(--text-tertiary);
 }
 .sched-card {
+  position: relative;
   border: 1px solid var(--border-light);
-  border-radius: 10px;
-  padding: 9px 10px;
-  background: var(--fill-tsp-white-light);
-  box-shadow: var(--sh-1);
+  border-radius: 14px;
+  padding: 10px 11px 10px 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.015)), var(--fill-tsp-white-light);
+  box-shadow: var(--sh-1), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 10px;
-  transition: transform 220ms var(--ease);
+  overflow: hidden;
+  transition: transform 220ms var(--ease), border-color 220ms var(--ease), box-shadow 220ms var(--ease);
+}
+.sched-card::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--border-dark);
+}
+.sched-card.is-ok::before {
+  background: #22c55e;
+}
+.sched-card.is-fail::before {
+  background: var(--red);
+}
+.sched-card.is-running::before {
+  background: #22c55e;
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.8);
 }
 .sched-card:hover {
   transform: translateY(-1px);
+  border-color: var(--border-dark);
+  box-shadow: var(--sh-2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 .sched-icon {
   width: 32px;
@@ -8689,6 +8888,460 @@ body:not(.sched-visible) #scheduleTab,
 body:not(.sched-visible) #scheduleMini {
   display: none;
 }
+/* ---------- scheduler floating window: same behavior as #liveMini ---------- */
+/* Docking glide + parked-alive minimize (same node kept, reopen is instant). */
+#scheduleMini {
+  transition: transform 300ms var(--ease), opacity 260ms var(--ease);
+}
+#scheduleMini.mini-hidden {
+  visibility: hidden !important;
+  pointer-events: none !important;
+  left: -10000px !important;
+  top: 0 !important;
+  transform: none !important;
+  opacity: 1 !important;
+  transition: none !important;
+  animation: none !important;
+}
+/* Header spot (count pill + minimize ×, same row as the browser player). */
+.sched-mini-spot {
+  margin-inline-start: auto;
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.sched-mini-x {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.sched-mini-x:hover {
+  color: #fff;
+  background: var(--red);
+  transform: scale(1.1);
+}
+/* Resize grips (same hit-areas/cursors as .live-resize). */
+.sched-resize {
+  position: absolute;
+  z-index: 2;
+}
+.sched-resize[data-edge="right"] {
+  top: 0;
+  bottom: 0;
+  inset-inline-end: 0;
+  width: 8px;
+  cursor: ew-resize;
+}
+.sched-resize[data-edge="bottom"] {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 8px;
+  cursor: ns-resize;
+}
+.sched-resize[data-edge="corner"] {
+  inset-inline-end: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+.sched-resize[data-edge="corner-left"] {
+  left: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nesw-resize;
+}
+/* Task rectangle: whole card is clickable + creation-time line. */
+.sched-card {
+  cursor: pointer;
+}
+.sched-created {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+/* Run rectangles: #RUN number + state + time, whole row clickable. */
+.sched-run {
+  cursor: pointer;
+  transition: transform 220ms var(--ease), background var(--dur) var(--ease);
+}
+.sched-run:hover {
+  transform: translateY(-1px);
+  background: var(--fill-tsp-gray-main);
+}
+.sched-run-state {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.sched-run.is-ok .sched-run-state {
+  color: #22c55e;
+}
+.sched-run.is-fail .sched-run-state {
+  color: var(--red);
+}
+/* While the floating window is open the tab hides (same as #browserTab.off:
+   a tap can only open — closing is ×/dock only). */
+#scheduleTab.off {
+  opacity: 0;
+  transform: translateX(40%);
+  pointer-events: none;
+}
+/* Professional tab number: no solid fill — thin ring + plain text.
+   Running state tints the ring/text green instead of a green fill. */
+#scheduleTab .tab-count {
+  background: transparent;
+  border: 1px solid var(--border-light);
+  color: var(--text-primary);
+}
+#scheduleTab.has-running .tab-count {
+  background: transparent;
+  border-color: rgba(34, 197, 94, 0.6);
+  color: #22c55e;
+}
+/* Better task rectangle: softer corners, cleaner hover (lift + edge). */
+.sched-card {
+  border-radius: 12px;
+}
+.sched-card:hover {
+  border-color: var(--border-dark);
+  box-shadow: var(--sh-2);
+}
+.sched-icon {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.sched-name {
+  letter-spacing: 0.01em;
+}
+/* ---------- scheduler dialog: 3 glass parts, hidden scrollbars ---------- */
+/* Same dashboard glass (ai-guide voice): blurred translucent panels. */
+.sched-detail {
+  max-height: min(62vh, 540px);
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.sched-detail::-webkit-scrollbar {
+  display: none;
+}
+.sched-glass {
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02));
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  backdrop-filter: blur(20px) saturate(1.6);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 6px 18px rgba(0, 0, 0, 0.25);
+  padding: 12px 14px;
+}
+.sched-part {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.sched-glass .sched-meta {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+/* Bigger skill section for real reading, scroll without a scrollbar. */
+.sched-glass .sched-skill-card,
+.sched-skill-card.sched-glass {
+  background: transparent;
+  border: 0;
+  overflow: visible;
+}
+.sched-glass .sched-skill-head {
+  border-bottom-color: rgba(255, 255, 255, 0.12);
+}
+.sched-skill {
+  max-height: 300px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.75;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.sched-skill::-webkit-scrollbar {
+  display: none;
+}
+.sched-edit {
+  min-height: 220px;
+}
+/* Task dialog head: plain title beside the close button (no glass card). */
+.sched-task-head {
+  align-items: center;
+}
+.sched-head-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sched-head-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sched-head-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  letter-spacing: 0;
+  color: var(--text-primary);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* Glass footer buttons: Delete pinned left, Pause + Cancel grouped right. */
+.sched-detail-foot {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  padding: 14px 20px 18px;
+  border-top: 1px solid var(--border-light);
+}
+.sched-detail-foot .glass-btn {
+  min-width: 0;
+}
+.sched-foot-spacer {
+  flex: 1 1 auto;
+}
+.sched-foot-danger {
+  margin-inline-end: 0;
+}
+.sched-foot-primary {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+.glass-btn.warn {
+  color: #ffd48a;
+  border-color: rgba(255, 180, 60, 0.45);
+}
+.glass-btn.warn:hover {
+  border-color: rgba(255, 180, 60, 0.8);
+  background: linear-gradient(180deg, rgba(255, 180, 60, 0.22), rgba(255, 180, 60, 0.08)), var(--background-menu-white);
+  box-shadow: var(--glass-hi), var(--glass-lo), 0 12px 32px rgba(0, 0, 0, 0.42);
+}
+.sched-confirm-foot {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 20px 16px;
+}
+/* ---------- scheduler window: compact fixed size, 5 rectangles + scroll ---
+   Fixed 272px wide, no resize grips. The list shows exactly 5 compact task
+   rectangles; anything more scrolls inside the list (border-box math:
+   5 × ~50px cards + 4 × 8px gaps + 2 × 10px padding = ~302px). */
+#scheduleMini {
+  width: 272px;
+}
+.sched-list {
+  max-height: 302px;
+}
+.sched-card {
+  padding: 9px 10px 9px 14px;
+  gap: 9px;
+  border-radius: 14px;
+}
+.sched-mini-head {
+  padding: 10px 12px;
+}
+.sched-mini-title {
+  font-size: 13.5px;
+  letter-spacing: 0.01em;
+}
+.sched-list {
+  gap: 9px;
+  padding: 11px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.sched-list::-webkit-scrollbar {
+  display: none;
+}
+/* ---------- scheduled dialog: status pill + executions redesign ---------- */
+.sched-exec-card {
+  padding-bottom: 10px;
+}
+.sched-exec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.sched-exec-head .sched-part {
+  margin: 0;
+}
+.sched-exec-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  background: var(--fill-tsp-gray-main);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-variant-numeric: tabular-nums;
+}
+.sched-runs {
+  gap: 9px;
+}
+.sched-run {
+  position: relative;
+  border-radius: 12px;
+  padding: 9px 10px;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: auto auto 1fr auto auto;
+  grid-template-areas: "dot chip state time go" "dot preview preview preview preview";
+  align-items: center;
+  gap: 4px 8px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+.sched-run:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--sh-2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.sched-run-dot {
+  grid-area: dot;
+  width: 9px;
+  height: 9px;
+  flex-basis: 9px;
+}
+.sched-run-chip {
+  grid-area: chip;
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+  background: var(--fill-tsp-gray-main);
+  border: 1px solid var(--border-light);
+  border-radius: 7px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.sched-run.is-ok .sched-run-chip {
+  border-color: rgba(34, 197, 94, 0.55);
+  color: #22c55e;
+}
+.sched-run.is-fail .sched-run-chip {
+  border-color: rgba(239, 68, 68, 0.55);
+  color: var(--red);
+}
+.sched-run-title {
+  display: none;
+}
+.sched-run-state {
+  grid-area: state;
+  font-size: 11.5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
+}
+.sched-run.is-ok .sched-run-state {
+  border-color: rgba(34, 197, 94, 0.45);
+}
+.sched-run.is-fail .sched-run-state {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+.sched-run-time {
+  grid-area: time;
+  flex: none;
+  font-size: 11px;
+}
+.sched-run-go {
+  grid-area: go;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--text-tertiary);
+  border: 1px solid transparent;
+  transition: transform var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.sched-run-go svg {
+  width: 13px;
+  height: 13px;
+}
+.sched-run:hover .sched-run-go {
+  color: var(--text-primary);
+  background: var(--fill-tsp-gray-main);
+  transform: translateX(2px);
+}
+.sched-run-preview {
+  grid-area: preview;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.sched-icon {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+  border-radius: 8px;
+}
+.sched-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.sched-name {
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+.sched-mid {
+  flex-direction: column;
+}
+.sched-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.sched-count {
+  font-size: 10.5px;
+  padding: 1px 8px;
+}
+.sched-created {
+  font-size: 10.5px;
+  flex: 1;
+  text-align: end;
+}
 .sched-skill {
   max-height: 220px;
   overflow: auto;
@@ -8704,12 +9357,6 @@ body:not(.sched-visible) #scheduleMini {
   width: 100%;
   min-height: 140px;
   resize: vertical;
-}
-.sched-detail-foot {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  padding-top: 2px;
 }
 .sched-delete-btn {
   margin-inline-end: auto;
@@ -8869,11 +9516,26 @@ body:not(.sched-visible) #scheduleMini {
   background: #22c55e;
   color: #fff;
 }
-/* run page reuses the main chat message shape (.msg) — keep long skill
-   text readable with preserved line breaks */
+/* run page reuses the main chat message shape (.msg) with the same rich
+   formatting — long skill text wraps naturally like the main session */
 #schedRunLog .msg-content {
-  white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
+}
+#schedRunLog .thinking-block,
+#schedRunLog .msg-actions {
+  font-size: inherit;
+}
+.sched-elapsed {
+  align-self: flex-end;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  margin-top: 4px;
+}
+#schedRunLog .msg.assistant .thinking-block {
+  margin-top: 8px;
 }
 #schedRunLog .msg.is-pending {
   opacity: 0.55;

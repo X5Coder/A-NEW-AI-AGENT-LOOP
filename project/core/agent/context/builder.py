@@ -378,8 +378,12 @@ def _triggers_block() -> str:
     active = [t for t in triggers if t.get("status") in (None, "active")]
     if not active:
         return ""
+    # Only active triggers, bounded: last 10 shown with total count so the
+    # agent knows each trigger + its awaited action and can manage them all
+    # via trigger_search (get/update/delete by trigger_id).
     lines = []
-    for t in active[-10:]:
+    shown = active[-10:]
+    for t in shown:
         tid = t.get("trigger_id","")
         tname = t.get("trigger_name","")
         task = str(t.get("task",""))[:80]
@@ -387,7 +391,10 @@ def _triggers_block() -> str:
         cfg = t.get("config") or {}
         cfg_str = json.dumps(cfg, ensure_ascii=False)[:100] if isinstance(cfg, dict) and cfg else ""
         lines.append(f"  - {tid} [{tname}] task: {task} skill: {skill} config: {cfg_str}")
-    return "[Active Triggers - background, one-time, will die after firing]\n" + "\n".join(lines) + "\n  (Use trigger_search to manage: search, create, list, get, update, delete)"
+    head = f"[Active Triggers ({len(active)} armed, background, one-time, die after firing)]"
+    if len(active) > len(shown):
+        head += f"\n  (showing last {len(shown)}; use trigger_search list for all)"
+    return head + "\n" + "\n".join(lines) + "\n  (Use trigger_search to manage: search, create, list, get, update, delete)"
 
 
 def openai_tool_from_spec(name: str, description: str, inputs: dict) -> dict:
@@ -514,8 +521,10 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
       L8 current user input (ALWAYS last) -> user content
     Returns (system_prompt, user_context_content, core_tools_openai)
     isolated=True for scheduled large tasks: skips last-30 chat history and uses snapshot.
-    session_history: when isolated AND provided, this task's own branch history
-      is used as L6 instead (each scheduled job keeps its session, main chat untouched).
+    session_history: this task's own branch history (holds the skill among
+      its last 30) — replaces L6 when isolated, extends it otherwise, so a
+      task follow-up chat answers like a separate normal chat with the same
+      full context (each scheduled job keeps its session, main chat untouched).
     chat_limit: L6 history depth (default 30; edit-resend uses 20).
     """
     if not isinstance(user_input, str):
@@ -554,7 +563,7 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
         parts.append("[Memories L5: empty]")
     if isolated:
         if isinstance(session_history, str) and session_history.strip():
-            parts.append(session_history.strip()[:6000])
+            parts.append(session_history.strip()[:16000])
         else:
             parts.append("[Chat L6: excluded for isolated scheduled execution - large task reliability]")
     else:
@@ -562,6 +571,12 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
             parts.append(chat)
         else:
             parts.append("[Chat L6: no prior messages]")
+        # A branch session (scheduled task follow-up chat) keeps its own
+        # history — including the skill — as an extra layer on top of the
+        # same full context, so the run answers like a separate normal chat
+        # instead of re-executing the task.
+        if isinstance(session_history, str) and session_history.strip():
+            parts.append(session_history.strip()[:16000])
     if todo:
         parts.append(todo)
     # Active triggers metadata + skill name (so AI can manage via trigger_search)

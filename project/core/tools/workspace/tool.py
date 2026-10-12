@@ -171,10 +171,27 @@ def execute(action: str = "list", path: str | None = None, name: str | None = No
     ws, target, rel = _resolve_dir(path)
     event = format_event(action=act, path=rel, name=name if isinstance(name, str) else "")
     if act == "list":
+        # Virtual browser-downloads tree (read-only): served live when no
+        # real folder with that name exists.
+        if split_downloads_rel(rel) is not None and downloads_virtual_active(ws):
+            out = list_downloads_virtual(split_downloads_rel(rel) or [])
+            return {"event": event, "action": act,
+                    "path": rel or "/", "success": True, **out}
         out = _list_dir(target)
         _purge_document_orphans()
+        if not rel:
+            # Root only: merge the virtual downloads folder (hidden on
+            # real-name collision).
+            info = downloads_virtual_info(ws)
+            if info is not None:
+                entries = out.get("entries") or []
+                idx = next((i for i, e in enumerate(entries)
+                            if e.get("type") != "folder"), len(entries))
+                entries.insert(idx, info)
         return {"event": event, "action": act,
                 "path": rel or "/", "success": True, **out}
+    if split_downloads_rel(rel) is not None and downloads_virtual_active(ws):
+        raise ValueError("Blocked: browser downloads are read-only.")
     if act == "delete_file":
         out = _delete_file(ws, target, name or "")
         return {"event": event, "action": act, **out}
@@ -197,3 +214,145 @@ def execute(action: str = "list", path: str | None = None, name: str | None = No
     except ValueError:
         shown = folder_name
     return {"event": event, "action": act, "path": shown, "success": True}
+
+
+# --- Browser-downloads virtual view (read-only) ---
+# The server merges this live view at Workspace/downloads/ when no REAL
+# folder with that name exists. Same rule is mirrored in
+# core/agent/context/builder.py and web/server/server.py — keep them in sync.
+_VIRTUAL_ROOT = "downloads"
+_TEMP_SUFFIXES = (".crdownload", ".part", ".tmp", ".download", ".opdownload")
+
+
+def library_downloads_dir() -> Path | None:
+    """The browser library's download folder, or None when missing."""
+    try:
+        import sys as _sys
+        proj = Path(__file__).resolve().parents[3]
+        if str(proj) not in _sys.path:
+            _sys.path.insert(0, str(proj))
+        from x5browser.config import LIBRARY_DOWNLOADS_DIR as configured
+        candidate = Path(str(configured))
+        if candidate.is_dir():
+            return candidate
+    except Exception:
+        pass
+    return None
+
+
+def split_downloads_rel(norm: str) -> list[str] | None:
+    """Split a normalized path into downloads-relative parts, or None when
+    the path is not inside the virtual downloads/ tree."""
+    if not isinstance(norm, str):
+        return None
+    s = norm.strip().replace("\\", "/").strip("/")
+    if len(s) > MAX_PATH_LEN:
+        return None
+    if s == _VIRTUAL_ROOT:
+        return []
+    if not s.startswith(_VIRTUAL_ROOT + "/"):
+        return None
+    parts = [p for p in s[len(_VIRTUAL_ROOT) + 1:].split("/") if p not in ("", ".")]
+    if not parts or ".." in parts or "\x00" in s:
+        return None
+    return parts
+
+
+def downloads_virtual_active(wsroot: Path) -> bool:
+    """True when the virtual view must show: no real downloads/ folder and
+    the library downloads folder exists."""
+    try:
+        if (Path(wsroot) / _VIRTUAL_ROOT).exists():
+            return False
+        lib = library_downloads_dir()
+        return lib is not None
+    except Exception:
+        return False
+
+
+def _count_lib_entries(lib: Path) -> tuple[int, bool]:
+    n = 0
+    try:
+        for _ in lib.iterdir():
+            n += 1
+            if n >= MAX_COUNT:
+                return n, True
+    except Exception:
+        return 0, False
+    return n, False
+
+
+def downloads_virtual_info(wsroot: Path) -> dict | None:
+    """Root-level folder card for the virtual downloads/, or None."""
+    try:
+        if not downloads_virtual_active(Path(wsroot)):
+            return None
+        lib = library_downloads_dir()
+        if lib is None:
+            return None
+        count, trunc = _count_lib_entries(lib)
+        return {"name": _VIRTUAL_ROOT, "type": "folder",
+                "items": count, "items_truncated": trunc, "external": True}
+    except Exception:
+        return None
+
+
+def _lib_target(parts: list[str]) -> Path:
+    lib = library_downloads_dir()
+    if lib is None:
+        raise FileNotFoundError("browser downloads unavailable")
+    target = lib.resolve()
+    for part in parts:
+        if not part or part in (".", "..") or "/" in part or "\\" in part or "\x00" in part:
+            raise ValueError("Blocked: outside browser downloads.")
+        target = (target / part).resolve()
+    try:
+        target.relative_to(lib.resolve())
+    except ValueError:
+        raise ValueError("Blocked: outside browser downloads.") from None
+    return target
+
+
+def list_downloads_virtual(parts: list[str]) -> dict:
+    """One-level listing of the virtual downloads/ tree (jailed, bounded)."""
+    target = _lib_target(list(parts or []))
+    if not target.exists():
+        raise FileNotFoundError("Workspace folder not found: downloads")
+    if not target.is_dir():
+        raise ValueError("path is a file, not a folder")
+    try:
+        children = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except Exception as e:
+        raise RuntimeError(f"Cannot list browser downloads: {e}") from e
+    entries: list[dict] = []
+    truncated = len(children) > MAX_ENTRIES
+    for p in children[:MAX_ENTRIES]:
+        try:
+            if p.name.startswith(".") or p.name.lower().endswith(_TEMP_SUFFIXES):
+                continue
+            if p.is_dir():
+                count, trunc = _count_items(p)
+                entries.append({"name": p.name, "type": "folder",
+                                "items": count, "items_truncated": trunc,
+                                "external": True})
+            elif p.is_file():
+                try:
+                    st = p.stat()
+                    entries.append({"name": p.name, "type": "file",
+                                    "size": st.st_size,
+                                    "mtime": int(st.st_mtime),
+                                    "external": True})
+                except Exception:
+                    entries.append({"name": p.name, "type": "file",
+                                    "external": True})
+        except Exception:
+            continue
+    return {"entries": entries, "truncated": truncated}
+
+
+def resolve_downloads_file(parts: list[str]) -> Path:
+    """Resolve one FILE inside the virtual downloads/ tree for streaming."""
+    target = _lib_target(list(parts or []))
+    if not target.is_file():
+        raise FileNotFoundError("file not found in browser downloads")
+    return target

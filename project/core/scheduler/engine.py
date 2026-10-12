@@ -1,5 +1,5 @@
 """
-Scheduler Engine - runs every 60s, checks due jobs, executes them in isolated mode for large tasks.
+Scheduler Engine - runs every 60s, checks due jobs, executes each skill as a normal message in the job's own branch session (same full main-chat context L1-L8 + branch history, never the main chat).
 Ownership: core/scheduler, lifecycle: main.py starts background thread or manual tick.
 """
 from __future__ import annotations
@@ -78,10 +78,14 @@ def _compute_next_after_repeat(job: dict, last_run: datetime) -> str | None:
                 candidate += timedelta(days=1)
             return candidate.astimezone(timezone.utc).isoformat()
     if repeat.startswith("every "):
-        m = re.match(r"every\s+(\d+)\s*(m|min|h|hour|d|day)", repeat)
+        m = re.match(r"every\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|h|hour|d|day)", repeat)
         if m:
             val = int(m.group(1))
             unit = m.group(2)
+            # Note: the ticker runs every 60s, so sub-minute cadences
+            # effectively run once per tick — still repeating, never run-once.
+            if unit.startswith("s"):
+                return (base + timedelta(seconds=val)).astimezone(timezone.utc).isoformat()
             if unit.startswith("m"):
                 return (base + timedelta(minutes=val)).astimezone(timezone.utc).isoformat()
             if unit.startswith("h"):
@@ -179,21 +183,23 @@ def _execute_single_job(job: dict, now: datetime, api_key: str | None, model: st
         from core.agent.loop.engine import run_loop
         try:
             from core.scheduler.session import history_block as _sess_hist
-            sess_hist = _sess_hist(str(job_id), limit=12)
+            sess_hist = _sess_hist(str(job_id), limit=30)
         except Exception:
             sess_hist = ""
         sess_key = str(job_id) if isinstance(job_id, str) and job_id else None
         skill_ref = job.get("skill_ref")
         skill_content = _load_scheduled_skill_content(skill_ref) if skill_ref else None
+        # Decided 2026-10-13 (owner): isolated branch run. The skill (or task)
+        # executes with the normal system prompt + memories + env + tools, no
+        # main-chat history; persist goes to the branch session via sess_key,
+        # so the main chat stays clean.
         if skill_content:
-            todo_snap = (bundle or {}).get("todo_snapshot")
-            result = run_loop(user_input=skill_content, max_steps=80, model=model, api_key=api_key, verbose=False, isolated=True, todo_snapshot=todo_snap, session_key=sess_key, session_history=sess_hist or None)
-        elif context_mode == "isolated" and bundle:
+            result = run_loop(user_input=skill_content, max_steps=80, model=model, api_key=api_key, verbose=False, isolated=True, session_key=sess_key, session_history=sess_hist or None)
+        elif bundle:
             original = (bundle.get("original_user_input") or task).strip()
-            todo_snap = bundle.get("todo_snapshot")
-            result = run_loop(user_input=original, max_steps=80, model=model, api_key=api_key, verbose=False, isolated=True, todo_snapshot=todo_snap, session_key=sess_key, session_history=sess_hist or None)
+            result = run_loop(user_input=original, max_steps=80, model=model, api_key=api_key, verbose=False, isolated=True, session_key=sess_key, session_history=sess_hist or None)
         else:
-            result = run_loop(user_input=task, max_steps=30, model=model, api_key=api_key, verbose=False, session_key=sess_key, session_history=sess_hist or None)
+            result = run_loop(user_input=task, max_steps=30, model=model, api_key=api_key, verbose=False, isolated=True, session_key=sess_key, session_history=sess_hist or None)
         success = True
         output = result.get("final_answer", "")[:RUN_OUTPUT_LIMIT]
         try:

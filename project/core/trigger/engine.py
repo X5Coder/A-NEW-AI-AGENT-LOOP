@@ -1,7 +1,19 @@
 """
 Trigger Engine - single engine for all triggers, continuous via Watchdog for filesystem.
+UNIFIED model for every trigger: (event + task) -> Skill (built at create time
+by the SAME text model via the SAME AIP/1 path as the loop: system prompt +
+task + last-10 chat + todo, saved temporarily under skills/trigger_skills).
 Each trigger is one-time, runs once and dies, at most MAX_ACTIVE_TRIGGERS concurrently.
-When event fires, loads its skill from trigger_skills and executes isolated with full context (tools + memory + system prompt), then deletes skill and trigger.
+When the event fires, loads its skill and sends it as a normal message in the
+trigger's own hidden branch session (same full main-chat context L1-L8 +
+own history, same as the scheduler branch — never the main chat), then
+deletes skill and trigger.
+
+Library triggers (manage_triggers, entry engine == "library"): armed inside
+the browser (own private tab, own cadence, up to 100 concurrent in the
+library - our cap of 50 stays below it). This engine polls the library's
+fired log (check_library_triggers, called from the server 60s tick) and
+runs the bound skill the same branch way, then deletes both sides.
 """
 from __future__ import annotations
 
@@ -33,6 +45,24 @@ MAX_ACTIVE_TRIGGERS = 50  # Rule 74: bound concurrent watchers, never unbounded.
 
 _LOCK = threading.Lock()
 _WATCHERS: dict[str, Any] = {}  # trigger_id -> watcher
+# Recently handled library fired ids (bounded, in-memory): the poll runs
+# every 60s and the fired log is bounded in the library, so without this a
+# slow delete could run one skill twice. Oldest drops first, never unbounded.
+_HANDLED_FIRED: list[str] = []
+_HANDLED_FIRED_MAX = 200
+
+
+def _mark_handled(lib_id: str) -> bool:
+    """True when this fired id was already handled (skip). Never raises."""
+    try:
+        if lib_id in _HANDLED_FIRED:
+            return True
+        _HANDLED_FIRED.append(lib_id)
+        while len(_HANDLED_FIRED) > _HANDLED_FIRED_MAX:
+            _HANDLED_FIRED.pop(0)
+        return False
+    except Exception:
+        return False
 
 # Approved inbox/outbox layout (Workspace-relative). outbox/done is NEVER watched.
 FORBIDDEN_WATCH_SUFFIXES = ("outbox/done", "outbox\\done")
@@ -113,6 +143,30 @@ def _load_skill_content(skill_ref: str) -> str | None:
     except Exception:
         return None
 
+def _stop_watcher(trigger_id: str) -> None:
+    """Stop and drop a watcher (observer or polling marker). Never raises."""
+    watcher = _WATCHERS.pop(trigger_id, None)
+    if watcher is None:
+        return
+    try:
+        stop = getattr(watcher, "stop", None)
+        if callable(stop):
+            stop()
+        elif isinstance(watcher, threading.Event):
+            watcher.set()
+    except Exception:
+        pass
+
+
+def validate_watch_path(watch_path: str) -> str:
+    """Resolve a watch path or raise ValueError with a clear reason.
+
+    Used by the trigger tool at create/update time so an unwatchable path
+    fails fast instead of arming a trigger that can never fire.
+    """
+    return str(_resolve_watch_dir(watch_path))
+
+
 def _delete_skill_and_trigger(trigger_id: str):
     triggers = _load_triggers()
     idx = next((i for i, t in enumerate(triggers) if t.get("trigger_id") == trigger_id), None)
@@ -133,31 +187,45 @@ def _delete_skill_and_trigger(trigger_id: str):
             except Exception:
                 pass
         # Stop watcher if any
-        watcher = _WATCHERS.pop(trigger_id, None)
-        if watcher:
-            try:
-                watcher.stop()
-            except Exception:
-                pass
+        _stop_watcher(trigger_id)
+        # Delete the trigger's own hidden branch session with it
+        try:
+            from core.trigger.session import delete_session as _del_trig_session
+            _del_trig_session(trigger_id)
+        except Exception:
+            pass
 
 def _execute_trigger_skill(trigger: dict):
-    """Execute skill for trigger in isolated mode, then delete trigger and skill."""
+    """Execute the trigger's Skill in its own hidden branch session, then one-time death.
+
+    The skill is sent into the trigger's private session (trigger_sessions/),
+    NEVER the main chat: main conversation stays clean and the session dies
+    with its trigger.
+    """
     trigger_id = trigger.get("trigger_id")
     skill_ref = trigger.get("skill_ref")
     skill_content = _load_skill_content(skill_ref) if skill_ref else None
     if not skill_content:
         skill_content = trigger.get("task") or ""
-    # Get todo snapshot if any? For triggers, we should also handle todo, but triggers are simple
-    # Execute via agent loop isolated
     try:
         from core.agent.loop.engine import run_loop
-        # Use isolated with full memory and system prompt, no chat
-        result = run_loop(user_input=skill_content, max_steps=80, verbose=False, isolated=True)
+        try:
+            from core.trigger.session import history_block as _trig_hist
+            sess_hist = _trig_hist(str(trigger_id), limit=30)
+        except Exception:
+            sess_hist = ""
+        sess_key = f"trigger:{trigger_id}" if isinstance(trigger_id, str) and trigger_id else None
+        # Decided 2026-10-13 (owner): isolated branch run. The skill executes
+        # with the normal system prompt + memories + env + tools, no main-chat
+        # history; persist goes to the hidden session via sess_key, so the
+        # main chat stays clean and the session dies with its trigger.
+        result = run_loop(user_input=skill_content, max_steps=80, verbose=False,
+                          isolated=True, session_key=sess_key, session_history=sess_hist or None)
         print(f"[trigger engine] Trigger {trigger_id} executed: {result.get('final_answer','')[:100]}")
     except Exception as e:
         print(f"[trigger engine] Trigger {trigger_id} failed: {e}")
     finally:
-        # Trigger dies after execution, delete skill and trigger
+        # Trigger dies after execution: delete skill, trigger, and its session
         _delete_skill_and_trigger(trigger_id)
         print(f"[trigger engine] Trigger {trigger_id} died and skill deleted")
 
@@ -230,6 +298,11 @@ def _start_filesystem_watch(trigger: dict):
 
 def _start_polling_watch(trigger: dict):
     """Fallback polling for filesystem if watchdog not available."""
+    tid = trigger.get("trigger_id")
+    if not tid or tid in _WATCHERS:
+        return
+    done = threading.Event()
+    _WATCHERS[tid] = done
     def poll():
         import time as _time
         config = trigger.get("config") or {}
@@ -239,6 +312,7 @@ def _start_polling_watch(trigger: dict):
             watch_dir = _resolve_watch_dir(str(watch_path))
         except ValueError as e:
             print(f"[trigger engine] Invalid watch_path for {trigger.get('trigger_id')}: {e}")
+            _WATCHERS.pop(tid, None)
             return
         seen = set()
         # Initial scan
@@ -246,8 +320,10 @@ def _start_polling_watch(trigger: dict):
             for f in watch_dir.iterdir():
                 if f.is_file():
                     seen.add(f.name)
-        while True:
+        while not done.is_set():
             _time.sleep(5)
+            if done.is_set():
+                break
             # Check if trigger still exists (might have been deleted)
             triggers = _load_triggers()
             if not any(t.get("trigger_id") == trigger.get("trigger_id") for t in triggers):
@@ -277,28 +353,177 @@ def _start_polling_watch(trigger: dict):
                                 _execute_trigger_skill(trigger)
                                 return
             seen = current
+        _WATCHERS.pop(tid, None)
     threading.Thread(target=poll, daemon=True).start()
 
+def _rearm_library_entry(entry: dict) -> None:
+    """Re-arm one library entry when its browser trigger is gone.
+
+    A server restart kills the browser too, so library triggers die with it
+    while project entries persist. Skips when the library still lists it as
+    pending (no duplicates) or when the browser is down (stays armed, the
+    next poll retries). Never raises.
+    """
+    try:
+        if entry.get("trigger_name") != "manage_triggers":
+            return
+        if entry.get("status") not in ("active", None):
+            return
+        lib_id = str(entry.get("library_trigger_id") or "")
+        import sys as _sys8
+        _proj8 = Path(__file__).resolve().parents[1]
+        _root8 = _proj8 if _proj8.name == "project" else Path(__file__).resolve().parents[2]
+        if str(_root8) not in _sys8.path:
+            _sys8.path.insert(0, str(_root8))
+        from core.tools.trigger.tool import (
+            _library_pending_ids, _library_start, _validate_library_config,
+        )
+        try:
+            if lib_id and lib_id in _library_pending_ids():
+                return
+        except Exception:
+            return
+        cfg = entry.get("config") or {}
+        try:
+            cleaned = _validate_library_config(cfg if isinstance(cfg, dict) else {})
+        except Exception as e:
+            print(f"[trigger engine] Library entry {entry.get('trigger_id')} has invalid config, not re-armed: {e}")
+            return
+        try:
+            new_lib_id = _library_start(cleaned)
+        except Exception:
+            return  # browser down: stays armed, retried on next poll
+        triggers = _load_triggers()
+        for t in triggers:
+            if t.get("trigger_id") == entry.get("trigger_id"):
+                t["library_trigger_id"] = new_lib_id
+                break
+        _save_triggers(triggers)
+        print(f"[trigger engine] Re-armed library entry {entry.get('trigger_id')} as {new_lib_id}")
+    except Exception:
+        pass
+
+
+def check_library_triggers() -> list[str]:
+    """Poll the library fired log and run bound skills. Called every 60s.
+
+    For each fired library trigger bound to an active project entry, runs
+    the entry's skill in its hidden branch (same one-time death as filesystem
+    triggers: skill + entry deleted). Returns executed project trigger ids. Never
+    raises, never boots the browser (a stopped browser simply yields none).
+    """
+    executed: list[str] = []
+    try:
+        triggers = _load_triggers()
+        bound = {str(t.get("library_trigger_id") or ""): t for t in triggers
+                 if t.get("trigger_name") == "manage_triggers"
+                 and t.get("status") in ("active", None)
+                 and t.get("library_trigger_id")}
+        if not bound:
+            return []
+        import sys as _sys9
+        _proj9 = Path(__file__).resolve().parents[1]
+        _root9 = _proj9 if _proj9.name == "project" else Path(__file__).resolve().parents[2]
+        if str(_root9) not in _sys9.path:
+            _sys9.path.insert(0, str(_root9))
+        from core.tools.trigger.tool import _library_fired
+        try:
+            fired = _library_fired()
+        except Exception:
+            return []
+        for item in fired:
+            if not isinstance(item, dict):
+                continue
+            # The recent log holds fired/cancelled records; run fired ones only.
+            if item.get("status") is not None and item.get("status") != "fired":
+                continue
+            lib_id = str(item.get("trigger_id") or "")
+            entry = bound.get(lib_id)
+            if entry is None:
+                continue
+            if _mark_handled(lib_id):
+                continue
+            # Re-load the entry fresh (it may have been deleted/updated).
+            current = next((t for t in _load_triggers()
+                            if t.get("trigger_id") == entry.get("trigger_id")), None)
+            if current is None:
+                continue
+            detail = item.get("matched") or (item.get("detail") or {})
+            print(f"[trigger engine] Library trigger {lib_id} fired ({detail}) -> executing {entry.get('trigger_id')}")
+            try:
+                _execute_trigger_skill(dict(current))
+                executed.append(str(entry.get("trigger_id")))
+            except Exception as e:
+                print(f"[trigger engine] Library entry {entry.get('trigger_id')} failed: {e}")
+        # Opportunistic re-arm: entries whose library side is gone but never
+        # fired (browser restarted) get re-armed without waiting for boot.
+        try:
+            for t in _load_triggers():
+                if (t.get("trigger_name") == "manage_triggers"
+                        and t.get("status") in ("active", None)
+                        and str(t.get("trigger_id") or "") not in executed):
+                    _rearm_library_entry(t)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return executed
+
+
 def start_all_triggers():
-    """Start engine for all active triggers (called at startup)."""
+    """Start engine for all active triggers (called at startup).
+
+    Bounded by MAX_ACTIVE_TRIGGERS like single starts; extras stay armed
+    but unwatched until room frees (same rule as check_and_start_new_trigger).
+    Library entries are re-armed inside the browser (best-effort).
+    """
     triggers = _load_triggers()
     for trig in triggers:
+        if len(_WATCHERS) >= MAX_ACTIVE_TRIGGERS:
+            print(f"[trigger engine] At cap ({MAX_ACTIVE_TRIGGERS}), remaining triggers stay armed but unwatched.")
+            break
         if trig.get("status") == "active" or trig.get("status") is None:
             tname = trig.get("trigger_name")
             if tname in ("filesystem_new_file", "filesystem_file_modified"):
                 _start_filesystem_watch(trig)
+            elif tname == "manage_triggers":
+                _rearm_library_entry(trig)
             else:
                 print(f"[trigger engine] Unknown trigger {tname}, skipping")
 
 def check_and_start_new_trigger(trigger: dict):
     """Called after trigger creation to start its watcher."""
+    tname = (trigger or {}).get("trigger_name")
+    if tname == "manage_triggers":
+        # Already armed at create time; only re-arm when missing.
+        _rearm_library_entry(trigger)
+        return
     with _LOCK:
         if len(_WATCHERS) >= MAX_ACTIVE_TRIGGERS:
             print(f"[trigger engine] At cap ({MAX_ACTIVE_TRIGGERS}), new trigger not watched.")
             return
-    tname = trigger.get("trigger_name")
     if tname in ("filesystem_new_file", "filesystem_file_modified"):
         _start_filesystem_watch(trigger)
+
+def restart_trigger(trigger: dict) -> None:
+    """Restart a trigger's watcher after its config changed (update path).
+
+    Without this the old observer keeps watching the old path while the
+    trigger claims the new one. Library entries are owned by the tool's
+    update path (stop+start there); here they only re-arm when missing.
+    Never raises.
+    """
+    try:
+        tid = (trigger or {}).get("trigger_id")
+        if not tid:
+            return
+        if (trigger or {}).get("trigger_name") == "manage_triggers":
+            _rearm_library_entry(trigger)
+            return
+        _stop_watcher(tid)
+        check_and_start_new_trigger(trigger)
+    except Exception:
+        pass
 
 def get_active_triggers_for_context() -> list[dict]:
     """Return triggers to be sent in context as metadata + skill name."""

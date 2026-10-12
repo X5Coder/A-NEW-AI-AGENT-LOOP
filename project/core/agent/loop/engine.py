@@ -130,6 +130,13 @@ def _is_cancelled(cancel_flag) -> bool:
         return False
 
 
+# Closing note persisted when the user stops a task mid-run: the stopped
+# task stays in context (user request + steps done so far) with this last
+# line so the next turn knows it was stopped and never continues it unasked.
+_STOPPED_NOTE = ("The user stopped this task before it finished (STOP). "
+                "Do not continue it unless the user asks again.")
+
+
 def _preview_event(name: str, args: Any) -> str:
     """Best-effort event label BEFORE execution (for instant UI). Never raises."""
     try:
@@ -668,22 +675,43 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
                           reuse_user_id: str | None = None):
     import uuid
     if isinstance(session_key, str) and session_key.strip():
-        # Branch session (one per scheduled job): NEVER touches the main chat
-        # or its vector memory. On any failure skip persistence (fail clean).
+        # Branch session (one per scheduled job / trigger): NEVER touches the
+        # main chat or its vector memory. "trigger:<id>" goes to the trigger's
+        # own hidden session, anything else to the scheduler session.
+        # On any failure skip persistence (fail clean).
         try:
             import sys as _sys
             from pathlib import Path as _P
             _proj = _P(__file__).resolve().parents[3]
             if str(_proj) not in _sys.path:
                 _sys.path.insert(0, str(_proj))
-            from core.scheduler.session import append_session as _sess_append
+            _key = session_key.strip()
+            if _key.startswith("trigger:") and len(_key) > len("trigger:"):
+                from core.trigger.session import append_session as _sess_append
+                _branch = _key[len("trigger:"):]
+            else:
+                from core.scheduler.session import append_session as _sess_append
+                _branch = _key
             extra = {}
             if isinstance(steps, list) and steps:
                 extra["steps"] = steps[:12]
             if isinstance(elapsed, int) and elapsed >= 0:
                 extra["elapsed"] = elapsed
-            u = _sess_append(session_key.strip(), "user", user_input[:2000])
-            a = _sess_append(session_key.strip(), "assistant", assistant_output[:5000], extra or None)
+            if isinstance(images, list) and images:
+                extra["images"] = images[:6]
+            if isinstance(audios, list) and audios:
+                extra["audio"] = audios[:4]
+            # Edit/regenerate resend: the edited user bubble already persists
+            # (server updated it in place) — append ONLY the assistant reply,
+            # same contract as the main chat (fixes the duplicated-message bug).
+            if isinstance(reuse_user_id, str) and reuse_user_id.strip():
+                a = _sess_append(_branch, "assistant", assistant_output[:5000], extra or None)
+                if a:
+                    return reuse_user_id.strip()[:16], a[0]
+                print(f"[loop] session persist failed for key={session_key.strip()[:16]} — skipped (main chat untouched)")
+                return None
+            u = _sess_append(_branch, "user", user_input[:2000])
+            a = _sess_append(_branch, "assistant", assistant_output[:5000], extra or None)
             if u and a:
                 return u[0], a[0]
             print(f"[loop] session persist failed for key={session_key.strip()[:16]} — skipped (main chat untouched)")
@@ -724,7 +752,19 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
         assistant_msg["audio"] = audios[:4]
     data.append(assistant_msg)
     if len(data) > 1000:
+        removed = data[:-1000]
         data = data[-1000:]
+        try:
+            from core.agent.memory.chat_vector_store import _load_vectors as _lv, _save_vectors as _sv
+            _vecs = _lv()
+            _rids = {str(m.get("id") or "").strip() for m in removed if isinstance(m, dict) and m.get("id")}
+            _rids.discard("")
+            if _rids:
+                for _rid in _rids:
+                    _vecs.pop(_rid, None)
+                _sv(_vecs)
+        except Exception:
+            pass
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     # Auto-create embeddings for new messages (per-message, no fallback).
     # Reused user id: embed the assistant reply only (user already embedded).
@@ -812,9 +852,11 @@ def run_loop(
     on_live_event({"tool", "output", "success"}) fires for live_preview/
     close_browser completions (best-effort).
     isolated=True for scheduled large tasks (skips chat history, uses todo_snapshot).
-    session_key: persist this run into the job's own branch session instead of
-      the main conversation (each scheduled task owns its session).
-    session_history: that branch's recent history, used as L6 when isolated.
+    session_key: persist this run into the job's/trigger's own branch session
+      instead of the main conversation ("trigger:<id>" → the trigger's hidden
+      session, anything else → the scheduler session).
+    session_history: that branch's recent history (holds the skill among its
+      last 30) — replaces L6 when isolated, extends it otherwise.
     reuse_user_id: id of the ALREADY-persisted edited user bubble — the loop
       appends only the assistant reply (fixes the double-reply bug on edit).
     chat_limit: L6 history depth for this run (default 30; edit-resend uses 20:
@@ -1242,13 +1284,24 @@ def run_loop(
         if final_answer is None:
             final_answer = ""
 
-    # Persist conversation (skipped for cancelled runs — nothing to keep)
+    # Persist conversation. Cancelled runs keep the stopped task in context
+    # (user request + steps done so far + closing stopped note) so the next
+    # turn sees it was stopped by the user and never continues it unasked.
+    # No media for unfinished work — nothing final was produced.
     final_images: list[dict] = []
     final_audio: list[dict] = []
     try:
         elapsed_sec = max(0, int(round(time.time() - turn_t0)))
     except Exception:
         elapsed_sec = 0
+    if cancelled:
+        try:
+            persist_ids = _persist_conversation(
+                user_input, _STOPPED_NOTE, _persist_steps(tool_calls_log),
+                [], elapsed_sec, [],
+                session_key=session_key, reuse_user_id=reuse_user_id)
+        except Exception:
+            pass
     if not cancelled:
         try:
             final_images = _collect_final_images(tool_calls_log)

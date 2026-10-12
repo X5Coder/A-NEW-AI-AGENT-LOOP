@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from .events import format_event
 MAX_NAME_LEN = 50
 MAX_CONTENT_LEN = 10000
 MAX_DESC_LEN = 500
+
+_RESERVED_DIRS = {"scheduled_skills", "trigger_skills"}
 
 
 def _validate_name(v) -> str:
@@ -95,3 +98,42 @@ def execute(name: str, content: str, description: str | None = None) -> dict:
     readme.write_text(f"# {n}\n\n{d or ''}\n\n## Instructions\n\n{c}\n", encoding="utf-8")
 
     return {"event": event, "skill_name": n, "safe_name": safe, "path": str(target_dir), "success": True}
+
+
+def _resolve_skill_dir(skills_dir: Path, name: str) -> Path | None:
+    """Find the on-disk skill dir for a display name (same matching as skills_view)."""
+    lowered = name.lower()
+    norm_wanted = lowered.replace("_", " ").replace("-", " ")
+    target: Path | None = None
+    try:
+        children = [p for p in skills_dir.iterdir() if p.is_dir()]
+    except OSError:
+        return None
+    for child in children:
+        if child.name.lower() == lowered:
+            target = child
+            break
+    if target is None:
+        for child in children:
+            if child.name.lower().replace("_", " ").replace("-", " ") == norm_wanted:
+                target = child
+                break
+    return target
+
+
+def delete_skill(name: str) -> dict:
+    """Delete one user skill dir. Validated + jailed inside skills/ (reserved dirs refused)."""
+    n = _validate_name(name)
+    project_root = Path(__file__).resolve().parents[3]
+    skills_dir = project_root / "skills"
+    target = _resolve_skill_dir(skills_dir, n)
+    if target is None:
+        raise FileNotFoundError(f"Skill not found: {n}")
+    if target.name in _RESERVED_DIRS or target.name.startswith("."):
+        raise ValueError("Skill cannot be deleted")
+    try:
+        target.resolve().relative_to(skills_dir.resolve())
+    except ValueError as exc:
+        raise ValueError("Skill path escapes allowed directory") from exc
+    shutil.rmtree(target, ignore_errors=False)
+    return {"skill_name": target.name, "success": True}

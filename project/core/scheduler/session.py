@@ -1,12 +1,12 @@
 """
-Scheduler sessions — one isolated chat branch per scheduled job.
+Scheduler sessions — one separate chat branch per scheduled job (same shape as the main chat: Working block before the reply, same full context L1-L8 + branch history).
 
 Ownership: core/scheduler. Every scheduled execution (and every user
 follow-up from the run page) is persisted here, NEVER in the main
 conversation.json — the main chat stays clean, each task owns its session.
 
 File: X5Agent/Data/database/scheduler_sessions/<job_id>.json
-Shape: [{id, role: user|assistant, content, ts}] bounded to last 100.
+Shape: [{id, role: user|assistant, content, ts}] bounded to last 20000 (practically unlimited, still bounded to protect memory/disk).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-MAX_MESSAGES = 100
+MAX_MESSAGES = 20000
 CONTENT_LIMIT = 4000
 
 _JOB_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -83,7 +83,7 @@ def append_session(job_id: str, role: str, content: str, extra: dict | None = No
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         entry: dict = {"id": mid, "role": role, "content": text, "ts": ts}
         if isinstance(extra, dict):
-            for k in ("steps", "elapsed"):
+            for k in ("steps", "elapsed", "images", "audio"):
                 if k in extra:
                     entry[k] = extra[k]
         msgs.append(entry)
@@ -98,7 +98,7 @@ def append_session(job_id: str, role: str, content: str, extra: dict | None = No
         return None
 
 
-def history_block(job_id: str, limit: int = 12) -> str:
+def history_block(job_id: str, limit: int = 30) -> str:
     """Recent session messages formatted as an L6 context block. Empty when none."""
     try:
         msgs = load_session(job_id)[-max(1, min(int(limit), 30)):]
@@ -120,3 +120,69 @@ def delete_session(job_id: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def update_message(job_id: str, mid: str, content: str) -> bool:
+    """Edit one session message in place (copy of chat edit, branch-local)."""
+    try:
+        jid = _validate_job_id(job_id)
+        key = str(mid or "").strip()[:16]
+        text = str(content or "").strip()[:CONTENT_LIMIT]
+        if not key or not text:
+            return False
+        msgs = load_session(jid)
+        hit = next((m for m in msgs if str(m.get("id") or "")[:16] == key), None)
+        if hit is None:
+            return False
+        hit["content"] = text
+        p = session_path(jid)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(msgs, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+        return True
+    except Exception:
+        return False
+
+
+def delete_message(job_id: str, mid: str) -> bool:
+    """Delete one session message by id (branch-local). Never raises."""
+    try:
+        jid = _validate_job_id(job_id)
+        key = str(mid or "").strip()[:16]
+        if not key:
+            return False
+        msgs = load_session(jid)
+        kept = [m for m in msgs if str(m.get("id") or "")[:16] != key]
+        if len(kept) == len(msgs):
+            return False
+        p = session_path(jid)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+        return True
+    except Exception:
+        return False
+
+
+def prune_below(job_id: str, anchor_mid: str) -> int:
+    """Delete every session message below the anchor (regenerate path)."""
+    try:
+        jid = _validate_job_id(job_id)
+        key = str(anchor_mid or "").strip()[:16]
+        if not key:
+            raise ValueError("anchor id required")
+        msgs = load_session(jid)
+        idx = next((i for i, m in enumerate(msgs) if str(m.get("id") or "")[:16] == key), None)
+        if idx is None:
+            raise FileNotFoundError("anchor message not found")
+        removed = len(msgs) - (idx + 1)
+        kept = msgs[: idx + 1]
+        p = session_path(jid)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+        return max(0, removed)
+    except (ValueError, FileNotFoundError):
+        raise
+    except Exception:
+        return 0

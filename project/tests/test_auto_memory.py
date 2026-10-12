@@ -1,126 +1,132 @@
-import sys, json, os, time
+"""Auto-memory tests: trigger cadence, extract, organize/dedup.
+
+Safe: no network (the LLM entry is mocked), no import-time side effects,
+real Data files are snapshotted and restored. The old script version of
+this file wiped conversation.json + memories at import and required a real
+API key — never do that again.
+"""
+import json
+import sys
+import time
 from pathlib import Path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
-os.environ.setdefault("OPENROUTER_API_KEY", "test-dummy-key")
 
-# Unified test paths: fixtures live in X5Agent/Data (same single source of truth as runtime)
-_REPO = Path(__file__).resolve().parents[2]
-DATA_DB = _REPO / "X5Agent" / "Data" / "database"
-DATA_VEC = _REPO / "X5Agent" / "Data" / "vector"
-DATA_DB.mkdir(parents=True, exist_ok=True)
-DATA_VEC.mkdir(parents=True, exist_ok=True)
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Clean
-Path(str(DATA_DB / "conversation.json")).write_text("[]", encoding="utf-8")
-Path(str(DATA_DB / "user_memory.json")).write_text("{}", encoding="utf-8")
-Path(str(DATA_DB / "agent_memory.json")).write_text("{}", encoding="utf-8")
-Path(str(DATA_DB / ".auto_memory_last_trigger")).unlink(missing_ok=True)
-Path(str(DATA_VEC / "chat_embeddings.json")).write_text("{}", encoding="utf-8")
-print("cleaned")
+import pytest
 
-# Live LLM test: requires a real key. Dummy keys must never trigger network calls.
-if os.environ.get("OPENROUTER_API_KEY", "test-dummy-key") in ("", "test-dummy-key", "dummy"):
-    print("⏭️ skipped (no real OPENROUTER_API_KEY in env)")
-    sys.exit(0)
+GUARD_DB_FILES = ("conversation.json", "user_memory.json", "agent_memory.json",
+                  ".auto_memory_last_trigger")
 
-# Create 50 messages with user facts
-conv = []
-for i in range(25):
-    conv.append({"id": f"u{i}", "role":"user", "content": f"اسمي خالد وأحب البرمجة وأعيش في الرياض، رسالة {i}", "ts":"2026-09-22T00:00:00Z"})
-    conv.append({"id": f"a{i}", "role":"assistant", "content": f"أهلا خالد، سأساعدك في البرمجة، رد {i}", "ts":"2026-09-22T00:01:00Z"})
-Path(str(DATA_DB / "conversation.json")).write_text(json.dumps(conv, ensure_ascii=False, indent=2), encoding="utf-8")
-# Add embeddings for them
-from core.agent.memory.chat_vector_store import ensure_synced
-ensure_synced()
-print(f"conversation {len(conv)} msgs, should trigger at 50")
 
-# Test 1: maybe_trigger should trigger
-from core.memory.auto_memory import maybe_trigger_auto_memory, _should_trigger, trigger_now_for_test
-print(f"should_trigger? {_should_trigger()}")
-# Use synchronous trigger for test
-print("=== Triggering auto memory (extract + organize) ===")
-result = trigger_now_for_test()
-print(f" result {result}")
-# Check user_memory
-user_mem = json.loads(Path(str(DATA_DB / "user_memory.json")).read_text(encoding="utf-8"))
-print(f" user_memory {user_mem}")
-assert "name" in str(user_mem).lower() or "خالد" in str(user_mem) or len(user_mem)>0, "should have extracted user facts"
-print(f" user_memory keys {list(user_mem.keys())}")
+@pytest.fixture
+def guard():
+    from core.paths import data_db_dir
+    db = data_db_dir()
+    before = {}
+    for name in GUARD_DB_FILES:
+        p = db / name
+        before[name] = p.read_bytes() if p.is_file() else None
+    yield
+    for name, content in before.items():
+        p = db / name
+        if content is None:
+            if p.is_file():
+                p.unlink()
+        else:
+            p.write_bytes(content)
 
-agent_mem = json.loads(Path(str(DATA_DB / "agent_memory.json")).read_text(encoding="utf-8"))
-print(f" agent_memory {agent_mem}")
-assert len(agent_mem)>0
-print(f" agent keys {list(agent_mem.keys())}")
 
-# Test 2: Add 50 more messages with duplicate facts, test organize deduplication
-print("\n=== Adding 50 more messages with same facts + duplicate ===")
-conv2 = json.loads(Path(str(DATA_DB / "conversation.json")).read_text(encoding="utf-8"))
-for i in range(25,50):
-    conv2.append({"id": f"u{i}", "role":"user", "content": f"اسمي خالد وأحب البرمجة، رسالة {i}", "ts":"2026-09-22T01:00:00Z"})
-    conv2.append({"id": f"a{i}", "role":"assistant", "content": f"أهلا خالد", "ts":"2026-09-22T01:01:00Z"})
-Path(str(DATA_DB / "conversation.json")).write_text(json.dumps(conv2, ensure_ascii=False, indent=2), encoding="utf-8")
-ensure_synced()
-print(f" now {len(conv2)} msgs")
-# Manually add duplicate to user_memory to test organize
-from core.memory.user_memory.service import set_value
-set_value("name", "خالد")
-set_value("name_dup", "خالد")  # duplicate
-user_before = json.loads(Path(str(DATA_DB / "user_memory.json")).read_text(encoding="utf-8"))
-print(f" before organize user_memory {user_before}")
-# Trigger again (should organize and deduplicate)
-from core.memory.auto_memory import _organize_memory
-count = _organize_memory("user")
-print(f" organized count {count}")
-user_after = json.loads(Path(str(DATA_DB / "user_memory.json")).read_text(encoding="utf-8"))
-print(f" after organize {user_after}")
-# Should have no duplicate "خالد" twice
-vals = [ (v.get("value") if isinstance(v,dict) else str(v)) for v in user_after.values()]
-print(f" values {vals}")
-# Check duplicate removed (should not have two identical values with different keys if organizer worked)
-# At least check that number not increased with duplicates
-assert len(user_after) <= len(user_before) or vals.count("خالد")==1
-print(" ✅ organize deduplicates without adding")
+@pytest.fixture
+def mock_llm(monkeypatch):
+    """Mock the single LLM entry of auto_memory. No network."""
+    import core.ai_models.engine as engine_mod
 
-# Test 3: maybe_trigger should not trigger again immediately (needs 50 new)
-print(f"\n should_trigger again? {_should_trigger()} (should False, need 50 more)")
-assert not _should_trigger()
-print(" ✅ trigger every 50 new messages only")
+    def fake_chat(record, messages, options=None):
+        content = messages[-1]["content"] if messages else ""
+        if "facts" in content and "key" in content:
+            # organize call (memory JSON in, deduped JSON out)
+            return json.dumps({"facts": [{"key": "name", "value": "TESTNAME"}]},
+                              ensure_ascii=False)
+        return json.dumps({"facts": [{"key": "name", "value": "TESTNAME"},
+                                      {"key": "city", "value": "TESTCITY"}]},
+                          ensure_ascii=False)
 
-# Test 4: Add 50 more and trigger via maybe_trigger (background)
-for i in range(50,75):
-    conv2.append({"id": f"u{i}", "role":"user", "content": f"رسالة جديدة {i} اسمي خالد", "ts":"2026-09-22T02:00:00Z"})
-    conv2.append({"id": f"a{i}", "role":"assistant", "content": f"رد {i}", "ts":"2026-09-22T02:01:00Z"})
-Path(str(DATA_DB / "conversation.json")).write_text(json.dumps(conv2, ensure_ascii=False, indent=2), encoding="utf-8")
-print(f" now {len(conv2)} msgs (should be 150)")
-print(f" should_trigger? {_should_trigger()}")
-# maybe_trigger runs in background thread, need to wait
-res = maybe_trigger_auto_memory()
-print(f" maybe_trigger returned {res}")
-time.sleep(8)  # wait for background thread to finish (needs 2 LLM calls)
-user_final = json.loads(Path(str(DATA_DB / "user_memory.json")).read_text(encoding="utf-8"))
-print(f" user_memory after background trigger {user_final}")
-print(" ✅ background trigger works")
+    monkeypatch.setattr(engine_mod, "chat", fake_chat)
 
-print("\n=== ALL AUTO MEMORY TESTS PASSED ===")
 
-# Check for any pending tasks to complete
-print("\n=== Checking pending tasks ===")
-import json as js
-todos = js.loads(Path(str(DATA_DB / "todos.json")).read_text(encoding="utf-8")) if Path(str(DATA_DB / "todos.json")).exists() else []
-print(f" todos {len(todos)}")
-for t in todos[-3:]:
-    print(f"  {t}")
-sched = js.loads(Path(str(DATA_DB / "scheduler.json")).read_text(encoding="utf-8")) if Path(str(DATA_DB / "scheduler.json")).exists() else []
-print(f" scheduler jobs {len(sched)}")
-for j in sched[-3:]:
-    print(f"  {j.get('job_id')}: {j.get('task')[:40]} status {j.get('status')}")
+def _write_conversation(n):
+    from core.paths import data_db_dir
+    conv = [{"id": f"t{i}", "role": "user" if i % 2 == 0 else "assistant",
+             "content": f"TEST message {i}", "ts": "2026-01-01T00:00:00Z"}
+            for i in range(n)]
+    (data_db_dir() / "conversation.json").write_text(
+        json.dumps(conv, ensure_ascii=False), encoding="utf-8")
+    (data_db_dir() / ".auto_memory_last_trigger").write_text("0", encoding="utf-8")
 
-# Cleanup for final state: keep memories but clear test conversation? Keep 2 for next test
-# Clear test data? For now leave as is, but reset marker
-Path(str(DATA_DB / ".auto_memory_last_trigger")).unlink(missing_ok=True)
-Path(str(DATA_DB / "conversation.json")).write_text("[]", encoding="utf-8")
-Path(str(DATA_VEC / "chat_embeddings.json")).write_text("{}", encoding="utf-8")
-Path(str(DATA_DB / "user_memory.json")).write_text("{}", encoding="utf-8")
-Path(str(DATA_DB / "agent_memory.json")).write_text("{}", encoding="utf-8")
-print("cleaned for next run")
+
+def test_should_trigger_every_50(guard):
+    from core.memory.auto_memory import _should_trigger
+    _write_conversation(49)
+    assert _should_trigger() is False
+    _write_conversation(50)
+    assert _should_trigger() is True
+
+
+def test_extract_stores_facts(guard, mock_llm):
+    from core.memory import auto_memory as am
+    _write_conversation(50)
+    out = am.trigger_now_for_test()
+    assert out["user_stored"] >= 1
+    from core.memory.user_memory.service import list_all
+    mem = list_all()
+    vals = [v.get("value") if isinstance(v, dict) else str(v) for v in mem.values()]
+    assert "TESTNAME" in vals
+
+
+def test_organize_deduplicates(guard, mock_llm):
+    from core.memory import auto_memory as am
+    from core.memory.user_memory.service import set_value, list_all
+    set_value("name", "TESTNAME")
+    set_value("name_dup", "TESTNAME")
+    before = list_all()
+    assert len(before) == 2
+    count = am._organize_memory("user")
+    assert count == 1
+    after = list_all()
+    assert len(after) == 1
+
+
+def test_no_retrigger_without_50_new(guard, mock_llm):
+    from core.memory import auto_memory as am
+    _write_conversation(50)
+    am.trigger_now_for_test()
+    from core.memory.auto_memory import _should_trigger
+    assert _should_trigger() is False
+
+
+def test_background_trigger_marks_done(guard, mock_llm):
+    from core.memory import auto_memory as am
+    from core.paths import data_db_dir
+    _write_conversation(100)
+    res = am.maybe_trigger_auto_memory()
+    assert res is not None and res["triggered_at"] == 100
+    marker = data_db_dir() / ".auto_memory_last_trigger"
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            if int(marker.read_text(encoding="utf-8").strip()) == 100:
+                break
+        except Exception:
+            pass
+        time.sleep(0.2)
+    else:
+        raise AssertionError("background auto-memory did not mark 100 in time")
+
+
+def test_parse_facts_json_robust():
+    from core.memory.auto_memory import _parse_facts_json
+    assert _parse_facts_json('{"facts": [{"key": "a", "value": "b"}]}') == [{"key": "a", "value": "b"}]
+    assert _parse_facts_json('```json\n{"facts": []}\n```') == []
+    assert _parse_facts_json("not json at all") == []

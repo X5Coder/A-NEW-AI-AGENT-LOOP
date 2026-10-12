@@ -47,6 +47,12 @@ _started: bool = False
 # close shuts itself back down instead of reviving the browser behind the user.
 _gen: int = 0
 _state_lock: Any = None
+# Retained live stack for the whole session: WSL idle-shuts down within
+# ~a minute when nothing holds it (verified live), which tears the display,
+# VNC, relay and browser down and the UI reads it as "closed by itself".
+# Holding keep_alive on this object for as long as _started keeps it up.
+_stack: Any = None
+_keeper_on: bool = False
 
 # Tools allowed to boot the browser. Everything else reuses a running
 # session only and fails clearly while stopped — this is the hard guarantee
@@ -480,6 +486,84 @@ def _evict_squatter_chrome(cdp_port: int) -> int:
     return kills
 
 
+def _ensure_wsl_download_bridge(stack: Any) -> None:
+    """Route WSL-Chrome downloads into the watched library folder.
+
+    Linux Chrome resolves the library's Windows download path relative to
+    its working directory, creating a dead backslash-named dir at WSL root
+    where finished files rot unseen (verified live: an mp3 sat there while
+    Workspace/downloads stayed empty). A symlink with that exact name
+    pointing at the library folder (via /mnt/<drive>) routes every future
+    download straight into the watched folder; strays found inside are
+    moved there first. wsl.exe expands `$` and halves `\\` in argv, so this
+    uses separate calls, no `$`, doubled backslashes, validated bare names.
+    wsl backend only; bounded (~8s per call); never raises, never boots.
+    """
+    try:
+        if _stack_backend(stack) != "wsl":
+            return
+        try:
+            from x5browser.config import LIBRARY_DOWNLOADS_DIR as _lib
+            win = str(_lib)
+        except Exception:
+            return
+        import re as _re
+        m = _re.match(r"^([A-Za-z]):[\\/](.*)$", win)
+        if not m:
+            return
+        rest = m.group(2).replace("\\", "/").strip("/")
+        if not rest:
+            return
+        mnt = "/mnt/" + m.group(1).lower() + "/" + rest
+        trap = ("/" + win).replace("\\", "\\\\")
+        try:
+            from x5browser.platform import wsl_distro, quiet_flags
+            distro = wsl_distro()
+            flags = quiet_flags()
+        except Exception:
+            distro, flags = "Ubuntu", {}
+        if not isinstance(flags, dict):
+            flags = {}
+        import subprocess as _sp
+
+        def _wsl(*args: str) -> Any:
+            try:
+                return _sp.run(["wsl", "-d", distro, "--", "sudo", "-n", *args],
+                               capture_output=True, text=True,
+                               timeout=8.0, **flags)
+            except Exception:
+                return None
+
+        proc = _wsl("readlink", trap)
+        if proc is not None and proc.returncode == 0 and (proc.stdout or "").strip() == mnt:
+            return
+        proc = _wsl("test", "-L", trap)
+        if proc is not None and proc.returncode == 0:
+            _wsl("rm", trap)
+        else:
+            proc = _wsl("test", "-d", trap)
+            if proc is not None and proc.returncode == 0:
+                proc = _wsl("ls", "-1", trap)
+                if proc is not None and proc.returncode == 0:
+                    _wsl("mkdir", "-p", mnt)
+                    moved = 0
+                    for line in (proc.stdout or "").splitlines():
+                        if moved >= 20:
+                            break
+                        nm = line.strip()
+                        if (nm and nm not in (".", "..") and "/" not in nm
+                                and "\\" not in nm and "\x00" not in nm
+                                and len(nm) <= 200):
+                            ok = _wsl("mv", "--", trap + "/" + nm, mnt + "/")
+                            if ok is not None and ok.returncode == 0:
+                                moved += 1
+                    _wsl("rmdir", trap)
+        _wsl("mkdir", "-p", mnt)
+        _wsl("ln", "-s", mnt, trap)
+    except Exception:
+        pass
+
+
 def _boot_wsl_units(stack: Any, timeout: float = 90.0) -> None:
     """Boot the WSL live units directly (bounded). Raises when unusable.
 
@@ -568,6 +652,12 @@ def _ensure_stack_up(stack: Any) -> None:
                 _evict_squatter_chrome(cdp_port)
         except Exception:
             pass
+        # Keep finished downloads arriving: bridge the WSL trap dir into
+        # the watched library folder before Chrome can use it (best-effort).
+        try:
+            _ensure_wsl_download_bridge(stack)
+        except Exception:
+            pass
     if _stack_ports_up(stack):
         if wsl and not _wsl_chrome_up():
             raise RuntimeError("live browser down (viewer answers, browser does not). "
@@ -654,6 +744,92 @@ def _revert_spawned(browser: Any) -> bool:
         except Exception:
             pass
     return True
+
+
+def _hold_distro(stack: Any) -> None:
+    """Retain the live stack + hold WSL open for the whole session.
+
+    keep_alive() is idempotent (early-returns while its keeper runs), so
+    calling it here and from the re-arm loop is safe. Pass None to drop a
+    stale hold (local-fallback sessions have no WSL to hold).
+    Never raises, never boots.
+    """
+    global _stack
+    try:
+        _stack = stack
+        if stack is None:
+            return
+        keep = getattr(stack, "keep_alive", None)
+        if callable(keep):
+            try:
+                keep()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    _ensure_keeper_loop()
+
+
+def _ensure_keeper_loop() -> None:
+    """One daemon thread: re-arm a dead keeper every 60s while started.
+
+    A single keep_alive() at boot is not enough — if its keeper process
+    ever dies, nothing re-arms it and WSL idle-shuts down mid-session.
+    Started once per process; never raises, never boots.
+    """
+    global _keeper_on
+    try:
+        if _keeper_on:
+            return
+        _keeper_on = True
+    except Exception:
+        return
+
+    def _run() -> None:
+        while True:
+            try:
+                import time as _time
+                _time.sleep(60.0)
+            except Exception:
+                break
+            try:
+                if _started and _stack is not None:
+                    keep = getattr(_stack, "keep_alive", None)
+                    if callable(keep):
+                        keep()
+            except Exception:
+                pass
+
+    try:
+        t = threading.Thread(target=_run, name="x5browser-keeper", daemon=True)
+        t.start()
+    except Exception:
+        try:
+            _keeper_on = False
+        except Exception:
+            pass
+
+
+def _release_hold() -> None:
+    """Drop the retained stack + stop holding WSL open. Close paths only.
+
+    An explicit close must free WSL to idle-stop again; otherwise the
+    keeper would hold the distro (and its ports) forever behind a close.
+    Never raises, never boots.
+    """
+    global _stack
+    try:
+        stack = _stack
+        _stack = None
+        if stack is not None:
+            rel = getattr(stack, "release_keep_alive", None)
+            if callable(rel):
+                try:
+                    rel()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 def _alive_no_boot() -> bool:
@@ -774,6 +950,7 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
             _browser = adopted_browser
             _started = True
             _ensure_remote_live()
+            _hold_distro(adopt_stack)
             return adopted_browser
         _started = False
         my_gen = _gen
@@ -848,6 +1025,7 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
         _browser = browser
         _started = True
         _ensure_remote_live()
+        _hold_distro(stack)
         # Fresh boot only (reached only via open_browser/restart_browser).
         await _boot_home_tab(browser)
         return browser
@@ -979,6 +1157,7 @@ async def _close_async() -> Any:
             except Exception:
                 orphaned = False
             if not orphaned:
+                _release_hold()
                 return "Browser already stopped."
             # Stop the units directly: the library short-circuits on Windows
             # (no local unit files) and Restart=always would revive a kill.
@@ -993,6 +1172,7 @@ async def _close_async() -> Any:
                     await asyncio.sleep(1.0)
             except Exception:
                 pass
+            _release_hold()
             return "browser closed quietly, data kept."
         browser = _browser
         try:
@@ -1007,6 +1187,7 @@ async def _close_async() -> Any:
         finally:
             _browser = None
             _started = False
+            _release_hold()
         # Wait (bounded) until the endpoint is actually gone, so the next
         # probe reports stopped instead of a dying half-state.
         try:
@@ -1069,6 +1250,7 @@ async def _call_async(name: str, kwargs: dict) -> Any:
             # stopped instead of returning a revived session.
             _browser = None
             _started = False
+            _release_hold()
             raise RuntimeError(STOPPED_MESSAGE)
         return out
     if last is not None:

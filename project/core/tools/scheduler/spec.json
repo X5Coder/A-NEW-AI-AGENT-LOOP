@@ -1,6 +1,6 @@
 {
   "name": "scheduler",
-  "description": "A background job automation tool that registers, updates, lists, and manages recurring or time-delayed tasks powered by isolated skill routines. Use whenever the user requests periodic operations (such as daily backups or hourly reports) or future time-based triggers. Use this to run asynchronous workflows reliably and autonomously outside the active conversation.",
+  "description": "THE ONLY WAY to schedule anything for later. Call this tool DIRECTLY with action=create the moment the user asks for a scheduled / recurring / delayed / reminder task (examples: daily backup, hourly report, remind me in 2 hours, check a website every morning, do X tomorrow). Do NOT perform the task yourself now, do NOT browse, do NOT write files, do NOT break the request into manual steps — put the whole job in ONE call: action=create, task=<the full job in the user's own words>, start_at=<when: now | in 10m | in 2h | ISO time>, repeat=<only if they asked to repeat: every 30m | daily at 09:00>. Use action=list to show jobs, pause/resume/update/delete with job_id to manage them.",
   "inputs": {
     "action": {"type": "string", "enum": ["create", "list", "update", "delete", "pause", "resume"], "required": true, "description": "Scheduler action."},
     "job_id": {"type": "string", "required": false, "description": "Scheduled task ID; required for update, delete, pause, and resume."},
@@ -11,5 +11,5 @@
     "end_at": {"type": "string", "required": false, "description": "Time after which execution stops."},
     "timezone": {"type": "string", "required": false, "description": "Timezone for scheduled times. Default user/system timezone."}
   },
-  "rules": "Omit repeat for one-time tasks. start_at=now with repeat runs immediately, then repeats. repeat_count limits total executions."
+  "rules": "When the user asks to schedule anything: call action=create IMMEDIATELY with the full task text — never execute the task yourself first, never browse/open/write anything for it now. Omit repeat for one-time tasks. start_at=now with repeat runs immediately, then repeats. repeat_count limits total executions."
 }

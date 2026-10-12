@@ -178,11 +178,30 @@ function openLogoutConfirm(onConfirm) {
   });
 }
 
+async function _refreshChatCount() {
+  // Live message count for the main chat (conversation.json only).
+  const badge = document.getElementById("chatCountBadge");
+  if (!badge) return;
+  try {
+    const res = await fetch("/api/conversation", { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    const msgs = data && Array.isArray(data.messages) ? data.messages : null;
+    if (!res.ok || !msgs) throw new Error("count failed");
+    badge.textContent = msgs.length === 0
+      ? "No messages"
+      : `${msgs.length} message${msgs.length === 1 ? "" : "s"}`;
+  } catch (_) {
+    badge.textContent = "—";
+  }
+}
+
 export function initSettings() {
   fetch("/api/dashboard").then((r) => r.json()).then((d) => {
     const el = document.getElementById("projVersion");
     if (el && d && d.version) el.textContent = "v" + d.version;
   }).catch(() => {});
+
+  _refreshChatCount();
 
   document.getElementById("checkUpdateBtn")?.addEventListener("click", (e) => {
     _onCheckUpdates(e.currentTarget);
@@ -224,6 +243,54 @@ export function initSettings() {
     oldPw.value = "";
     newPw.value = "";
     confirmPw.value = "";
+  });
+
+  document.getElementById("clearChatBtn")?.addEventListener("click", () => {
+    // Destructive: clears the MAIN chat history + its embeddings only.
+    // Saved memories are never touched — the confirm says so explicitly.
+    openModal(modalShell({
+      icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>`,
+      title: "Delete chat history?",
+      subtitle: "Main chat only",
+      body: `<div class="block"><p class="modal-body-text">This deletes the main agent chat and its search index completely. Your saved memories will NOT be deleted — only the chat.</p></div>`,
+      foot: `
+      <button class="glass-btn" data-close type="button">Cancel</button>
+      <button class="glass-btn danger" id="clearChatConfirmBtn" type="button">Delete chat only</button>`,
+    }));
+    document.getElementById("clearChatConfirmBtn")?.addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      // Loading spinner until the server confirms BOTH files are wiped
+      // (conversation.json + chat embeddings) — the response only arrives
+      // after the full delete, so closing here means fully deleted.
+      btn.disabled = true;
+      btn.classList.add("loading");
+      try {
+        const data = await _getJson("/api/conversation/clear", { method: "POST" });
+        closeModal();
+        // Reset the Agent view to the empty welcome state (same as fresh history).
+        try {
+          const inner = document.getElementById("chatInner");
+          if (inner) {
+            inner.querySelectorAll(".msg").forEach((m) => m.remove());
+            if (!document.getElementById("welcomeMsg")) {
+              const w = document.createElement("div");
+              w.className = "chat-welcome";
+              w.id = "welcomeMsg";
+              w.innerHTML = "<h2>How may I assist you, sir?</h2><p>I&#39;m X5Agent, your personal AI agent, here to save you time and handle the work for you</p>";
+              inner.prepend(w);
+            }
+          }
+        } catch (_) {}
+        _refreshChatCount();
+        toast(data && typeof data.removed === "number" && data.removed
+          ? `Chat + search index deleted (${data.removed} messages)`
+          : "Chat + search index deleted");
+      } catch (err) {
+        btn.disabled = false;
+        btn.classList.remove("loading");
+        toast((err && err.message) || "Delete failed");
+      }
+    });
   });
 
   document.getElementById("logoutBtn")?.addEventListener("click", () => {
