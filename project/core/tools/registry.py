@@ -9,12 +9,41 @@ import json
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-CORE_TOOLS = ["tool_search", "question", "vector_chat_search", "document_search", "todo_list", "scheduler", "skills_search", "skills_view", "terminal", "workspace"]
-DISCOVERABLE_PLUGINS = ["read_file", "write_file", "search_files", "vision_analyze", "skill_create"]
+CORE_TOOLS = ["tool_search", "question", "vector_chat_search", "todo_list", "scheduler", "skills_search", "skills_view", "skill_create", "terminal", "trigger_search", "wait", "open_browser", "navigate", "page_snapshot", "click", "fill", "human_control"]
+DISCOVERABLE_PLUGINS = ["read_file", "write_file", "search_files", "vision_analyze", "workspace", "document_search"]
 
 # Core plugins: always on, hidden from the UI, no switches.
 # Lives in plugins/core_plugins/ + every X5Browser tool (both behind tool_search).
 _CORE_PLUGINS_DIR = "core_plugins"
+
+# Skills reserved containers (owned by scheduler/trigger engines, never user skills).
+_SKILLS_RESERVED = {"scheduled_skills", "trigger_skills"}
+
+# Skill tools that only make sense when at least one user skill exists.
+# When the skills home holds no real skill, the context carries skill_create
+# only (search/view are dropped) so the model is never offered dead tools.
+_SKILL_SEARCH_TOOLS = {"skills_search", "skills_view"}
+
+
+def has_user_skills() -> bool:
+    """True when project/skills/ holds at least one real user skill.
+
+    Empty placeholders (only .gitkeep / no content file) and the reserved
+    engine containers never count. Never raises.
+    """
+    try:
+        skills_root = _PROJECT_ROOT / "skills"
+        if not skills_root.is_dir():
+            return False
+        for child in skills_root.iterdir():
+            if not child.is_dir() or child.name in _SKILLS_RESERVED:
+                continue
+            for cand in ("skill.json", "SKILL.md", "README.md", "description.txt", "instructions.md"):
+                if (child / cand).exists():
+                    return True
+        return False
+    except Exception:
+        return False
 
 
 def _core_plugin_dir_ids() -> set[str]:
@@ -67,14 +96,36 @@ def _browser_specs(core_only: bool) -> list[dict]:
 
 def list_core_specs() -> list[dict]:
     specs = []
+    _hide_skill_search = not has_user_skills()
     for name in CORE_TOOLS:
-        p = _PROJECT_ROOT / "core" / "tools" / name / "spec.json"
-        if p.exists():
-            try:
-                specs.append(json.loads(p.read_text(encoding="utf-8")))
-            except Exception:
-                continue
-    # Browser tools are all core plugins (never in-context core) — nothing to add here.
+        # No real skills -> offer skill_create only, never dead search/view.
+        if _hide_skill_search and name in _SKILL_SEARCH_TOOLS:
+            continue
+        # core/tools first, then plugins fallback (skill_create), then browser catalog
+        candidates = [
+            _PROJECT_ROOT / "core" / "tools" / name / "spec.json",
+            _PROJECT_ROOT / "plugins" / "core_plugins" / name / "spec.json",
+        ]
+        loaded = False
+        for p in candidates:
+            if p.exists():
+                try:
+                    specs.append(json.loads(p.read_text(encoding="utf-8")))
+                    loaded = True
+                    break
+                except Exception:
+                    continue
+        if loaded:
+            continue
+        # Browser core tools (open_browser/navigate/page_snapshot/click/fill/human_control)
+        try:
+            from X5Browser.catalog import get_spec as _browser_spec
+            bspec = _browser_spec(name)
+            if isinstance(bspec, dict) and bspec.get("core"):
+                specs.append({"name": bspec["name"], "description": bspec["description"],
+                              "inputs": bspec.get("inputs", {})})
+        except Exception:
+            continue
     return specs
 
 
@@ -86,12 +137,24 @@ def list_discoverable_specs() -> list[dict]:
             if not cat.is_dir() or cat.name == "tool-discovery":
                 continue
             for tool_dir in cat.iterdir():
+                # skill_create is CORE now (in-context), never discoverable
+                if tool_dir.name == "skill_create":
+                    continue
                 spec = tool_dir / "spec.json"
                 if spec.exists():
                     try:
                         specs.append(json.loads(spec.read_text(encoding="utf-8")))
                     except Exception:
                         continue
+    # workspace + document_search live in core/tools on disk but are classified
+    # discoverable (behind tool_search); folders stay for import compat.
+    for _disc_name in ("workspace", "document_search"):
+        try:
+            _spec_path = _PROJECT_ROOT / "core" / "tools" / _disc_name / "spec.json"
+            if _spec_path.exists():
+                specs.append(json.loads(_spec_path.read_text(encoding="utf-8")))
+        except Exception:
+            pass
     specs.sort(key=lambda x: x.get("name", ""))
     # Browser discoverable tools live in project/X5Browser (single versioned folder).
     try:

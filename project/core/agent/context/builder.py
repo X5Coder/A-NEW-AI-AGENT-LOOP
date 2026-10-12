@@ -127,22 +127,46 @@ def _browser_state_str() -> str:
     return "running (preview live active — user watches only, agent keeps control)"
 
 
+def _terminal_scope_str() -> str:
+    # Current terminal scope for the context (limited default). Never raises.
+    try:
+        import sys as _sys
+        _proj = Path(__file__).resolve().parents[3]
+        if str(_proj) not in _sys.path:
+            _sys.path.insert(0, str(_proj))
+        from core.tools.terminal.tool import _access_scope
+        scope = _access_scope()
+        return scope if scope == "full_access" else "limited_access"
+    except Exception:
+        return "limited_access"
+
+
 def _env_block() -> str:
-    # L4 system_info: time + OS + exact Workspace path + jail notice.
+    # L4 system_info: time + OS + exact Workspace path + jail notice + terminal scope.
     _ensure_x5agent_best_effort()
     now = datetime.now(timezone.utc).astimezone()
     os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
     ws = _workspace_path_str()
     proj = str(STORAGE_DB.parent.parent.resolve())
+    scope = _terminal_scope_str()
+    if scope == "full_access":
+        scope_line = ("- Terminal access: FULL access.\n"
+                      "- Full access means you may run terminal commands freely outside the Workspace folder.\n"
+                      "- File tools (workspace, read_file, write_file) stay jailed inside Workspace regardless.\n")
+    else:
+        scope_line = ("- Terminal access: LIMITED access (Workspace only).\n"
+                      "- Full access would mean you may run terminal commands freely outside the Workspace folder; "
+                      "it is currently OFF, so stay inside Workspace.\n"
+                      "- FORBIDDEN to exit Workspace by any method (.., absolute paths, symlinks, shell tricks). "
+                      "Any path outside Workspace is BLOCKED automatically.\n")
     return (
         f"[System Info - L4]\n"
         f"- DateTime: {now.strftime('%Y-%m-%d %H:%M:%S %Z')} (ISO: {now.isoformat()})\n"
         f"- OS: {os_info}\n"
         f"- Python: {platform.python_version()}\n"
         f"- You are inside: {ws}\n"
+        f"{scope_line}"
         f"- This Workspace folder is your device. Do EVERYTHING here (experiments, files, folders, terminal).\n"
-        f"- FORBIDDEN to exit Workspace by any method (.., absolute paths, symlinks, shell tricks). "
-        f"Any path outside Workspace is BLOCKED automatically.\n"
         f"- System Core (read-only): {proj} - never write it. Data (X5Agent/Data) via memory/config tools only.\n"
         f"- Browser: {_browser_state_str()} (when running, a live preview bar is shown to the user automatically).\n"
         f"- If the user asks whether the browser runs, answer DIRECTLY from that state line only — "
@@ -154,9 +178,10 @@ def _env_block() -> str:
 
 
 def _workspace_block() -> str:
-    # Workspace top level only: folders as folder/ with item counts, files
-    # with sizes. The agent enters folders with the workspace tool (list).
-    # Bounded: first 100 entries, counts capped — never walks inside.
+    # Workspace OUTER level only: a pure map of name + type + size.
+    # Folders show item counts, files show bytes + extension. Never walks
+    # inside. Details come from the workspace tool (via tool_search).
+    # Bounded: first 100 entries, counts capped.
     try:
         ws = (Path(__file__).resolve().parents[4] / "X5Agent" / "Workspace").resolve()
     except Exception:
@@ -186,13 +211,14 @@ def _workspace_block() -> str:
                             break
                 except Exception:
                     n = 0
-                lines.append(f"  folder: {p.name}/ ({n}{'+' if trunc else ''} items — list it to enter)")
+                lines.append(f"  folder: {p.name}/ ({n}{'+' if trunc else ''} items)")
             else:
                 try:
                     size = p.stat().st_size
                 except Exception:
                     size = 0
-                lines.append(f"  file: {p.name} ({size} bytes)")
+                ext = p.suffix.lower().lstrip(".") if p.suffix else "no-ext"
+                lines.append(f"  file: {p.name} ({size} bytes, type: {ext})")
         except Exception:
             continue
     # Virtual browser-downloads folder (read-only view, same rule as the
@@ -210,16 +236,14 @@ def _workspace_block() -> str:
                             break
                 except Exception:
                     _n = 0
-                _dl_line = (f"  folder: downloads/ ({_n} items — browser downloads, "
-                            f"read-only, list it to enter)")
+                _dl_line = (f"  folder: downloads/ ({_n} items, type: folder, browser downloads, read-only)")
                 _fi = next((i for i, _l in enumerate(lines)
                             if _l.startswith("  file:")), len(lines))
                 lines.insert(_fi, _dl_line)
     except Exception:
         pass
-    more = "" if len(children) <= 100 else f"\n  ... +{len(children) - 100} more (list Workspace to browse)"
-    return ("[Workspace - your work device, top level only - L4]\n"
-            "  Every file, upload, or project lives here. One new folder per project/task.\n"
+    more = "" if len(children) <= 100 else f"\n  ... +{len(children) - 100} more"
+    return ("[Workspace map - outer level only: name + type + size - L4]\n"
             + "\n".join(lines) + more)
 
 
@@ -281,7 +305,8 @@ def _memories_block() -> str:
 
 
 def _chat_block(limit: int = 30) -> str:
-    # L6a: last 30 messages - explicit layer, never skipped except isolated mode.
+    # L6a: last N messages - explicit layer, never skipped except isolated mode.
+    # Default 30; edit-resend passes 20 (the edited message + the 20 before it).
     for cand in [X5AGENT_DATA_DB / "conversation.json", STORAGE_DB / "conversation.json", STORAGE_DB / "chat.json", STORAGE_DB / "conversation_history.json"]:
         data = _load_json(cand, None)
         if isinstance(data, list) and data:
@@ -291,7 +316,7 @@ def _chat_block(limit: int = 30) -> str:
                 role = m.get("role", "user")
                 content = str(m.get("content",""))[:400]
                 lines.append(f"  {role}: {content}")
-            return "[Last 30 messages - L6]\n" + "\n".join(lines)
+            return f"[Last {len(last)} messages - L6]\n" + "\n".join(lines)
     return ""
 
 
@@ -321,7 +346,7 @@ def _documents_block() -> str:
     if not lines:
         return ""
     more = "" if len(docs) <= 20 else f"\n  ... +{len(docs) - 20} more"
-    return ("[Documents metadata - searchable via document_search - L4]\n"
+    return ("[Documents metadata - find document_search via tool_search, then search - L4]\n"
             "  Supported: PDF, Word, Excel, PowerPoint, csv/txt/md/html/json/xml.\n"
             "  Search one file with document_search(file_id, query, top_k).\n"
             + "\n".join(lines) + more)
@@ -362,7 +387,7 @@ def _triggers_block() -> str:
         cfg = t.get("config") or {}
         cfg_str = json.dumps(cfg, ensure_ascii=False)[:100] if isinstance(cfg, dict) and cfg else ""
         lines.append(f"  - {tid} [{tname}] task: {task} skill: {skill} config: {cfg_str}")
-    return "[Active Triggers - background, one-time, will die after firing]\n" + "\n".join(lines) + "\n  (Use trigger tool to edit/delete, trigger_search to find more)"
+    return "[Active Triggers - background, one-time, will die after firing]\n" + "\n".join(lines) + "\n  (Use trigger_search to manage: search, create, list, get, update, delete)"
 
 
 def openai_tool_from_spec(name: str, description: str, inputs: dict) -> dict:
@@ -410,11 +435,33 @@ def openai_tool_from_spec(name: str, description: str, inputs: dict) -> dict:
 
 
 def _core_tools_block() -> list[dict]:
-    """Return core tools OpenAI-format specs."""
+    """Return core tools OpenAI-format specs.
+
+    Core = everything in core/tools EXCEPT workspace + document_search
+    (discoverable behind tool_search) + skill_create (lives in plugins but
+    classified core) + the 6 browser core tools
+    (open_browser/navigate/page_snapshot/click/fill/human_control).
+    When no real user skill exists, skills_search/skills_view are dropped and
+    skill_create alone is offered.
+    """
     tools: list[dict] = []
     core_root = Path(__file__).resolve().parents[2] / "tools"
+    # workspace + document_search are discoverable (behind tool_search);
+    # the agent already sees the Workspace map, so no in-context doc tool.
+    _EXCLUDED_FROM_CORE = {"workspace", "document_search"}
+    try:
+        import sys as _sys2
+        _proj2 = Path(__file__).resolve().parents[3]
+        if str(_proj2) not in _sys2.path:
+            _sys2.path.insert(0, str(_proj2))
+        from core.tools.registry import has_user_skills as _has_skills
+        _hide_skill_search = not _has_skills()
+    except Exception:
+        _hide_skill_search = False
+    if _hide_skill_search:
+        _EXCLUDED_FROM_CORE = _EXCLUDED_FROM_CORE | {"skills_search", "skills_view"}
     for d in sorted(core_root.iterdir()):
-        if not d.is_dir():
+        if not d.is_dir() or d.name in _EXCLUDED_FROM_CORE:
             continue
         spec_path = d / "spec.json"
         if not spec_path.exists():
@@ -424,22 +471,52 @@ def _core_tools_block() -> list[dict]:
             tools.append(openai_tool_from_spec(spec.get("name"), spec.get("description", ""), spec.get("inputs", {})))
         except Exception:
             continue
+    # skill_create is CORE (folder stays in plugins, no move per minimal-change)
+    try:
+        _skill_spec_path = core_root.parent.parent / "plugins" / "core_plugins" / "skill_create" / "spec.json"
+        if _skill_spec_path.exists():
+            spec = json.loads(_skill_spec_path.read_text(encoding="utf-8"))
+            if not any(t.get("function", {}).get("name") == spec.get("name") for t in tools):
+                tools.append(openai_tool_from_spec(spec.get("name"), spec.get("description", ""), spec.get("inputs", {})))
+    except Exception:
+        pass
+    # Browser core tools (core=True in X5Browser/catalog.py)
+    try:
+        import sys as _sys
+        _proj = Path(__file__).resolve().parents[3]
+        if str(_proj) not in _sys.path:
+            _sys.path.insert(0, str(_proj))
+        from X5Browser.catalog import SPECS as _BROWSER_SPECS
+        for _spec in _BROWSER_SPECS:
+            try:
+                if not isinstance(_spec, dict) or not _spec.get("core"):
+                    continue
+                if not isinstance(_spec.get("name"), str) or not isinstance(_spec.get("description"), str):
+                    continue
+                if any(t.get("function", {}).get("name") == _spec.get("name") for t in tools):
+                    continue
+                tools.append(openai_tool_from_spec(_spec.get("name"), _spec.get("description", ""), _spec.get("inputs", {})))
+            except Exception:
+                continue
+    except Exception:
+        pass
     return tools
 
 
-def build_context(user_input: str, include_todo: bool = True, isolated: bool = False, todo_snapshot: dict | None = None, session_history: str | None = None) -> tuple[str, str, list[dict]]:
+def build_context(user_input: str, include_todo: bool = True, isolated: bool = False, todo_snapshot: dict | None = None, session_history: str | None = None, chat_limit: int = 30) -> tuple[str, str, list[dict]]:
     """
     8-layer context order (fixed):
       L1 core_identity.md + L2 general_mission.md + L3 policy.md -> system role
       L4 system_info (time + Workspace path + jail) -> user content
       L5 memories (user/agent/image-persistent/important) -> user content
-      L6 chat last30 + todo + triggers (explicit, never merged into L5) -> user content
+      L6 chat last-N + todo + triggers (explicit, never merged into L5) -> user content
       L7 available core tools list -> user content
       L8 current user input (ALWAYS last) -> user content
     Returns (system_prompt, user_context_content, core_tools_openai)
     isolated=True for scheduled large tasks: skips last-30 chat history and uses snapshot.
     session_history: when isolated AND provided, this task's own branch history
       is used as L6 instead (each scheduled job keeps its session, main chat untouched).
+    chat_limit: L6 history depth (default 30; edit-resend uses 20).
     """
     if not isinstance(user_input, str):
         raise TypeError("user_input must be string")
@@ -463,7 +540,7 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
         else:
             todo = _todo_block() if include_todo else ""
     else:
-        chat = _chat_block(limit=30)
+        chat = _chat_block(limit=chat_limit if isinstance(chat_limit, int) and 1 <= chat_limit <= 100 else 30)
         todo = _todo_block() if include_todo else ""
     parts = []
     parts.append(env)
@@ -487,18 +564,26 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
             parts.append("[Chat L6: no prior messages]")
     if todo:
         parts.append(todo)
-    # Active triggers metadata + skill name (so AI can edit/delete via same trigger tool)
+    # Active triggers metadata + skill name (so AI can manage via trigger_search)
     triggers_block = _triggers_block()
     if triggers_block:
         parts.append(triggers_block)
-    # L7
-    parts.append("[Available CORE tools L7: tool_search, trigger_search, trigger, question, vector_chat_search, document_search, todo_list, scheduler, skills_search, skills_view, terminal, wait, workspace]")
+    # L7 (dynamic: mirrors the real core_tools list, so conditional skills stay honest)
+    core_tools = _core_tools_block()
+    try:
+        _core_names = sorted({str(t.get("function", {}).get("name") or "") for t in core_tools} - {""})
+    except Exception:
+        _core_names = []
+    if _core_names:
+        parts.append("[Available CORE tools L7: " + ", ".join(_core_names)
+                     + " | Discoverable behind tool_search: workspace + all other browser/plugin tools]")
+    else:
+        parts.append("[Available CORE tools L7: tool_search, terminal]")
     # L8 ALWAYS last (with bridge: re-anchor attention after the long L4-L7 context)
     parts.append(f"[Bridge] Based on all layers above, execute this task.\n\n[Current User Input - L8]\n{user_input.strip()}")
     if isolated:
         parts.append("[Mode: ISOLATED SCHEDULED EXECUTION - execute exactly as in snapshot, do not ask for clarification, complete the workflow]")
     user_content = "\n\n".join(parts)
-    core_tools = _core_tools_block()
     return system_prompt, user_content, core_tools
 
 

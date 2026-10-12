@@ -334,6 +334,209 @@ def _env_units_active(stack: Any) -> bool:
     return all(states.get(unit) == "active" for unit in _ENV_UNITS)
 
 
+def _stack_backend(stack: Any) -> str:
+    """Live-stack backend name ('wsl', ...). Never raises, never boots."""
+    try:
+        return str(getattr(stack, "backend", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _wsl_chrome_up(timeout: float = 15.0) -> bool:
+    """True when the WSL Chrome + CDP relay units are both active.
+
+    Ground truth that the live browser really runs hidden inside WSL
+    (a bare port probe cannot tell a relay from a squatter window).
+    Windows/WSL only; bounded; never raises, never boots.
+    """
+    try:
+        import subprocess as _sp
+        try:
+            from x5browser.platform import wsl_distro, quiet_flags
+            distro = wsl_distro()
+            flags = quiet_flags()
+        except Exception:
+            distro, flags = "Ubuntu", {}
+        if not isinstance(flags, dict):
+            flags = {}
+        proc = _sp.run(["wsl", "-d", distro, "--", "systemctl", "is-active",
+                        "x5-chrome.service", "x5-cdp-relay.service"],
+                       capture_output=True, text=True,
+                       timeout=timeout, **flags)
+        lines = [l.strip() for l in (proc.stdout or "").splitlines()
+                 if l.strip()]
+        return len(lines) >= 2 and all(l == "active" for l in lines[:2])
+    except Exception:
+        return False
+
+
+def _evict_squatter_chrome(cdp_port: int) -> int:
+    """Kill library-profile Chromes squatting on the relay port.
+
+    When the relay is down but 9334 answers, a headed local Chrome spawned
+    by an earlier broken boot owns the port (the visible popup window):
+    the relay can never bind again until it is gone, and the viewer stays
+    black. Scoped narrowly — only chrome.exe processes whose command line
+    carries the library profile AND the relay port are killed; anything
+    under the real Google Chrome User Data is never touched. Windows only,
+    bounded, best-effort. Returns kills; never raises, never boots.
+    """
+    kills = 0
+    try:
+        import os as _os
+        if _os.name != "nt":
+            return 0
+        import json as _json
+        import subprocess as _sp
+        rows: list[tuple[int, str]] = []
+        # PowerShell CIM (wmic is gone on current Windows): full command
+        # lines as JSON, bounded. Falls back to wmic when unavailable.
+        try:
+            _ps = "powershell"
+            _cmd = ("Get-CimInstance Win32_Process "
+                    "| Where-Object {$_.Name -eq 'chrome.exe'} "
+                    "| Select-Object ProcessId,CommandLine "
+                    "| ConvertTo-Json -Compress")
+            try:
+                proc = _sp.run([_ps, "-NoProfile", "-NonInteractive",
+                                "-Command", _cmd],
+                               capture_output=True, text=True, timeout=45)
+                out = (proc.stdout or "").strip()
+            except Exception:
+                proc = _sp.run([r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                                "-NoProfile", "-NonInteractive",
+                                "-Command", _cmd],
+                               capture_output=True, text=True, timeout=45)
+                out = (proc.stdout or "").strip()
+            if out:
+                try:
+                    data = _json.loads(out)
+                except Exception:
+                    data = None
+                if isinstance(data, dict):
+                    data = [data]
+                if isinstance(data, list):
+                    for item in data:
+                        try:
+                            if not isinstance(item, dict):
+                                continue
+                            rows.append((int(item.get("ProcessId") or 0),
+                                         str(item.get("CommandLine") or "")))
+                        except Exception:
+                            continue
+        except Exception:
+            rows = []
+        if not rows:
+            # Legacy fallback: wmic CSV (proper quoting via the csv module).
+            try:
+                import csv as _csv
+                import io as _io
+                proc = _sp.run(["wmic", "process", "where", "name='chrome.exe'",
+                                "get", "CommandLine,ProcessId", "/format:csv"],
+                               capture_output=True, text=True, timeout=30)
+                try:
+                    for row in _csv.reader(_io.StringIO(proc.stdout or "")):
+                        try:
+                            if len(row) < 3 or row[0].strip().lower() == "node":
+                                continue
+                            rows.append((int(str(row[2]).strip()), row[1] or ""))
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        me = _os.getpid()
+        port_flag = f"remote-debugging-port={int(cdp_port)}"
+        targets: list[int] = []
+        try:
+            for pid, cmd in rows:
+                try:
+                    if not isinstance(pid, int) or pid <= 0:
+                        continue
+                    if not isinstance(cmd, str) or not cmd:
+                        continue
+                except Exception:
+                    continue
+                if pid == me or pid <= 0:
+                    continue
+                low = cmd.lower()
+                if "x5browser" not in low or port_flag not in low:
+                    continue
+                if "google\\chrome\\user data" in low or "google/chrome/user data" in low:
+                    continue
+                targets.append(pid)
+        except Exception:
+            return 0
+        for pid in targets[:25]:
+            try:
+                _sp.run(["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True, timeout=15)
+                kills += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return kills
+
+
+def _boot_wsl_units(stack: Any, timeout: float = 90.0) -> None:
+    """Boot the WSL live units directly (bounded). Raises when unusable.
+
+    Workaround kept from the x5browser 1.5.1 era: ``LiveStack.start()`` checked
+    ``Path("/etc/systemd/system")`` on the WINDOWS filesystem, so on
+    Windows every unit read "missing" and start() always raised
+    ``units_not_installed`` — then fell back to process mode and left
+    Chrome to a local HEADED spawn (visible popup + black preview). Fixed
+    upstream in 1.5.2 (units probed inside the distro), but booting the
+    units directly over ``wsl sudo -n systemctl`` stays the robust path (the
+    only privileged path used anywhere):
+    env units ``enable --now``, Chrome ``start`` (never enabled: an
+    explicit close must keep it closed). Never raises without a clear
+    cause; never spawns anything local.
+    """
+    import subprocess as _sp
+    import time as _time
+    try:
+        from x5browser.platform import wsl_distro, quiet_flags
+        distro = wsl_distro()
+        flags = quiet_flags()
+    except Exception:
+        distro, flags = "Ubuntu", {}
+    if not isinstance(flags, dict):
+        flags = {}
+
+    def _ctl(*args: str, wait: float) -> bool:
+        try:
+            proc = _sp.run(["wsl", "-d", distro, "--", "sudo", "-n",
+                            "systemctl", *args],
+                           capture_output=True, text=True,
+                           timeout=wait, **flags)
+            return proc.returncode == 0
+        except Exception:
+            return False
+
+    deadline = _time.monotonic() + max(30.0, timeout)
+    try:
+        stack.keep_alive()
+    except Exception:
+        pass
+    _ctl("enable", "--now", *_ENV_UNITS, wait=60.0)
+    _ctl("disable", "x5-chrome.service", wait=30.0)
+    _ctl("start", "x5-chrome.service", wait=60.0)
+    while _time.monotonic() < deadline:
+        try:
+            if _wsl_chrome_up(timeout=10.0):
+                return
+        except Exception:
+            pass
+        try:
+            _time.sleep(2.0)
+        except Exception:
+            break
+    raise RuntimeError("live browser failed to start (hidden browser did not come up)")
+
+
 def _ensure_stack_up(stack: Any) -> None:
     """Bring the hidden live stack up (idempotent). Raises when unusable.
 
@@ -341,16 +544,43 @@ def _ensure_stack_up(stack: Any) -> None:
     (``Restart=always``) and the WSL keep-alive. This only decides whether a
     boot is even worth attempting:
 
-    - ports already answer -> nothing to do (never waits on a flap);
+    - WSL backend with a dead browser but a live 9334 -> a squatter headed
+      Chrome hijacked the relay port (visible popup + black preview):
+      evict it first so the relay can bind again;
+    - ports already answer AND the WSL browser is up -> nothing to do;
+    - ports answer but the WSL browser is down -> attaching would reuse a
+      squatter window, so refuse instead of showing a black preview;
     - units active but ports dead -> the Windows<->WSL route is broken, which
       waiting cannot fix -> fail fast so the caller falls back at once
       instead of burning the whole stack timeout;
-    - otherwise -> one ``start()`` (bounded).
+    - otherwise -> boot the units (bounded) + bounded verification that
+      the WSL browser really came up (never hand a headed local fallback
+      to the user behind a dead stack).
     """
+    wsl = _stack_backend(stack) == "wsl"
+    try:
+        cdp_port = int(getattr(stack, "cdp_port", 9334))
+    except Exception:
+        cdp_port = 9334
+    if wsl:
+        try:
+            if not _wsl_chrome_up() and _endpoint_alive_now(timeout=2.0):
+                _evict_squatter_chrome(cdp_port)
+        except Exception:
+            pass
     if _stack_ports_up(stack):
+        if wsl and not _wsl_chrome_up():
+            raise RuntimeError("live browser down (viewer answers, browser does not). "
+                               "Close it with close_browser and open again.")
         return
     if _env_units_active(stack):
         raise RuntimeError("live stack reachable inside WSL but not from Windows")
+    if wsl:
+        # Direct unit boot: the library's stack.start() can never pass its
+        # own install check on Windows (see _boot_wsl_units) and would fall
+        # back to process mode + a local headed spawn.
+        _boot_wsl_units(stack, timeout=90.0)
+        return
     stack.start(90.0)
 
 
@@ -480,6 +710,29 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
                 adopt_stack = LiveStack()
             except Exception:
                 adopt_stack = None
+            if adopt_stack is not None and _stack_backend(adopt_stack) == "wsl":
+                # Never adopt a squatter headed window (visible popup + black
+                # preview): the endpoint may answer while the hidden WSL
+                # browser is down. Evict the squatter, then re-probe — a dead
+                # endpoint reports stopped and the next open boots cleanly.
+                try:
+                    if not _wsl_chrome_up():
+                        try:
+                            _evict_squatter_chrome(int(adopt_stack.cdp_port))
+                        except Exception:
+                            pass
+                        try:
+                            still = await asyncio.to_thread(_endpoint_alive_now)
+                        except Exception:
+                            still = False
+                        if not still:
+                            _browser = None
+                            _started = False
+                            raise RuntimeError(STOPPED_MESSAGE)
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
             try:
                 adopt_config = BrowserConfig.default()
             except Exception:
@@ -487,7 +740,11 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
                 adopt_config = _BC()
             try:
                 import dataclasses as _dc
-                adopt_kwargs: dict = {"workspace_dir": str(_workspace_dir())}
+                # Never a visible window: a spawn here only happens when the
+                # endpoint dies under us, and it must stay invisible (the
+                # revert below then reports stopped). Attaches ignore this.
+                adopt_kwargs: dict = {"workspace_dir": str(_workspace_dir()),
+                                      "headless": True}
                 if adopt_stack is not None:
                     adopt_kwargs["debug_port"] = int(adopt_stack.cdp_port)
                 adopt_config = _dc.replace(adopt_config, **adopt_kwargs)
@@ -543,13 +800,15 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
             config = _BC()
         try:
             import dataclasses as _dc
-            replace_kwargs: dict = {"workspace_dir": str(_workspace_dir())}
+            # Never a visible window on this machine: healthy boots attach
+            # to the hidden WSL browser (this flag is then unused); any
+            # local spawn — stack or fallback — stays headless. The old
+            # stack-only conditional left headed spawns that popped a real
+            # window in front of the user with a black preview behind it.
+            replace_kwargs: dict = {"workspace_dir": str(_workspace_dir()),
+                                    "headless": True}
             if stack is not None:
                 replace_kwargs["debug_port"] = int(stack.cdp_port)
-            else:
-                # No live stack -> hidden fallback: never pop a visible Chrome
-                # window in front of the user.
-                replace_kwargs["headless"] = True
             # Safety: never launch with the real user profile even if a
             # caller built such a config upstream; the library profile is
             # the only allowed home.
@@ -636,6 +895,67 @@ async def _try_repair(browser: Any) -> bool:
         return False
 
 
+def _stop_stack_units_sync(timeout: float = 60.0) -> bool:
+    """Stop the stack Chrome + CDP relay units (sync, best-effort).
+
+    The library's stop_browser() checks for unit files on the LOCAL
+    filesystem, which never exist on Windows, so it silently stops nothing —
+    an explicit close left Chrome running (and systemd's Restart=always
+    revived anything killed behind it). Stopping the units directly over WSL
+    keeps a close closed: an explicit systemctl stop is never resurrected.
+    Never raises; True when the CDP endpoint went quiet.
+    """
+    try:
+        from x5browser import LiveStack as _LiveStack
+        stack = _LiveStack()
+    except Exception:
+        return False
+    try:
+        backend = getattr(stack, "backend", "")
+        if backend == "wsl":
+            import subprocess as _sp
+            try:
+                from x5browser.platform import wsl_distro, quiet_flags
+                distro = wsl_distro()
+                flags = quiet_flags()
+            except Exception:
+                return False
+            try:
+                _sp.run(["wsl", "-d", distro, "--", "sudo", "-n", "systemctl",
+                         "stop", "x5-chrome.service", "x5-cdp-relay.service"],
+                        capture_output=True, timeout=timeout, **flags)
+            except Exception:
+                return False
+        else:
+            try:
+                stack._run("sudo", "-n", "systemctl", "stop",
+                           "x5-chrome.service", "x5-cdp-relay.service",
+                           timeout=timeout)
+            except Exception:
+                return False
+    except Exception:
+        return False
+    try:
+        import time as _time
+        deadline = _time.monotonic() + 15.0
+        while _time.monotonic() < deadline:
+            try:
+                if not _endpoint_alive_now(timeout=2.0):
+                    return True
+            except Exception:
+                return True
+            try:
+                _time.sleep(1.0)
+            except Exception:
+                break
+    except Exception:
+        pass
+    try:
+        return not bool(_endpoint_alive_now(timeout=2.0))
+    except Exception:
+        return True
+
+
 async def _close_async() -> Any:
     """Close the browser for real and keep it closed. Never boots anything.
 
@@ -660,11 +980,9 @@ async def _close_async() -> Any:
                 orphaned = False
             if not orphaned:
                 return "Browser already stopped."
-            try:
-                from x5browser import LiveStack as _LiveStack
-                await asyncio.to_thread(_LiveStack().stop_browser)
-            except Exception as e:
-                raise RuntimeError(f"browser close failed: {e}") from e
+            # Stop the units directly: the library short-circuits on Windows
+            # (no local unit files) and Restart=always would revive a kill.
+            await asyncio.to_thread(_stop_stack_units_sync)
             try:
                 for _ in range(20):
                     try:
@@ -679,6 +997,13 @@ async def _close_async() -> Any:
         browser = _browser
         try:
             result = await browser.close_browser(**{})
+            # Belt and suspenders: the library close ends the session, but on
+            # Windows it cannot stop the stack units — do it here so systemd's
+            # Restart=always can't revive Chrome behind the close.
+            try:
+                await asyncio.to_thread(_stop_stack_units_sync)
+            except Exception:
+                pass
         finally:
             _browser = None
             _started = False

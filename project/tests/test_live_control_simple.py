@@ -46,8 +46,8 @@ for needed in ("_live_snapshot", "_live_active", "_live_pause_entry",
     assert hasattr(srv, needed), f"missing new server helper: {needed}"
 print("old server live_state/heal helpers removed OK")
 
-# ---- catalog surface (library 1.5.1 = 43 tools + our show_preview wrapper) ----
-assert len(catalog.ALL_TOOLS) == 44, len(catalog.ALL_TOOLS)
+# ---- catalog surface (library 1.5.2 = 41 tools + our show_preview wrapper) ----
+assert len(catalog.ALL_TOOLS) == 42, len(catalog.ALL_TOOLS)
 assert "browser_status" in catalog.ALL_TOOLS
 assert "show_preview" in catalog.ALL_TOOLS
 for _new in ("quick_search", "fetch_pages", "read_markdown", "extract_image",
@@ -56,6 +56,9 @@ for _new in ("quick_search", "fetch_pages", "read_markdown", "extract_image",
     assert catalog.get_spec(_new) is not None, _new
 assert catalog.get_spec("browser_status") is not None
 assert catalog.get_spec("show_preview") is not None
+# 1.5.2 handoff cleanup: take_control/agent_control are internal-only now.
+assert catalog.get_spec("take_control") is None
+assert catalog.get_spec("agent_control") is None
 assert format_event("browser_status") == "Checking the browser"
 assert format_event("show_preview") == "Showing you the live preview"
 # new library params are exposed to the model
@@ -64,7 +67,7 @@ for tool, param in (("choose_option", "multiple"), ("read_console", "since"),
                     ("click_verify", "modifiers"), ("click_verify", "hold_ms")):
     spec = catalog.get_spec(tool) or {}
     assert param in (spec.get("inputs") or {}), f"{tool}.{param} missing"
-print("catalog updated to 43 tools (+browser_status, new params) OK")
+print("catalog updated to 41 tools (+browser_status, new params) OK")
 
 # ---- stopped browser, simulated deterministically ------------------------
 _real_probe = svc._endpoint_alive_now
@@ -85,7 +88,7 @@ try:
     assert (svc._browser, svc._started, svc._gen) == state_before, "status booted something"
     print("browser_status answers stopped without booting OK")
 
-    for name in ("live_preview", "human_control", "take_control", "agent_control",
+    for name in ("live_preview", "human_control",
                  "navigate", "page_snapshot"):
         res = bt.execute_browser_tool(name, {"to": "https://example.com"}
                                       if name == "navigate" else {})

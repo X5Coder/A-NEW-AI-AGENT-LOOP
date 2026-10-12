@@ -360,5 +360,12 @@ export async function initSkills() {
   window.addEventListener("x5:page-open", (e) => {
     if (e.detail === "skills" && (dirty || Date.now() - lastFetch > 60000)) refresh();
   });
+  // Chat blue-token click: jump here and open that skill's detail.
+  window.addEventListener("x5:reveal-skill", (e) => {
+    try {
+      const name = e && e.detail && typeof e.detail.name === "string" ? e.detail.name.slice(0, 100) : "";
+      if (name.trim()) openSkillDetailByName(name);
+    } catch (_) {}
+  });
   await refresh();
 }

@@ -40,17 +40,13 @@ def _ask_user(name: str, args: Any, on_question) -> dict:
 
 
 def _approve_terminal(name: str, args: Any, on_question) -> dict:
-    """Restricted mode: ask the user before running any terminal command."""
-    if on_question is None:
-        return execute_tool(name, args)
-    try:
-        cmd = args.get("command", "") if isinstance(args, dict) else ""
-        decision = on_question("approval", {"command": str(cmd)[:500]})
-    except Exception:
-        decision = None
-    if isinstance(decision, dict) and decision.get("decision") == "continue":
-        return execute_tool(name, args)
-    return {"tool": name, "arguments": args, "output": {"event": "Stopped by user", "stopped": True}, "success": True}
+    """No-question passthrough: BOTH scopes run terminal commands immediately.
+
+    Scope (not approval) controls reach: limited_access = Workspace jail,
+    full_access = whole machine. The scope file is set from the Agent
+    permission menu; the loop never asks per command.
+    """
+    return execute_tool(name, args)
 
 
 def _approve_browser_tool(name: str, args: Any, on_question) -> dict:
@@ -437,8 +433,8 @@ def _summarize_output(result: dict, name: str | None = None, args: Any = None) -
         return None
 
 
-_LIVE_PAUSE_TOOLS = frozenset({"human_control", "take_control"})
-_LIVE_EVENT_TOOLS = frozenset({"live_preview", "show_preview", "agent_control", "close_browser", "restart_browser"})
+_LIVE_PAUSE_TOOLS = frozenset({"human_control"})
+_LIVE_EVENT_TOOLS = frozenset({"live_preview", "show_preview", "close_browser", "restart_browser"})
 
 
 def _redact_live_url(result: dict) -> None:
@@ -493,12 +489,12 @@ def _event_media(name: str, result: dict) -> dict | None:
         _stream_url = None
         _stream_vo = True
         if name in _LIVE_PAUSE_TOOLS or name in _LIVE_EVENT_TOOLS:
-            # Watch-only flow: show_preview/live_preview/agent_control must
+            # Watch-only flow: show_preview/live_preview must
             # carry the PREVIEW token link (out["url"] from live_preview is
             # already the preview token; guard anyway). The paused handoff
-            # (human/take control) carries the interactive control URL.
+            # (human_control) carries the interactive control URL.
             src = out
-            if name in ("show_preview", "live_preview", "agent_control"):
+            if name in ("show_preview", "live_preview"):
                 try:
                     from X5Browser.service import live_links as _live_links
                     _links = _live_links()
@@ -510,7 +506,7 @@ def _event_media(name: str, result: dict) -> dict | None:
             url = src.get("url")
             if isinstance(url, str) and url.startswith(("http://", "https://")):
                 _stream_url = url[:2000]
-                if name in ("show_preview", "live_preview", "agent_control"):
+                if name in ("show_preview", "live_preview"):
                     _stream_vo = True
                 else:
                     _stream_vo = bool(src.get("view_only", False))
@@ -668,7 +664,8 @@ def _collect_final_audio(tool_calls_log: list) -> list[dict]:
 
 def _persist_conversation(user_input: str, assistant_output: str, steps: list | None = None,
                           images: list | None = None, elapsed: int | None = None,
-                          audios: list | None = None, session_key: str | None = None):
+                          audios: list | None = None, session_key: str | None = None,
+                          reuse_user_id: str | None = None):
     import uuid
     if isinstance(session_key, str) and session_key.strip():
         # Branch session (one per scheduled job): NEVER touches the main chat
@@ -707,9 +704,15 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
             except Exception:
                 continue
     # ensure each message has id for vector store
-    uid = str(uuid.uuid4())[:8]
+    # reuse_user_id (edit resend): the edited user bubble already persists —
+    # append ONLY the assistant reply (no duplicate user message, the fix for
+    # the double-reply bug). Otherwise append a fresh user + assistant pair.
+    if isinstance(reuse_user_id, str) and reuse_user_id.strip():
+        uid = reuse_user_id.strip()[:16]
+    else:
+        uid = str(uuid.uuid4())[:8]
+        data.append({"id": uid, "role": "user", "content": user_input[:2000], "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
     aid = str(uuid.uuid4())[:8]
-    data.append({"id": uid, "role": "user", "content": user_input[:2000], "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
     assistant_msg: dict = {"id": aid, "role": "assistant", "content": assistant_output[:5000], "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     if isinstance(elapsed, int) and elapsed >= 0:
         assistant_msg["elapsed"] = elapsed
@@ -723,10 +726,12 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
     if len(data) > 1000:
         data = data[-1000:]
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    # Auto-create embeddings for new messages (per-message, no fallback)
+    # Auto-create embeddings for new messages (per-message, no fallback).
+    # Reused user id: embed the assistant reply only (user already embedded).
     try:
         from core.agent.memory.chat_vector_store import add_message
-        add_message(uid, user_input[:2000], role="user")
+        if not (isinstance(reuse_user_id, str) and reuse_user_id.strip()):
+            add_message(uid, user_input[:2000], role="user")
         add_message(aid, assistant_output[:5000], role="assistant")
     except Exception:
         pass
@@ -792,6 +797,8 @@ def run_loop(
     cancel_flag=None,
     session_key: str | None = None,
     session_history: str | None = None,
+    reuse_user_id: str | None = None,
+    chat_limit: int = 30,
 ) -> dict[str, Any]:
     """
     Run agent loop for user_input.
@@ -802,12 +809,16 @@ def run_loop(
     on_token(step, delta_text) fires live per model content chunk (best-effort).
     restricted=True asks the user (via on_question) before every terminal call.
     on_question(kind, payload) pauses for ask/approval/live and returns the user's answer dict.
-    on_live_event({"tool", "output", "success"}) fires for live_preview/agent_control/
+    on_live_event({"tool", "output", "success"}) fires for live_preview/
     close_browser completions (best-effort).
     isolated=True for scheduled large tasks (skips chat history, uses todo_snapshot).
     session_key: persist this run into the job's own branch session instead of
       the main conversation (each scheduled task owns its session).
     session_history: that branch's recent history, used as L6 when isolated.
+    reuse_user_id: id of the ALREADY-persisted edited user bubble — the loop
+      appends only the assistant reply (fixes the double-reply bug on edit).
+    chat_limit: L6 history depth for this run (default 30; edit-resend uses 20:
+      the edited message + the 20 before it).
     """
     if not isinstance(user_input, str) or not user_input.strip():
         raise ValueError("user_input must be non-empty string")
@@ -830,7 +841,7 @@ def run_loop(
                 "tool_calls_log": [], "success": False, "no_embedding": True}
     mdl = model.strip() if model and isinstance(model, str) and model.strip() else "deepseek/deepseek-v4.1-flash"
     # Build initial context (isolated for large scheduled tasks)
-    system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot, session_history=session_history)
+    system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot, session_history=session_history, chat_limit=chat_limit)
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_context},
@@ -1085,7 +1096,7 @@ def run_loop(
                 except Exception:
                     needs_model_stop = "text"
                 break
-            # Live handoff: human_control/take_control pause the loop so the user
+            # Live handoff: human_control pauses the loop so the user
             # can drive the browser; the UI resumes it via on_question("live").
             # live_preview never pauses — it only shows the floating player.
             if name in _LIVE_PAUSE_TOOLS and result.get("success") and on_question is not None:
@@ -1248,7 +1259,7 @@ def run_loop(
         except Exception:
             final_audio = []
         try:
-            persist_ids = _persist_conversation(user_input, final_answer, _persist_steps(tool_calls_log), final_images, elapsed_sec, final_audio, session_key=session_key)
+            persist_ids = _persist_conversation(user_input, final_answer, _persist_steps(tool_calls_log), final_images, elapsed_sec, final_audio, session_key=session_key, reuse_user_id=reuse_user_id)
         except Exception:
             pass
 

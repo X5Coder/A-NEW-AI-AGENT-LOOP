@@ -118,3 +118,24 @@ def test_auth_endpoints_always_public(monkeypatch):
     assert _gate(req) is False
     req = _Req("/login.html", peer="203.0.0.1", post=False)
     assert _gate(req) is False
+
+
+def test_setup_endpoint_is_gone(monkeypatch):
+    """Owner is terminal-only: /api/auth/setup passes the gate (public) so
+    the handler can answer 410-gone with the terminal message."""
+    _locked_down(monkeypatch)
+    req = _Req("/api/auth/setup", peer="203.0.0.1", post=True)
+    assert _gate(req) is False  # public route -> handler answers 410
+    assert req.answered is None
+
+
+def test_no_owner_blocks_everything(monkeypatch):
+    """No owner: pages 302 to login, APIs 503 with owner_missing."""
+    monkeypatch.setattr(ca, "is_setup", lambda: False)
+    req = _Req("/", peer="127.0.0.1", post=False)
+    assert _gate(req) is True
+    assert req.answered == ("redirect", 302)
+    req = _Req("/api/dashboard", peer="127.0.0.1", post=False)
+    assert _gate(req) is True
+    assert req.answered[0] == "json" and req.answered[1] == 503
+    assert req.answered[2].get("owner_missing") is True

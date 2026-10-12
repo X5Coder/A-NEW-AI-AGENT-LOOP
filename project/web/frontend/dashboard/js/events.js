@@ -1,20 +1,23 @@
 /**
- * events.js — push fan-in over the ONE ws.js socket (replaces SSE).
+ * events.js — THE ONE server -> browser stream (single SSE connection).
  *
- * Same contract as before: modules register with onPush(type, fn), hello
- * snapshots resync late subscribers. Transport is ws.js now: pushes arrive
- * on the same socket that carries chat (instant + bidirectional).
+ * Transport rule: server -> browser is ONE SSE stream (GET /api/events
+ * below, opened once when the UI loads). Browser -> server is plain POST
+ * only. No WebSocket anywhere. No polling anywhere.
+ *
+ * hello order (most important first): last-50 chat messages -> dashboard
+ * bundle -> everything else. Each section carries a server hash: the client
+ * keeps the last hash per section and re-renders a section ONLY when its
+ * hash broke (data changed) — otherwise the cached render stays.
  */
 "use strict";
 
-import { onWsPush, onWsHello, onWsStatus, ensureWs, isHttpFallback, isWsParked, retryWsNow } from "./ws.js?v=3";
-
 const handlers = new Map(); // type -> Set<fn>
 const lastState = new Map(); // state types only (replayed to late subscribers)
-const STATE_TYPES = new Set(["browser", "live", "chat", "dashboard", "workspace", "scheduler", "gateway"]);
+const lastHash = new Map(); // section -> last seen server hash
+const STATE_TYPES = new Set(["browser", "live", "chat", "dashboard", "workspace", "scheduler", "gateway", "chat_last50"]);
 let started = false;
-let sseSource = null;
-let sseWanted = false;
+let sseSource = null; // the ONE stream: created once, never duplicated
 
 export function onPush(type, fn) {
   if (typeof type !== "string" || typeof fn !== "function") return;
@@ -36,29 +39,68 @@ function emit(type, data) {
   }
 }
 
+function applySection(name, section) {
+  // {hash, data} sections: skip when the hash is unchanged (cache still
+  // valid). Returns true when the data was actually applied.
+  if (!section || typeof section !== "object") return false;
+  try {
+    const h = section.hash;
+    if (typeof h === "string" && lastHash.get(name) === h) return false;
+    if (typeof h === "string") lastHash.set(name, h);
+    lastState.set(name, section.data);
+    emit(name, section.data);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function onHello(snap) {
   if (!snap || typeof snap !== "object") return;
-  for (const key of ["browser", "chat", "workspace", "dashboard", "live", "scheduler", "gateway"]) {
-    if (snap[key] !== undefined) {
+  // 1. Most important FIRST: last 50 chat messages render immediately.
+  if (snap.chat_last50 !== undefined) applySection("chat_last50", snap.chat_last50);
+  // 2. Dashboard bundle second.
+  if (snap.dashboard !== undefined) applySection("dashboard", snap.dashboard);
+  // 3. Everything else (browser/live/chat/workspace/scheduler/gateway).
+  const rest = snap.rest && typeof snap.rest === "object" ? snap.rest.data : null;
+  const flat = rest && typeof rest === "object" ? rest : snap;
+  for (const key of ["browser", "chat", "workspace", "scheduler", "gateway"]) {
+    if (flat[key] !== undefined) {
       try {
-        lastState.set(key, snap[key]);
+        lastState.set(key, flat[key]);
       } catch (_) {}
-      emit(key, snap[key]);
+      emit(key, flat[key]);
     }
+  }
+  if (rest && typeof rest === "object" && typeof snap.rest.hash === "string") {
+    try {
+      lastHash.set("rest", snap.rest.hash);
+    } catch (_) {}
   }
 }
 
 function onServerPush(channel, data) {
   if (typeof channel !== "string") return;
   // Chat run frames also ride pushes: "run" replays to refreshed tabs,
-  // "chat_run" is the live progress (chat.js listens via onWsRaw too).
+  // "chat_run" is the live progress.
   if (channel === "run" || channel === "chat_run") {
     emit(channel, data);
     return;
   }
   if (channel === "chat_done") {
+    // A run persisted: hashes broke server-side; next hello re-renders.
+    try {
+      lastHash.delete("chat_last50");
+      lastHash.delete("rest");
+    } catch (_) {}
     emit("chat_done", data);
     return;
+  }
+  if (channel === "dashboard") {
+    // Dashboard changed: drop its hash so the next hello re-renders it.
+    try {
+      lastHash.delete("dashboard");
+    } catch (_) {}
   }
   if (STATE_TYPES.has(channel)) {
     try {
@@ -69,74 +111,10 @@ function onServerPush(channel, data) {
 }
 
 export function startEvents() {
+  // Single stream: second calls are no-ops, so multi-module init can never
+  // open a second SSE connection.
   if (started) return;
   started = true;
-  onWsHello(onHello);
-  onWsPush(onServerPush);
-  onWsStatus(onTransportStatus);
-  // Owner gate: a dead session surfaces as WS auth failure (ws.js sends
-  // the tab to login) — this probe only catches the cookie-less case early.
-  try {
-    ensureWs().catch(() => {});
-  } catch (_) {}
-  // If the WS upgrade is already known-blocked (proxy/funnel), start SSE
-  // right away instead of waiting for the status callback.
-  try {
-    if (isHttpFallback()) startSseFallback();
-  } catch (_) {}
-}
-
-function onTransportStatus(online) {
-  try {
-    if (!online && isHttpFallback()) startSseFallback();
-    else if (online) stopSseFallback();
-    updateConnPill();
-  } catch (_) {}
-}
-
-let pillTimer = null;
-
-function updateConnPill() {
-  // One quiet status pill (toolbar): live / fallback / retrying — never a
-  // console flood. Removed when the socket is live again.
-  try {
-    let pill = document.getElementById("x5-conn-pill");
-    let parked = false;
-    try { parked = isWsParked(); } catch (_) {}
-    if (!isHttpFallback()) {
-      if (pill && pill.parentNode) pill.parentNode.removeChild(pill);
-      return;
-    }
-    if (!pill) {
-      pill = document.createElement("button");
-      pill.id = "x5-conn-pill";
-      pill.type = "button";
-      pill.title = "Live updates over the push channel — tap to retry";
-      pill.style.cssText = "position:fixed;bottom:14px;left:14px;z-index:9999;"
-        + "padding:6px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.18);"
-        + "background:rgba(20,20,25,.85);color:#ffd479;font-size:12px;cursor:pointer;"
-        + "backdrop-filter:blur(6px);";
-      try {
-        pill.addEventListener("click", () => { try { retryWsNow(); } catch (_) {} });
-      } catch (_) {}
-      try { document.body.appendChild(pill); } catch (_) { return; }
-    }
-    pill.textContent = parked ? "● updates via fallback — tap to retry" : "● connecting live…";
-    try {
-      if (pillTimer) clearTimeout(pillTimer);
-    } catch (_) {}
-    // Re-check shortly: the pill must vanish the moment WS recovers.
-    try {
-      pillTimer = setTimeout(updateConnPill, 5000);
-    } catch (_) {}
-  } catch (_) {}
-}
-
-function startSseFallback() {
-  // SSE fallback: same onPush contract over /api/events (plain HTTPS GET,
-  // passes proxies that drop the WS upgrade). One source per page.
-  if (sseWanted) return;
-  sseWanted = true;
   try {
     if (sseSource) return;
     const src = new EventSource("/api/events");
@@ -156,16 +134,11 @@ function startSseFallback() {
       if (typeof frame.type === "string") onServerPush(frame.type, frame.data || {});
     };
     src.onerror = () => {
-      // EventSource retries natively; a hard failure just stays quiet —
-      // the WS background retry may still recover the socket.
+      // EventSource retries natively on the SAME single stream.
+      // A dead session (401) sends the tab one-way to login.
+      try {
+        if (src.readyState === 2) location.replace("/login.html");
+      } catch (_) {}
     };
   } catch (_) {}
-}
-
-function stopSseFallback() {
-  sseWanted = false;
-  try {
-    if (sseSource) sseSource.close();
-  } catch (_) {}
-  sseSource = null;
 }

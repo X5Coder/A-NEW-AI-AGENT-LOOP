@@ -62,6 +62,9 @@ def _collect_discoverable_specs() -> list[dict]:
             for tool_dir in category.iterdir():
                 if not tool_dir.is_dir():
                     continue
+                # skill_create is CORE now (in-context), never discoverable
+                if tool_dir.name == "skill_create":
+                    continue
                 spec_path = tool_dir / "spec.json"
                 if spec_path.exists():
                     try:
@@ -72,6 +75,18 @@ def _collect_discoverable_specs() -> list[dict]:
                         tools.append(spec)
                     except Exception:
                         continue
+    # workspace + document_search live in core/tools on disk but are classified
+    # discoverable (behind tool_search); folders stay for import compat.
+    for _disc_name in ("workspace", "document_search"):
+        try:
+            _spec_path = root / "core" / "tools" / _disc_name / "spec.json"
+            if _spec_path.exists():
+                _spec = json.loads(_spec_path.read_text(encoding="utf-8"))
+                if (isinstance(_spec.get("name"), str) and isinstance(_spec.get("description"), str)
+                        and _spec.get("name") not in {t.get("name") for t in tools}):
+                    tools.append(_spec)
+        except Exception:
+            pass
     # Browser discoverable tools (project/X5Browser, single versioned folder).
     # Appended here so tool_search embeds them and the hash auto-rebuilds on change.
     try:

@@ -156,8 +156,10 @@ try:
     assert "vision" in VISION_PAGE_PROMPT.lower() or "Extract everything" in VISION_PAGE_PROMPT
     print("vision thin-page fallback OK")
 
-    # 9. CORE wiring: registry + dispatcher + context metadata
-    assert any(s.get("name") == "document_search" for s in list_core_specs())
+    # 9. wiring: registry (discoverable behind tool_search) + dispatcher + metadata
+    assert not any(s.get("name") == "document_search" for s in list_core_specs())
+    from core.tools.registry import list_discoverable_specs as _list_disc
+    assert any(s.get("name") == "document_search" for s in _list_disc())
     d = execute_tool("document_search", {
         "file_id": f"{TAG}/notes.md", "query": "apple fruit", "top_k": 1})
     assert d.get("success"), d

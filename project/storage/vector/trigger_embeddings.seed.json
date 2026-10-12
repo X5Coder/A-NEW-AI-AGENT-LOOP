@@ -1,7 +1,7 @@
 {
   "hash": "2afc2e92ba88aedc86b1ea958f562dd6069d99f7e0b46f893e2a445d3f5d2979",
   "model_id": "embedding-model",
-  "updated_at": "2026-10-11T06:37:58Z",
+  "updated_at": "2026-10-12T01:54:28Z",
   "triggers": [
     {
       "name": "filesystem_file_modified",
@@ -3193,5 +3193,6 @@
       ]
     }
   ],
-  "count": 3
+  "count": 3,
+  "model_path": "embedding_model"
 }

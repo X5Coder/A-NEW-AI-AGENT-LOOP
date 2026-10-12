@@ -7,7 +7,7 @@
 "use strict";
 
 import { attachChartTooltip, animateIn, pinChartTip } from "./ui.js?v=9";
-import { onPush } from "./events.js?v=1";
+import { onPush } from "./events.js?v=4";
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const RANGE_LABELS = { "7d": "Last 7 days", "30d": "Last 30 days", "months": "By month" };

@@ -1,5 +1,6 @@
 <!DOCTYPE html>
-<!-- X5Agent console gate: first run creates the owner, later runs sign in.
+<!-- X5Agent console gate: sign-in ONLY. The owner is terminal-created
+     (install / server prompt) — the browser can NEVER create it.
      Self-contained (inline css/js/SVG, no extra files) so the auth gate needs
      no exemptions — only /login.html is public. English, full-screen, no card
      template: LEFT shows the agent console itself (same look as the app),
@@ -245,12 +246,12 @@
       <form id="form" novalidate>        <label for="email">Email</label>
         <div class="field" id="emailField">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>
-          <input id="email" type="email" autocomplete="username" required placeholder="you@gmail.com">
+          <input id="email" type="email" autocomplete="off" spellcheck="false" autocapitalize="off" required placeholder="you@gmail.com">
         </div>
         <label for="pw">Password</label>
         <div class="field" id="pwField">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          <input id="pw" type="password" autocomplete="current-password" required placeholder="••••••••">
+          <input id="pw" type="password" autocomplete="new-password" required placeholder="••••••••">
           <button type="button" class="toggle" id="showPw" aria-label="Show password">
             <svg id="eyeOpen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
             <svg id="eyeShut" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-2.16 3.19"/><path d="M6.61 6.61A17.5 17.5 0 0 0 2 12s3.5 7 10 7a10.7 10.7 0 0 0 4.39-.92"/><path d="m2 2 20 20"/></svg>
@@ -263,7 +264,6 @@
   </section>
 <script>
 (function () {
-  var setupMode = false;
   var err = document.getElementById("err");
   var email = document.getElementById("email");
   var pw = document.getElementById("pw");
@@ -297,8 +297,12 @@
     pwField.className = "field " + (n >= 8 ? "ok" : "bad");
   });
   fetch("/api/auth/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
-    setupMode = !!(d && d.setup_needed);
-    title.innerHTML = setupMode ? "Create your account" : "Hi, sir! <span class=\"wave\">👋</span>";
+    // Sign-in only: the owner is terminal-created. No owner yet -> tell the
+    // user to create it in the terminal (the browser can never create it).
+    if (d && d.owner_missing) {
+      fail("No owner yet — create it in the terminal, then sign in here.");
+    }
+    title.innerHTML = "Hi, sir! <span class=\"wave\">👋</span>";
     goText.textContent = "Connect";
   }).catch(function () { fail("Could not reach the server"); });
   document.getElementById("form").addEventListener("submit", function (e) {
@@ -309,15 +313,16 @@
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) { fail("Enter a valid email address"); email.focus(); return; }
     if (p1.length < 8) { fail("Password too short (8 characters minimum)"); pw.focus(); return; }
     setLoading(true);
-    fetch(setupMode ? "/api/auth/setup" : "/api/auth/login", {
+    fetch("/api/auth/login", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: em, password: p1 })
     }).then(function (r) { return r.json().then(function (d) { return { s: r.status, d: d }; }); }).then(function (x) {
       if (x.s === 200 && x.d && x.d.ok) {
-        try {
-          if (x.d.ws_token) localStorage.setItem("x5_ws_token", x.d.ws_token);
-        } catch (_) {}
-        goText.textContent = "Connected ✓"; location.href = "/"; return; }
+        // One-way login: replace history so Back never returns here.
+        // Session = HttpOnly cookie only (set by the server), no tokens.
+        goText.textContent = "Connected ✓";
+        try { location.replace("/"); } catch (_) { location.href = "/"; }
+        return; }
       fail((x.d && x.d.error) || "Connection failed");
       setLoading(false);
     }).catch(function () { fail("Could not reach the server"); setLoading(false); });

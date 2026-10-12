@@ -130,39 +130,118 @@ def owner_email(path: Path | None = None) -> str | None:
         return None
 
 
+def _sessions_path() -> Path | None:
+    """Persistent session file (survives server restarts). None on failure."""
+    try:
+        import sys as _sys
+        proj = Path(__file__).resolve().parents[2]
+        if str(proj) not in _sys.path:
+            _sys.path.insert(0, str(proj))
+        from core.paths import data_db_file
+        return data_db_file("console_sessions.json")
+    except Exception:
+        return None
+
+
+def _load_sessions() -> dict:
+    """Read persisted sessions {token: exp}. Never raises."""
+    try:
+        p = _sessions_path()
+        if p is None or not p.exists():
+            return {}
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_sessions(data: dict) -> None:
+    """Persist sessions (bounded 1000, expired pruned). Never raises."""
+    try:
+        p = _sessions_path()
+        if p is None:
+            return
+        now = time.time()
+        clean = {str(k)[:128]: float(v) for k, v in (data or {}).items()
+                 if isinstance(v, (int, float)) and float(v) > now}
+        if len(clean) > 1000:
+            ordered = sorted(clean.items(), key=lambda kv: kv[1], reverse=True)[:1000]
+            clean = dict(ordered)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(clean), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def create_session() -> str:
-    """Mint a random session token (30 days). Stored in memory only."""
+    """Mint a random session token (30 days). Persisted to disk (survives restarts)."""
     token = secrets.token_urlsafe(32)
+    exp = time.time() + SESSION_DAYS * 86400
     with _sessions_lock:
-        _sessions[token] = time.time() + SESSION_DAYS * 86400
+        _sessions[token] = exp
+        try:
+            stored = _load_sessions()
+            stored[token] = exp
+            _save_sessions(stored)
+        except Exception:
+            pass
     return token
 
 
 def session_valid(token: str | None) -> bool:
-    """True when the token exists and has not expired (prunes lazily)."""
+    """True when the token exists and has not expired (memory + disk, prunes lazily)."""
     if not token:
         return False
     now = time.time()
     with _sessions_lock:
         exp = _sessions.get(token)
         if exp is None:
+            # Restarted server: reload from disk once.
+            try:
+                stored = _load_sessions()
+                exp = stored.get(token)
+                if exp is not None:
+                    _sessions[token] = float(exp)
+            except Exception:
+                exp = None
+        if exp is None:
+            return False
+        try:
+            exp = float(exp)
+        except Exception:
+            _sessions.pop(token, None)
             return False
         if exp < now:
             _sessions.pop(token, None)
+            try:
+                stored = _load_sessions()
+                stored.pop(token, None)
+                _save_sessions(stored)
+            except Exception:
+                pass
             return False
         if len(_sessions) > 1000:  # bounded: drop expired first
             for tok, when in list(_sessions.items()):
-                if when < now:
+                try:
+                    if float(when) < now:
+                        _sessions.pop(tok, None)
+                except Exception:
                     _sessions.pop(tok, None)
         return True
 
 
 def drop_session(token: str | None) -> None:
-    """Logout: forget one token (never raises)."""
+    """Logout: forget one token (memory + disk, never raises)."""
     try:
         if token:
             with _sessions_lock:
                 _sessions.pop(token, None)
+                try:
+                    stored = _load_sessions()
+                    stored.pop(token, None)
+                    _save_sessions(stored)
+                except Exception:
+                    pass
     except Exception:
         pass
 

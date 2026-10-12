@@ -75,7 +75,10 @@ try:
     # 5. dispatcher + registry + L7 wiring
     d = execute_tool("workspace", {"action": "list"})
     assert d.get("success"), d
-    assert any(s.get("name") == "workspace" for s in list_core_specs())
+    # workspace is DISCOVERABLE (behind tool_search), never in-context core
+    assert not any(s.get("name") == "workspace" for s in list_core_specs())
+    from core.tools.registry import list_discoverable_specs as _list_disc
+    assert any(s.get("name") == "workspace" for s in _list_disc())
     _, user_ctx, _ = build_context("hi")
     assert "workspace" in user_ctx and "[Workspace" in user_ctx
     print("wiring OK")

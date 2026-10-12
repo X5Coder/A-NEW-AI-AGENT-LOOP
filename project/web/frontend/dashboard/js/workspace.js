@@ -6,13 +6,14 @@
 "use strict";
 
 import { toast, openModal, closeModal, modalShell, animateIn } from "./ui.js?v=9";
-import { onPush } from "./events.js?v=1";
+import { onPush } from "./events.js?v=4";
 
 let wsPath = "";
 let wsVersion = 0;
 let wsBusy = false;
 let wsFile = null; // opened file view { full, name, meta, kind } — null = folder listing
 let wsReadOnly = false; // browser-downloads area: no upload / mkdir / delete
+let wsReveal = null; // {dir, name} from chat blue-token click — reveal once, then clear
 
 function fmtSize(bytes) {
   const n = Number(bytes) || 0;
@@ -262,6 +263,33 @@ async function loadWorkspace() {
       }
       list.appendChild(btn);
     });
+    // One-shot reveal from the chat token click: scroll to the card + flash it.
+    if (wsReveal) {
+      try {
+        const target = wsReveal;
+        wsReveal = null;
+        const cards = list.querySelectorAll(".ws-card .ws-name");
+        for (const n of cards) {
+          if (n && n.textContent === target) {
+            const card = n.closest(".ws-card");
+            if (card) {
+              try {
+                card.scrollIntoView({ block: "nearest" });
+              } catch (_) {}
+              card.classList.add("ws-flash");
+              setTimeout(() => {
+                try {
+                  if (card.isConnected) card.classList.remove("ws-flash");
+                } catch (_) {}
+              }, 1600);
+            }
+            break;
+          }
+        }
+      } catch (_) {
+        wsReveal = null;
+      }
+    }
     // Folder-enter transition: cards cascade in with one staggered rise.
     animateIn(list);
   } catch (_) {
@@ -526,6 +554,20 @@ export function initWorkspace() {
   });
   window.addEventListener("x5:page-open", (e) => {
     if (e && e.detail === "workspace") loadWorkspace();
+  });
+  // Chat blue-token click: show that file exactly at its path, then flash it.
+  window.addEventListener("x5:reveal-workspace", (e) => {
+    try {
+      const d = (e && e.detail) || {};
+      const dir = typeof d.dir === "string" ? d.dir.replace(/\\/g, "/").slice(0, 500) : "";
+      const name = typeof d.name === "string" ? d.name.slice(0, 200) : "";
+      if (dir.split("/").includes("..")) return;
+      wsPath = dir;
+      wsFile = null;
+      wsReveal = name || null;
+      lastSig = "";
+      loadWorkspace();
+    } catch (_) {}
   });
   // Push replaces the old 3s poll: reload only when the server reports a
   // new workspace version (agent-side writes included via its sweep).

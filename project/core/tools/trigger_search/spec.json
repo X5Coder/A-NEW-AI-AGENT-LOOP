@@ -1,16 +1,43 @@
 {
   "name": "trigger_search",
-  "description": "A trigger discovery tool that searches available event types across installed plugins to retrieve their event schemas and configuration parameters. Use prior to setting up new reactive triggers or when checking which event types are supported. Use this to ensure valid trigger configurations and prevent registration of unsupported or duplicate watchers.",
+  "description": "The single trigger tool: searches ALL available event trigger types (library + project, by embedding) AND manages trigger instances (create, list, get, update, delete). Use action=search first to find a valid trigger type, then action=create with that trigger_name plus task and config to arm a one-time reactive skill. Use list/get/update/delete to manage armed triggers.",
   "inputs": {
+    "action": {
+      "type": "string",
+      "required": false,
+      "enum": ["search", "create", "list", "get", "update", "delete"],
+      "default": "search",
+      "description": "search: find trigger types by capability. create/list/get/update/delete: manage armed triggers."
+    },
     "query": {
       "type": "string",
-      "required": true,
-      "description": "Capability or trigger you need, e.g. new file, new message."
+      "required": false,
+      "description": "Capability or trigger you need, e.g. new file, new message. Required for search."
     },
     "top_k": {
       "type": "integer",
       "required": false,
       "description": "How many closest triggers to return. Default 3, raise when you need broader options."
+    },
+    "trigger_name": {
+      "type": "string",
+      "required": false,
+      "description": "Trigger type name from a search result, e.g. filesystem_new_file. Required for create."
+    },
+    "task": {
+      "type": "string",
+      "required": false,
+      "description": "Task to run once when triggered (turned into a Skill). Required for create."
+    },
+    "config": {
+      "type": "string",
+      "required": false,
+      "description": "JSON object with trigger-specific config, e.g. {\"watch_path\": \"inbox/docs\"}."
+    },
+    "trigger_id": {
+      "type": "string",
+      "required": false,
+      "description": "Armed trigger ID. Required for get/update/delete."
     }
   }
 }

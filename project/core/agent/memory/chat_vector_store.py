@@ -132,6 +132,39 @@ def delete_message(message_id: str) -> bool:
     return found_in_conv or found_in_vec
 
 
+def prune_below(anchor_id: str) -> int:
+    """Delete every message below the anchor in ONE atomic read-modify-write.
+
+    Edit-resend / regenerate: the anchor bubble stays, all newer messages go
+    (conversation + their embeddings). No partial state, no N round-trips.
+    Returns the removed count. Raises FileNotFoundError when the anchor is
+    gone, ValueError when the id is bad.
+    """
+    if not isinstance(anchor_id, str) or not anchor_id.strip():
+        raise ValueError("anchor id required")
+    mid = anchor_id.strip()
+    conv = _load_conversation()
+    idx = next((i for i, m in enumerate(conv)
+                if str(m.get("id") or m.get("message_id") or "") == mid), None)
+    if idx is None:
+        raise FileNotFoundError("anchor message not found")
+    doomed = conv[idx + 1:]
+    if not doomed:
+        return 0
+    doomed_ids = {str(m.get("id") or m.get("message_id") or "").strip()
+                  for m in doomed}
+    doomed_ids.discard("")
+    _save_conversation(conv[:idx + 1])
+    try:
+        vectors = _load_vectors()
+        for did in doomed_ids:
+            vectors.pop(did, None)
+        _save_vectors(vectors)
+    except Exception:
+        pass
+    return len(doomed)
+
+
 def update_message(message_id: str, new_content: str) -> dict:
     """Edit a message: delete old embedding and create new one (new version)."""
     if not isinstance(message_id, str) or not message_id.strip():

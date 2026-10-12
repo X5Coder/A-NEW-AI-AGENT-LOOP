@@ -1,6 +1,6 @@
 {
   "name": "terminal",
-  "description": "A workspace shell execution tool that runs command-line commands INSIDE X5Agent/Workspace only and returns standard output, errors, and exit codes. Use whenever you need to execute scripts, run automated tests, inspect workspace files, or check environment configurations. Any workdir or path outside Workspace is BLOCKED. Use this to autonomously perform verified system actions instead of passively delegating them to the user.",
+  "description": "Shell execution with scope (no per-command question): limited_access (default) runs INSIDE X5Agent/Workspace only and blocks any outside path; full_access runs any command on the whole machine. Scope is set from the Agent permission menu.",
   "inputs": {
     "command": {
       "type": "string",
@@ -10,7 +10,7 @@
     "workdir": {
       "type": "string",
       "required": false,
-      "description": "Directory to run in."
+      "description": "Directory to run in (limited: Workspace only; full: anywhere)."
     },
     "timeout": {
       "type": "integer",

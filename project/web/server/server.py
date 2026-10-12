@@ -11,6 +11,7 @@ Responsibility: serve dashboard files locally for development/editing page-by-pa
 from __future__ import annotations
 
 import http.server
+import hashlib
 import json
 import mimetypes
 import socketserver
@@ -109,7 +110,7 @@ mimetypes.add_type("text/html", ".html")
 
 # Console version shown at the end of the sidebar (single source of truth,
 # keep in sync with pyproject.toml and updates.json at the repo root).
-APP_VERSION = "0.17.5"
+APP_VERSION = "0.20.2"
 
 UPDATE_REPO = "X5Coder/X5Agent"
 
@@ -1032,20 +1033,27 @@ def _read_request_body(rfile, headers, max_bytes: int) -> bytes:
 
 
 def _session_cookie(token: str, clear: bool = False) -> str:
-    """Session Set-Cookie value: HTTPS-safe (Secure + SameSite=None).
+    """Session Set-Cookie value: loopback-safe (SameSite=Lax, no Secure).
 
-    The funnel serves the console over HTTPS while the server sees plain
-    HTTP on loopback, so the cookie must carry Secure + SameSite=None to
-    survive the browser round-trip; on plain-HTTP loopback the Secure
-    attribute is simply ignored by local clients.
+    The console is plain HTTP on 127.0.0.1, so a Secure cookie is never
+    stored by the browser (that was the endless 401 loop: login succeeded
+    but the session cookie was dropped). Lax still blocks third-party
+    send; the funnel serves the same host so the session survives there.
+    Max-Age = 30 days so the login persists across browser restarts
+    (sessions are also persisted server-side in console_sessions.json).
     """
     try:
         from web.server.console_auth import COOKIE_NAME as _cookie_name
     except Exception:
         _cookie_name = "x5sess"
+    try:
+        from web.server.console_auth import SESSION_DAYS as _days
+        max_age = int(_days) * 86400
+    except Exception:
+        max_age = 30 * 86400
     if clear:
-        return f"{_cookie_name}=; HttpOnly; Path=/; SameSite=None; Secure; Max-Age=0"
-    return f"{_cookie_name}={token}; HttpOnly; Path=/; SameSite=None; Secure"
+        return f"{_cookie_name}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"
+    return f"{_cookie_name}={token}; HttpOnly; Path=/; SameSite=Lax; Max-Age={max_age}"
 
 
 # Pending loop questions: qid -> answer Queue (one outstanding per loop, bounded wait)
@@ -1213,16 +1221,16 @@ def _build_stream_frame(kind: str, val: Any, out: Any) -> dict | None:
         return None
 
 
-# ---- realtime event hub (SSE push + WS push; replaces client polling) ----
-# One SSE connection per open tab (legacy) + one WS socket per open tab
-# (chat + pushes over the same socket). All state changes fan out from
-# _events_broadcast, so N clients cost O(1) server work: singleton watchers
-# (browser 10s, dashboard 30s, workspace 15s) broadcast ONLY on change;
-# instant events (live/chat/workspace-API writes) broadcast at the mutation
-# point.
+# ---- realtime event hub (SSE push; replaces client polling) ----
+# One SSE connection per open tab (EventSource GET /api/events).
+# Transport rule: server -> browser is SSE only (this hub), browser ->
+# server is plain POST only (chat POSTs below). No WebSocket anywhere.
+# All state changes fan out from _events_broadcast, so N clients cost O(1)
+# server work: singleton watchers (browser 10s, dashboard 30s, workspace
+# 15s) broadcast ONLY on change; instant events (live/chat/workspace-API
+# writes) broadcast at the mutation point.
 _EVENTS_LOCK = threading.Lock()
 _EVENT_SUBS: list = []
-_WS_SUBS: list = []  # live WS sockets: {"send": fn, "q": Queue}
 _EVENTS_SEQ = 0
 _WATCHERS_STARTED = False
 _BROWSER_PUSH: dict = {"running": None, "url": None}
@@ -1230,9 +1238,84 @@ _WS_PUSH: dict = {"version": 0}
 _DASH_PUSH_AT = 0.0
 _DASH_CACHE: dict = {}  # last fanned-out dashboard bundle (hello serves it, O(1))
 
+# ---- hello cache + hash (priority-ordered snapshot, refresh-on-change) ----
+# Order rule: most important first — last 50 agent chat messages, then the
+# dashboard bundle, then everything else. Each section is cached with a hash;
+# when the data changes the hash breaks, the cache refreshes, and a new hash
+# is minted — so clients re-render a section only when its hash changed.
+# Hash = sha256 of the canonical JSON of the section (cheap, deterministic).
+_HELLO_CACHE: dict = {}   # section -> {"hash": str, "data": ...}
+_HELLO_LOCK = threading.Lock()
+_HELLO_LAST50 = 50
+
+
+def _section_hash(data) -> str:
+    """Short stable hash of one snapshot section. Never raises."""
+    try:
+        raw = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return "unhashable"
+
+
+def _hello_cached(section: str, builder) -> dict:
+    """Return {hash, data} for a section: cache hit when the hash matches.
+
+    builder() runs only on a miss (or when data changed). Thread-safe.
+    """
+    try:
+        fresh = builder()
+    except Exception:
+        fresh = None
+    try:
+        h = _section_hash(fresh)
+        with _HELLO_LOCK:
+            slot = _HELLO_CACHE.get(section)
+            if isinstance(slot, dict) and slot.get("hash") == h:
+                return slot  # unchanged: serve the cached copy, no rebuild
+            slot = {"hash": h, "data": fresh}
+            _HELLO_CACHE[section] = slot
+            return slot
+    except Exception:
+        return {"hash": "error", "data": fresh}
+
+
+def _hello_chat_last50() -> list:
+    """Most important first: last 50 agent chat messages (bounded)."""
+    try:
+        data = _data_json("conversation.json", [])
+        if not isinstance(data, list):
+            return []
+        return data[-_HELLO_LAST50:]
+    except Exception:
+        return []
+
+
+def _hello_dashboard() -> dict:
+    """Second: dashboard bundle (serves the warm cache when fresh)."""
+    try:
+        if _DASH_CACHE:
+            return _DASH_CACHE
+        return {"dashboard": _get_dashboard_data(), "cost": _get_cost_data(),
+                "balance": _get_balance_data(), "models": _get_models_data()}
+    except Exception:
+        return {}
+
+
+def _hello_invalidate(section: str | None = None) -> None:
+    """Drop cached hello sections (None = all). Next hello rebuilds + rehashes."""
+    try:
+        with _HELLO_LOCK:
+            if section is None:
+                _HELLO_CACHE.clear()
+            else:
+                _HELLO_CACHE.pop(section, None)
+    except Exception:
+        pass
+
 
 def _events_broadcast(etype: str, payload: dict) -> None:
-    """Fan one event out to SSE subscribers + live WS sockets. Never raises."""
+    """Fan one event out to SSE subscribers. Never raises."""
     global _EVENTS_SEQ
     try:
         with _EVENTS_LOCK:
@@ -1255,560 +1338,21 @@ def _events_broadcast(etype: str, payload: dict) -> None:
                     _EVENT_SUBS.remove(sub)
                 except ValueError:
                     pass
-            ws_dead = []
-            for sub in _WS_SUBS:
-                try:
-                    q = sub["q"]
-                    if q.full():
-                        try:
-                            q.get_nowait()
-                        except Exception:
-                            pass
-                    q.put_nowait(frame)
-                except Exception:
-                    ws_dead.append(sub)
-            for sub in ws_dead:
-                try:
-                    _WS_SUBS.remove(sub)
-                except ValueError:
-                    pass
     except Exception:
         pass
 
 
-def _ws_send(conn, obj: dict) -> bool:
-    """One JSON text frame over an authed WS socket. False when dead."""
-    try:
-        import json as _json
-
-        raw = _json.dumps(obj, ensure_ascii=False)
-        if len(raw.encode("utf-8")) > 8 * 1024 * 1024:
-            return False
-        conn.send_text(raw)
-        return True
-    except Exception:
-        return False
-
-
-def _ws_chat_answer(payload: dict) -> dict:
-    """Same as POST /api/chat_answer, minus HTTP (WS op + loopback direct)."""
-    try:
-        qid = (payload or {}).get("id")
-        if not isinstance(qid, str) or not qid:
-            return {"error": "question id required"}
-        with _PQ_LOCK:
-            q = _PENDING_QUESTIONS.get(qid)
-        if q is None:
-            return {"error": "question expired or unknown"}
-        decision = (payload or {}).get("decision")
-        answer = (payload or {}).get("answer")
-        if isinstance(decision, str) and decision in ("continue", "stop", "skip", "activate"):
-            q.put({"decision": decision})
-        elif isinstance(answer, str) and answer.strip():
-            q.put({"answer": answer.strip()[:2000]})
-        else:
-            return {"error": "answer or decision required"}
-        _live_pause_clear(qid)
-        return {"ok": True}
-    except Exception as e:
-        return {"error": f"answer failed: {str(e)[:200]}"}
-
-
-def _ws_chat_cancel() -> dict:
-    """Same as POST /api/chat_cancel, minus HTTP. Best-effort."""
-    try:
-        with _RUN_LOCK:
-            ev = _ACTIVE_RUN.get("event")
-        if ev is not None:
-            try:
-                ev.set()
-            except Exception:
-                pass
-        return {"ok": True}
-    except Exception as e:
-        return {"error": f"cancel failed: {str(e)[:200]}"}
-
-
-def _ws_start_chat(conn, send_lock, payload: dict, gw: bool = False) -> dict:
-    """Start the agent loop; progress streams as frames on THIS socket.
-
-    Same pipeline as _handle_chat_stream (validation, busy slot, readiness,
-    run thread, done/error/cancelled frames) — only the transport differs:
-    frames go to this socket instead of SSE, and questions resolve via the
-    chat_answer WS op (or POST /api/chat_answer from loopback).
-    """
-    import queue as _queue
-    import uuid as _uuid
-
-    try:
-        fake_self = DashboardHandler.__new__(DashboardHandler)
-        loop_input, saved_paths = DashboardHandler._build_loop_input(fake_self, payload or {})
-    except _ChatError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": str(e)[:200]}
-
-    if gw:
-        try:
-            with _RUN_LOCK:
-                busy = "event" in _ACTIVE_RUN
-        except Exception:
-            busy = False
-        if busy:
-            try:
-                for _p in saved_paths or []:
-                    try:
-                        Path(_p).unlink(missing_ok=True)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            return {"error": "another run is active, try again shortly", "busy": True}
-    else:
-        try:
-            with _RUN_LOCK:
-                if "event" in _ACTIVE_RUN:
-                    try:
-                        for _p in saved_paths or []:
-                            try:
-                                Path(_p).unlink(missing_ok=True)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    return {"error": "another run is active, try again shortly", "busy": True}
-        except Exception as e:
-            return {"error": str(e)[:200]}
-
-    ready, _, _ = _chat_readiness()
-    if not ready:
-        try:
-            for _p in saved_paths or []:
-                try:
-                    Path(_p).unlink(missing_ok=True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return {"error": NO_MODEL_ERROR, "needs_model": True, "needs_kind": "text"}
-
-    restricted = (payload or {}).get("mode", "restricted") != "free"
-    events_q: _queue.Queue = _queue.Queue(maxsize=2000)
-    box: dict = {}
-
-    def _emit(obj) -> bool:
-        try:
-            with send_lock:
-                return _ws_send(conn, obj)
-        except Exception:
-            return False
-
-    def _stage(kind: str, val, out) -> None:
-        frame = _build_stream_frame(kind, val, out)
-        if frame is not None:
-            _run_frame_remember(frame)
-        try:
-            events_q.put_nowait((kind, val, out))
-        except Exception:
-            try:
-                events_q.get_nowait()
-            except Exception:
-                pass
-            try:
-                events_q.put_nowait((kind, val, out))
-            except Exception:
-                pass
-
-    def _on_question(kind: str, qpayload: dict):
-        qid = _uuid.uuid4().hex[:8]
-        q: _queue.Queue = _queue.Queue()
-        with _PQ_LOCK:
-            _PENDING_QUESTIONS[qid] = q
-        frame = {
-            "type": "question",
-            "id": qid,
-            "kind": kind,
-            "text": str(qpayload.get("question") or qpayload.get("command") or "")[:2000],
-            "choices": [str(c)[:200] for c in (qpayload.get("options") or [])[:4]],
-            "command": str(qpayload.get("command") or "")[:500],
-        }
-        if kind == "needs_model":
-            try:
-                from core.ai_models.store import KIND_TITLES as _TITLES
-                _k = str(qpayload.get("kind") or "text")
-                _t = str(qpayload.get("tool") or "")
-                frame["needs_kind"] = _k
-                frame["tool"] = _t[:40]
-                frame["text"] = f"Needs {_TITLES.get(_k, _k)} (used by {_t or 'this task'})."
-            except Exception:
-                frame["needs_kind"] = str(qpayload.get("kind") or "text")
-                frame["tool"] = str(qpayload.get("tool") or "")[:40]
-        if kind == "live":
-            live_view_only = bool(qpayload.get("view_only", False))
-            frame["url"] = str(qpayload.get("url") or "")[:2000]
-            frame["view_only"] = live_view_only
-            frame["tool"] = str(qpayload.get("tool") or "human_control")[:40]
-            frame["reason"] = str(qpayload.get("reason") or "")[:500]
-            with _PQ_LOCK:
-                _LIVE_PAUSE[qid] = {"tool": frame["tool"],
-                                    "view_only": live_view_only,
-                                    "reason": frame["reason"]}
-        if gw and kind in ("approval", "needs_model"):
-            with _PQ_LOCK:
-                _PENDING_QUESTIONS.pop(qid, None)
-                _LIVE_PAUSE.pop(qid, None)
-            return {"decision": "continue" if kind == "approval" else "skip"}
-        if gw and kind not in ("live",):
-            with _PQ_LOCK:
-                _PENDING_QUESTIONS.pop(qid, None)
-                _LIVE_PAUSE.pop(qid, None)
-            return None
-        if not _emit(frame):
-            with _PQ_LOCK:
-                _PENDING_QUESTIONS.pop(qid, None)
-                _LIVE_PAUSE.pop(qid, None)
-            return None
-        try:
-            return q.get(timeout=600)
-        except Exception:
-            _emit({"type": "question-expired", "id": qid})
-            return None
-        finally:
-            with _PQ_LOCK:
-                _PENDING_QUESTIONS.pop(qid, None)
-                _LIVE_PAUSE.pop(qid, None)
-
-    def _on_live(ev: dict) -> None:
-        try:
-            if not isinstance(ev, dict) or not ev.get("success"):
-                return
-            tool = str(ev.get("tool") or "")
-            if not tool:
-                return
-            _events_emit_browser(force=True)
-            if tool in ("agent_control", "close_browser"):
-                _stage("live_end", None, None)
-            elif tool in ("live_preview", "show_preview", "restart_browser", "open_browser"):
-                links = _live_snapshot()
-                purl = links.get("preview") if isinstance(links, dict) else ""
-                if isinstance(purl, str) and purl.startswith(("http://", "https://")):
-                    _stage("live", {"mode": "preview", "tool": tool,
-                                    "url": purl[:2000], "view_only": True}, None)
-                else:
-                    active = _live_active()
-                    if isinstance(active, dict) and active.get("url"):
-                        _stage("live", {"mode": active.get("mode"), "tool": tool,
-                                        "url": active["url"], "view_only": True}, None)
-            else:
-                active = _live_active()
-                if isinstance(active, dict) and active.get("url"):
-                    _stage("live", {"mode": active.get("mode"), "tool": tool,
-                                    "url": active["url"], "view_only": True}, None)
-        except Exception:
-            pass
-
-    def _run() -> None:
-        cancel_event = threading.Event()
-        _run_frames_clear()
-        with _RUN_LOCK:
-            _ACTIVE_RUN["event"] = cancel_event
-            _ACTIVE_RUN["input"] = loop_input[:200]
-        _events_emit_chat(gateway=gw)
-        try:
-            from core.agent.loop.engine import run_loop
-
-            chat_model, chat_key = _resolve_chat_model()
-            box["res"] = run_loop(
-                loop_input,
-                max_steps=CHAT_LOOP_STEPS,
-                verbose=False,
-                model=chat_model,
-                api_key=chat_key,
-                on_event=lambda t, o=None, k=None, m=None, r=None, s=None: _stage("event", t, (o, k, m, r, s)),
-                on_tool_start=lambda label, k=None, r=None, s=None: _stage("event_start", label, (k, r, s)),
-                on_token=lambda step, d: _stage("token", step, d),
-                restricted=restricted,
-                on_question=_on_question,
-                on_live_event=_on_live,
-                cancel_flag=cancel_event,
-            )
-        except Exception as e:
-            box["err"] = e
-        finally:
-            with _RUN_LOCK:
-                if _ACTIVE_RUN.get("event") is cancel_event:
-                    _ACTIVE_RUN.pop("event", None)
-                _ACTIVE_RUN.pop("input", None)
-            _run_frames_clear()
-            _events_emit_chat(gateway=gw)
-            _events_broadcast("chat_done", {"gateway": True} if gw else {})
-            try:
-                _events_emit_scheduler(force=True)
-            except Exception:
-                pass
-            events_q.put(("stop", None, None))
-
-    threading.Thread(target=_run, daemon=True).start()
-
-    def _pump() -> None:
-        try:
-            while True:
-                try:
-                    kind, val, out = events_q.get(timeout=25)
-                except Exception:
-                    if not _emit({"type": "ping"}):
-                        break
-                    continue
-                if kind == "stop":
-                    break
-                frame = _build_stream_frame(kind, val, out)
-                if frame is None:
-                    continue
-                try:
-                    _md = frame.get("media")
-                    _stm = _md.get("stream") if isinstance(_md, dict) else None
-                    _surl = _stm.get("url") if isinstance(_stm, dict) else None
-                    if isinstance(_surl, str) and _surl.startswith(("http://", "https://")):
-                        if _live_pause_entry() is None:
-                            _events_emit_browser(force=True)
-                except Exception:
-                    pass
-                if not _emit(frame):
-                    break
-            err = box.get("err")
-            _live_pause_clear()
-            if err is not None:
-                _emit({"type": "error", "error": "LLM request failed — connect a model in AI Models",
-                       "detail": str(err)[:200]})
-            else:
-                res = box.get("res") or {}
-                if res.get("cancelled"):
-                    _emit({"type": "cancelled"})
-                else:
-                    final = res.get("final_answer") or ""
-                    _need_kind = res.get("needs_model_kind")
-                    _done = {
-                        "type": "done",
-                        "reply": str(final),
-                        "events": DashboardHandler._extract_loop_events(None, res),
-                        "steps": res.get("steps", 0),
-                        "ids": res.get("message_ids"),
-                        "images": res.get("final_images") or [],
-                        "audio": res.get("final_audio") or [],
-                        "elapsed": res.get("elapsed_sec", 0),
-                    }
-                    if isinstance(_need_kind, str) and _need_kind:
-                        _done["needs_model"] = True
-                        _done["needs_kind"] = _need_kind
-                    _emit(_done)
-        except Exception:
-            pass
-        finally:
-            try:
-                for _p in saved_paths or []:
-                    try:
-                        Path(_p).unlink(missing_ok=True)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    threading.Thread(target=_pump, daemon=True).start()
-    return {"started": True}
-
-
-def serve_ws(conn, peer: str = "") -> None:
-    """Own one upgraded /ws socket: token auth -> chat ops + pushes -> cleanup.
-
-    First message MUST be {"op": "auth", "token": "<entry token>"}:
-    match -> auth_ok + hello, then ops flow. Anything else -> close 4401.
-    The socket opens when the UI loads, closes when the tab closes; pushes
-    (browser/chat/run/scheduler/...) fan out from _events_broadcast on this
-    same socket, so traffic is instant and bidirectional. Never raises.
-    """
-    import queue as _queue
-
-    send_lock = threading.Lock()
-    authed = False
-    inbox = None
-    stop = threading.Event()
-    try:
-        try:
-            conn.sock.settimeout(15.0)
-        except Exception:
-            pass
-        try:
-            from web.server.ws_proto import WsError as _WsErr
-
-            first = conn.recv_text()
-        except Exception:
-            return
-        finally:
-            try:
-                conn.sock.settimeout(None)
-            except Exception:
-                pass
-        try:
-            import json as _json
-
-            msg = _json.loads(first)
-        except Exception:
-            msg = None
-        token = (msg or {}).get("token") if isinstance(msg, dict) else ""
-        if not isinstance(msg, dict) or msg.get("op") != "auth":
-            try:
-                _ws_send(conn, {"type": "auth_error", "error": "auth required"})
-            except Exception:
-                pass
-            try:
-                conn.close(4401, "auth required")
-            except Exception:
-                pass
-            return
-        try:
-            from web.server import ws_auth as _wa
-            from web.server import console_auth as _ca
-
-            ok = bool(_wa.check(token))
-            if not ok and not _ca.is_setup() and not (token or ""):
-                ok = True  # first-run setup window: admit once to create owner
-        except Exception:
-            ok = False
-        if not ok:
-            try:
-                _ws_send(conn, {"type": "auth_error", "error": "invalid token"})
-            except Exception:
-                pass
-            try:
-                conn.close(4401, "auth required")
-            except Exception:
-                pass
-            return
-        authed = True
-        try:
-            snap = _events_snapshot()
-        except Exception:
-            snap = {}
-        with send_lock:
-            _ws_send(conn, {"type": "auth_ok", "hello": snap})
-
-        inbox = _queue.Queue(maxsize=64)
-        with _EVENTS_LOCK:
-            _WS_SUBS.append({"q": inbox})
-
-        def _reader() -> None:
-            try:
-                while not stop.is_set():
-                    try:
-                        raw = conn.recv_text()
-                    except Exception:
-                        break
-                    try:
-                        import json as _json2
-
-                        m = _json2.loads(raw)
-                    except Exception:
-                        continue
-                    if not isinstance(m, dict):
-                        continue
-                    op = m.get("op")
-                    rid = m.get("id")
-                    try:
-                        if op == "chat_stream":
-                            data = _ws_start_chat(conn, send_lock,
-                                                 m.get("params") if isinstance(m.get("params"), dict) else m,
-                                                 gw=False)
-                        elif op == "chat_answer":
-                            data = _ws_chat_answer(m.get("params") if isinstance(m.get("params"), dict) else m)
-                        elif op == "chat_cancel":
-                            data = _ws_chat_cancel()
-                        elif op == "chat_active":
-                            with _RUN_LOCK:
-                                _a = "event" in _ACTIVE_RUN
-                                _pv = str(_ACTIVE_RUN.get("input") or "")[:200]
-                            data = {"active": bool(_a), "input": _pv}
-                        elif op == "chat_frames":
-                            with _RUN_LOCK:
-                                _a2 = "event" in _ACTIVE_RUN
-                                _pv2 = str(_ACTIVE_RUN.get("input") or "")[:200]
-                            with _RUN_FRAMES_LOCK:
-                                _fr = [dict(f) for f in _RUN_FRAMES]
-                            data = {"active": bool(_a2), "input": _pv2, "frames": _fr}
-                        elif op == "ping":
-                            last_in = time.monotonic()
-                            data = {"pong": True}
-                        else:
-                            data = {"error": f"unknown op: {op}"}
-                    except Exception as e:
-                        data = {"error": f"op failed: {str(e)[:200]}"}
-                    try:
-                        with send_lock:
-                            if rid is not None and op != "chat_stream":
-                                _ws_send(conn, {"id": rid, "ok": "error" not in data,
-                                               **({"data": data} if "error" not in data else {"error": data["error"]})})
-                            elif rid is not None:
-                                _ws_send(conn, {"id": rid, "ok": "error" not in data,
-                                               **({"data": data} if "error" not in data else data)})
-                    except Exception:
-                        pass
-            finally:
-                try:
-                    stop.set()
-                except Exception:
-                    pass
-
-        reader = threading.Thread(target=_reader, daemon=True)
-        reader.start()
-        last_ping = time.monotonic()
-        last_in = time.monotonic()
-        while authed:
-            try:
-                try:
-                    item = inbox.get(timeout=5.0)
-                    last_in = time.monotonic()
-                except _queue.Empty:
-                    item = None
-                if item is not None:
-                    with send_lock:
-                        if not _ws_send(conn, {"type": "push", "channel": item.get("type"),
-                                              "data": item.get("data") or {}}):
-                            break
-                    continue
-                now = time.monotonic()
-                if now - last_ping >= 20.0:
-                    last_ping = now
-                    try:
-                        conn.ping()
-                    except Exception:
-                        break
-                    if now - last_in > 75.0:
-                        break
-            except Exception:
-                break
-    finally:
-        try:
-            stop.set()
-        except Exception:
-            pass
-        try:
-            if inbox is not None:
-                with _EVENTS_LOCK:
-                    for sub in list(_WS_SUBS):
-                        try:
-                            if sub.get("q") is inbox:
-                                _WS_SUBS.remove(sub)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        try:
-            conn.close(1000, "")
-        except Exception:
-            pass
-
-
 def _events_snapshot() -> dict:
-    """Full current state for a fresh subscriber (hello event). Read-only."""
+    """Priority-ordered snapshot for a fresh SSE subscriber. Read-only.
+
+    Order: (1) last 50 chat messages FIRST — the most important, the UI
+    renders them immediately; (2) the dashboard bundle; (3) everything else
+    (browser/live/chat/workspace/scheduler/gateway). Every section carries
+    its hash: unchanged sections reuse cache, changed ones rebuild + rehash,
+    so the client updates a section only when its hash broke.
+    """
+    chat_sec = _hello_cached("chat_last50", _hello_chat_last50)
+    dash_sec = _hello_cached("dashboard", _hello_dashboard)
     links = _live_snapshot()
     running = bool(links.get("running"))
     active = _live_active()
@@ -1822,15 +1366,6 @@ def _events_snapshot() -> dict:
             chat_input = str(_ACTIVE_RUN.get("input") or "")[:200]
     except Exception:
         chat_active, chat_input = False, ""
-    dash: dict = {}
-    try:
-        if _DASH_CACHE:
-            dash = _DASH_CACHE
-        else:
-            dash = {"dashboard": _get_dashboard_data(), "cost": _get_cost_data(),
-                    "balance": _get_balance_data(), "models": _get_models_data()}
-    except Exception:
-        pass
     try:
         sched = _get_scheduler_data()
     except Exception:
@@ -1847,12 +1382,21 @@ def _events_snapshot() -> dict:
               "pairing": bool(live.get("pairing")), "error": live.get("error", "")}
     except Exception:
         pass
-    return {"browser": {"running": running, "stream": stream},
+    rest = {"browser": {"running": running, "stream": stream},
             "chat": {"active": chat_active, "input": chat_input},
             "workspace": {"version": _WS_PUSH.get("version", 0)},
-            "dashboard": dash,
             "scheduler": sched,
             "gateway": gw}
+    rest_sec = _hello_cached("rest", lambda: rest)
+    return {"chat_last50": chat_sec,
+            "dashboard": dash_sec,
+            "rest": rest_sec,
+            # Legacy flat keys (same data, no hash): old readers keep working.
+            "browser": rest["browser"],
+            "chat": rest["chat"],
+            "workspace": rest["workspace"],
+            "scheduler": rest["scheduler"],
+            "gateway": rest["gateway"]}
 
 
 def _events_emit_browser(force: bool = False) -> None:
@@ -1951,6 +1495,8 @@ def _events_emit_dashboard(force: bool = False) -> None:
         bundle = {"dashboard": _get_dashboard_data(), "cost": _get_cost_data(),
                    "balance": _get_balance_data(), "models": _get_models_data()}
         _DASH_CACHE = bundle
+        _hello_invalidate("dashboard")  # data changed: next hello rebuilds + rehashes
+        _hello_invalidate("rest")
         _events_broadcast("dashboard", bundle)
     except Exception:
         pass
@@ -1969,6 +1515,11 @@ def _events_emit_chat(gateway: bool = False) -> None:
         payload = {"active": bool(active), "input": preview}
         if gateway:
             payload["gateway"] = True
+        if not active:
+            # A run just finished: conversation.json changed -> last-50 hash
+            # breaks on next hello, cache refreshes, new hash minted.
+            _hello_invalidate("chat_last50")
+            _hello_invalidate("rest")
         _events_broadcast("chat", payload)
     except Exception:
         pass
@@ -2228,16 +1779,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/ws":
-            # Safety net: /ws must be upgraded in handle() (MSG_PEEK route to
-            # serve_ws) before HTTP runs. If it ever lands here, the upgrade
-            # was missed — answer 426 (Upgrade Required) instead of falling
-            # through to the SPA shell (200 index.html), which fails the
-            # browser upgrade silently with no diagnostic.
-            self.send_response(426)
-            self.send_header("Upgrade", "websocket")
-            self.send_header("Connection", "Upgrade")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
+            # WebSocket was removed: server -> browser is SSE (/api/events),
+            # browser -> server is POST. Answer 410 so old clients fail clearly.
+            self._send_json({"error": "gone — websocket removed, use SSE + POST"}, status=410)
             return
         if self._auth_gate(is_post=False):
             return
@@ -2310,6 +1854,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/scheduler":
             self._handle_scheduler_get()
             return
+        if parsed.path == "/api/terminal_access":
+            self._handle_terminal_access_get()
+            return
         if parsed.path == "/api/events":
             self._handle_events_api()
             return
@@ -2342,6 +1889,22 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         # SPA fallback: real routes (/agent, /models ...) serve the console shell
         # so refresh and deep-links work. Only extensionless non-API paths rewrite.
+        # No-back-to-login: a valid session asking for login.html bounces to /
+        # (login is one-way: once signed in, Back never lands on it again).
+        if parsed.path == "/login.html":
+            try:
+                if str(PROJECT_ROOT) not in sys.path:
+                    sys.path.insert(0, str(PROJECT_ROOT))
+                from web.server import console_auth as _ca
+                if _ca.is_setup() and _ca.session_valid(
+                        _ca.session_from_cookie(self.headers.get("Cookie"))):
+                    self.send_response(302)
+                    self.send_header("Location", "/")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    return
+            except Exception:
+                pass
         last_seg = parsed.path.rsplit("/", 1)[-1]
         if "." not in last_seg:
             self.path = "/index.html"
@@ -2363,6 +1926,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/auth/password":
             self._handle_auth_password_post()
+            return
+        if parsed.path == "/api/terminal_access":
+            self._handle_terminal_access_post()
             return
         if parsed.path == "/api/chat":
             self._handle_chat_post()
@@ -2525,7 +2091,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"error": "open failed",
                                      "detail": detail}, status=502)
                     return
+                # Instant fan-out: the manual open must update the UI NOW, not
+                # after the 10s browser watcher tick (that was the hang: green
+                # dot set, but the tab/player waited for the next poll tick).
                 _events_emit_browser(force=True)
+                try:
+                    active = _live_active()
+                    url = active.get("url") if isinstance(active, dict) else ""
+                    if isinstance(url, str) and url.startswith(("http://", "https://")):
+                        _events_broadcast("live", {"mode": active.get("mode"),
+                                                  "tool": "open_browser",
+                                                  "url": url[:2000],
+                                                  "view_only": True})
+                except Exception:
+                    pass
                 self._send_json({"ok": True, "stream": _live_active()})
                 return
             if action == "control":
@@ -3857,6 +3436,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": "clear failed", "detail": str(e)[:200]}, status=500)
 
     def _handle_conversation_get(self):
+        """GET /api/conversation[?limit=N][?before_id=ID] — paged history.
+
+        Default: the whole list (legacy callers keep working). With
+        limit+before_id: the N messages BEFORE the given id (older slice),
+        plus has_more so the UI auto-loads older pages on scroll-up.
+        SSE still pushes last-50 first via hello; this endpoint pages back.
+        """
         try:
             try:
                 from core.paths import data_db_file as _ddf
@@ -3881,6 +3467,28 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                         tmp.replace(storage)
             except Exception:
                 pass
+            try:
+                qs = parse_qs(urlparse(self.path).query)
+                limit_raw = (qs.get("limit") or [""])[0]
+                before_id = ((qs.get("before_id") or [""])[0] or "").strip()[:64]
+            except Exception:
+                limit_raw, before_id = "", ""
+            if limit_raw or before_id:
+                try:
+                    limit = max(1, min(100, int(limit_raw or "50")))
+                except Exception:
+                    limit = 50
+                msgs = data if isinstance(data, list) else []
+                if before_id:
+                    idx = next((i for i, m in enumerate(msgs)
+                                if isinstance(m, dict) and str(m.get("id") or "") == before_id), None)
+                    older = msgs[:idx] if idx is not None else []
+                else:
+                    older = msgs
+                page = older[-limit:]
+                self._send_json({"messages": page,
+                                 "has_more": len(older) > len(page)})
+                return
             self._send_json({"messages": data})
         except Exception as e:
             self._send_json({"error": str(e)}, status=500)
@@ -4159,15 +3767,85 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         return data
 
     def _build_loop_input(self, payload: dict):
-        """Validate chat payload, save attachments, return (loop_input, saved_paths)."""
+        """Validate chat payload, save attachments, return (loop_input, saved_paths).
+
+        payload may carry skip_history_ids: ids of the ALREADY-persisted user
+        bubble (edit resend). The loop reuses it instead of appending a
+        duplicate user message (that was the double-reply bug).
+        """
         msg = str(payload.get("message") or payload.get("text") or "").strip()
         if len(msg) > 4000:
             raise _ChatError("message too long (max 4000)")
         raw_attachments = payload.get("attachments") or []
         if not isinstance(raw_attachments, list) or len(raw_attachments) > CHAT_MAX_ATTACHMENTS:
             raise _ChatError(f"attachments must be a list of max {CHAT_MAX_ATTACHMENTS}")
-        if not msg and not raw_attachments:
+        # Optional skill injection (frontend "/" picker): validated + bounded.
+        # The "/name" token is replaced IN PLACE later (same for "@name" below).
+        _sname, _sinstr = "", ""
+        try:
+            _skill = payload.get("skill") or None
+            if isinstance(_skill, dict):
+                _sname = str(_skill.get("name") or "").strip()[:100]
+                _sinstr = str(_skill.get("instructions") or "").strip()[:6000]
+                if not (_sname and _sinstr):
+                    _sname, _sinstr = "", ""
+        except Exception:
+            _sname, _sinstr = "", ""
+        # Optional workspace refs (frontend "@" picker): [{name, path}] (or
+        # plain path strings). Each "@name" token is replaced IN PLACE with
+        # that file's metadata; leftovers are appended (bounded).
+        _ref_metas: list = []
+        try:
+            _refs = payload.get("workspace_refs") or []
+            if isinstance(_refs, list) and _refs:
+                for _r in _refs[:10]:
+                    _nm, _pth = "", ""
+                    if isinstance(_r, dict):
+                        _nm = str(_r.get("name") or "").strip()[:200]
+                        _pth = str(_r.get("path") or "").strip()
+                    elif isinstance(_r, str):
+                        _pth = _r.strip()
+                        _nm = _pth.split("/")[-1].strip()[:200]
+                    if not _nm or not _pth or len(_pth) > 500:
+                        continue
+                    try:
+                        _t = self._workspace_fs(_pth)
+                    except (_ChatError, ValueError, OSError):
+                        continue
+                    try:
+                        if _t.is_dir():
+                            _n = 0
+                            try:
+                                for _ in _t.iterdir():
+                                    _n += 1
+                                    if _n >= 1001:
+                                        break
+                            except Exception:
+                                pass
+                            _ref_metas.append((_nm, f"[Workspace file: {_pth} | type: folder | items: {_n}]"))
+                        elif _t.is_file():
+                            try:
+                                _sz = _t.stat().st_size
+                            except Exception:
+                                _sz = 0
+                            _ext = _t.suffix.lower().lstrip(".") or "no-ext"
+                            _ref_metas.append((_nm, f"[Workspace file: {_pth} | type: {_ext} | size: {_sz} bytes]"))
+                    except Exception:
+                        continue
+        except Exception:
+            _ref_metas = []
+        if not msg and not raw_attachments and not _sinstr and not _ref_metas:
             raise _ChatError("message required")
+        try:
+            skip_ids = payload.get("skip_history_ids") or []
+            skip_ids = [str(i)[:16] for i in skip_ids if isinstance(i, str) and i.strip()][:4]
+        except Exception:
+            skip_ids = []
+        if skip_ids:
+            try:
+                self._skip_history_ids = list(skip_ids)
+            except Exception:
+                pass
 
         if str(PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(PROJECT_ROOT))
@@ -4214,19 +3892,72 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             loop_input = text_part + "\n\n[Attached files]\n" + "\n".join(attach_lines)
             for i, block in enumerate(text_blocks, 1):
                 loop_input += f"\n\n[Attached text file {i} content]\n```text\n{block}\n```"
-            if doc_files:
-                # Priority slot: chat-uploaded documents are ALSO in Workspace
-                # (see the Workspace block above) and are listed again here so
-                # the agent reaches for document_search first for this message.
-                prio = "\n".join(
-                    f"- file_id=\"{f}\": search it with "
-                    f"document_search(file_id=\"{f}\", query=<question>, top_k=<1..20>)"
-                    for f in doc_files[:2]
-                )
-                loop_input += ("\n\n[Attached documents — priority, also in Workspace]\n"
-                               + prio)
+            # Priority slot: EVERY chat upload is ALSO in Workspace (mirrored
+            # on save) and is listed again here so the agent reaches for the
+            # attachment first for this message — documents via
+            # document_search, others via their ids/tools + Workspace copy.
+            _prio = []
+            for _line in attach_lines:
+                try:
+                    _m = _re.search(r'file_id="([^"]+)"', _line)
+                except Exception:
+                    _m = None
+                if not _m:
+                    continue
+                _fid = _m.group(1)[:500]
+                if _line.startswith("- document:"):
+                    _prio.append(
+                        f"- file_id=\"{_fid}\": find document_search via tool_search, then call "
+                        f"document_search(file_id=\"{_fid}\", query=<question>, top_k=<1..20>)")
+                elif _line.startswith("- image:"):
+                    _prio.append(
+                        f"- file_id=\"{_fid}\": image above, analyze it first (also in Workspace)")
+                elif _line.startswith("- video:"):
+                    _prio.append(
+                        f"- file_id=\"{_fid}\": video above, process it first (also in Workspace)")
+                elif _line.startswith("- text:"):
+                    _prio.append(
+                        f"- file_id=\"{_fid}\": text content above, use it first (also in Workspace)")
+            if _prio:
+                loop_input += ("\n\n[Attached files — priority, also in Workspace]\n"
+                               + "\n".join(_prio[:4]))
         else:
             loop_input = msg
+        # In-place injection: "@name" becomes that file's metadata where it
+        # stands, "/skillname" becomes the skill instructions in place — so
+        # mid-message mentions land in context exactly where the user put
+        # them. Anything unmatched is appended (bounded) so nothing is lost.
+        try:
+            import re as _re
+
+            def _tok_rx(_name: str, _prefix: str):
+                try:
+                    if _prefix == "@":
+                        return _re.compile(r"(?<![\w@])@" + _re.escape(_name) + r"(?!\w)")
+                    return _re.compile(r"(?<![\w@/])/" + _re.escape(_name) + r"(?!\w)")
+                except Exception:
+                    return None
+
+            _used_metas: set = set()
+            for _nm, _line in _ref_metas:
+                _rx = _tok_rx(_nm, "@")
+                if _rx is None:
+                    continue
+                loop_input, _cnt = _rx.subn("\n" + _line + "\n", loop_input)
+                if _cnt:
+                    _used_metas.add((_nm, _line))
+            _leftover = [ln for (nm, ln) in _ref_metas if (nm, ln) not in _used_metas]
+            if _leftover:
+                loop_input += "\n\n[Workspace files — metadata]\n" + "\n".join(_leftover[:10])
+            if _sname and _sinstr:
+                _srx = _tok_rx(_sname, "/")
+                _stext = f"\n[Skill: {_sname}]\n{_sinstr}\n"
+                if _srx is not None and _srx.search(loop_input):
+                    loop_input = _srx.sub(_stext, loop_input)
+                else:
+                    loop_input += "\n" + _stext
+        except Exception:
+            pass
         if attach_lines:
             # Workspace mirror landed on disk — bump the version so the
             # Workspace page shows the new file without waiting for the slow poll.
@@ -4381,8 +4112,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
             action = payload.get("action")
             mid = payload.get("id")
-            if action not in ("edit", "delete") or not isinstance(mid, str) or not mid.strip():
-                self._send_json({"error": "action edit|delete + id required"}, status=400)
+            if action not in ("edit", "delete", "prune") or not isinstance(mid, str) or not mid.strip():
+                self._send_json({"error": "action edit|delete|prune + id required"}, status=400)
+                return
+            if action == "prune":
+                # Atomic prune: everything below the anchor goes in a single
+                # read-modify-write (+embeddings). Edit-resend/regenerate wait
+                # for this confirmation before running, so no partial state
+                # can leak into the new context.
+                try:
+                    removed = cvs.prune_below(mid.strip())
+                except (ValueError, FileNotFoundError) as e:
+                    self._send_json({"error": str(e)[:200]}, status=404)
+                    return
+                self._send_json({"ok": True, "removed": removed})
                 return
             if action == "delete":
                 found = cvs.delete_message(mid.strip())
@@ -4403,6 +4146,21 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"error": "message update failed", "detail": str(e)[:200]}, status=500)
+
+    def _reuse_user_id(self) -> str | None:
+        """Id of the already-persisted edited user bubble (edit resend).
+
+        Set by _build_loop_input from skip_history_ids. Consumed once per
+        chat turn so a stale id never leaks into the next message.
+        """
+        try:
+            ids = getattr(self, "_skip_history_ids", None)
+            self._skip_history_ids = None
+            if isinstance(ids, list) and ids and isinstance(ids[0], str) and ids[0].strip():
+                return ids[0].strip()[:16]
+        except Exception:
+            pass
+        return None
 
     def _handle_chat_post(self):
         try:
@@ -4427,7 +4185,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 from core.agent.loop.engine import run_loop
 
                 chat_model, chat_key = _resolve_chat_model()
-                result = run_loop(loop_input, max_steps=CHAT_LOOP_STEPS, verbose=False, model=chat_model, api_key=chat_key)
+                _reuse = self._reuse_user_id()
+                result = run_loop(loop_input, max_steps=CHAT_LOOP_STEPS, verbose=False, model=chat_model, api_key=chat_key, reuse_user_id=_reuse, chat_limit=20 if _reuse else 30)
             except (ValueError, RuntimeError) as e:
                 self._send_json(
                     {"error": "LLM request failed — connect a model in AI Models", "detail": str(e)[:200]},
@@ -4640,7 +4399,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return None
 
         def _on_live(ev: dict) -> None:
-            # live_preview start / agent_control / close_browser / restart:
+            # live_preview start / close_browser / restart:
             # the library owns the links, so just push the fresh state.
             try:
                 if not isinstance(ev, dict) or not ev.get("success"):
@@ -4649,7 +4408,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 if not tool:
                     return
                 _events_emit_browser(force=True)
-                if tool in ("agent_control", "close_browser"):
+                if tool in ("close_browser"):
                     _stage("live_end", None, None)
                 elif tool in ("live_preview", "show_preview", "restart_browser", "open_browser"):
                     # Watch-only surface: the floating player must render the
@@ -4690,6 +4449,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 from core.agent.loop.engine import run_loop
 
                 chat_model, chat_key = _resolve_chat_model()
+                _reuse_stream = self._reuse_user_id()
                 box["res"] = run_loop(
                     loop_input,
                     max_steps=CHAT_LOOP_STEPS,
@@ -4703,6 +4463,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     on_question=_on_gateway_question if gw else _on_question,
                     on_live_event=_on_live,
                     cancel_flag=cancel_event,
+                    reuse_user_id=_reuse_stream,
+                    chat_limit=20 if _reuse_stream else 30,
                 )
             except Exception as e:
                 box["err"] = e
@@ -4713,6 +4475,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     _ACTIVE_RUN.pop("input", None)
                 _run_frames_clear()
                 _events_emit_chat(gateway=gw)
+                # Run persisted new messages: last-50 hash breaks, refresh + rehash.
+                _hello_invalidate("chat_last50")
+                _hello_invalidate("dashboard")
+                _hello_invalidate("rest")
                 _events_broadcast("chat_done", {"gateway": True} if gw else {})
                 try:
                     _events_emit_scheduler(force=True)
@@ -4799,14 +4565,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # ---------- console owner gate (first-run setup, then cookie sessions) ----------
-    # Always public (no owner needed to reach them):
+    # ---------- console owner gate (terminal-created owner, then cookie sessions) ----------
+    # Owner is created in the TERMINAL ONLY (install prompt / env / server prompt).
+    # The browser can NEVER create the owner: /api/auth/setup is gone (410).
+    # Always public (no session needed to reach them):
     _AUTH_PUBLIC_GET = frozenset({
-        "/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/setup",
+        "/api/health", "/api/auth/status",
         "/login.html",
     })
     _AUTH_PUBLIC_POST = frozenset({
-        "/api/auth/login", "/api/auth/setup",
+        "/api/auth/login", "/api/auth/setup",  # setup passes the gate only to be told 410 (gone)
     })
     # Internal gateway dispatcher (same machine, cookie-less) may POST only
     # these endpoints from loopback. NOTHING else is exempt from login: the
@@ -4819,9 +4587,17 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def _auth_gate(self, is_post: bool) -> bool:
         """Enforce the owner gate. Returns True when the request was answered.
 
-        No owner yet: pages go to the setup screen, APIs stay open (first-run
-        window — set the owner immediately). Owner set: everything except the
-        small public list needs a valid session cookie (APIs 401, pages 302).
+        STRICT: login is mandatory, always. The owner is terminal-created
+        ONLY (install.py prompt, env X5_EMAIL/X5_PASSWORD, or the server's
+        own startup prompt below). The browser can NEVER create the owner:
+        /api/auth/setup is gone (410), and login.html shows a sign-in form
+        only (no setup mode). No owner yet: NOTHING opens — every page 302s
+        to login, every API (except /api/health + /api/auth/status) 503s with
+        owner_missing so the UI shows "create the owner in the terminal".
+        Owner set: a user with a valid session cookie goes straight to /
+        (login.html itself bounces them forward, so Back never lands on
+        login); everyone else 302s/401s to login. Session = HttpOnly cookie
+        only, no tokens.
         """
         try:
             parsed = urlparse(self.path)
@@ -4833,18 +4609,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 sys.path.insert(0, str(PROJECT_ROOT))
             from web.server import console_auth as _ca
             if not _ca.is_setup():
-                if is_post or path.startswith("/api/"):
-                    return False
-                try:
-                    peer = self.client_address[0] if self.client_address else ""
-                except Exception:
-                    peer = ""
-                if peer in ("127.0.0.1", "::1"):
-                    return False  # internal loopback (gateway dispatcher)
-                self.send_response(302)
-                self.send_header("Location", "/login.html")
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
+                # No owner: the UI/API never opens. Tell the client to use
+                # the terminal (setup via browser is forbidden).
+                if path.startswith("/api/"):
+                    if path == "/api/auth/setup":
+                        self._send_json({"error": "Removed — create the owner in the terminal."},
+                                        status=410)
+                    else:
+                        self._send_json({"error": "no owner yet — create it in the terminal, then sign in",
+                                         "owner_missing": True}, status=503)
+                else:
+                    self.send_response(302)
+                    self.send_header("Location", "/login.html")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
                 return True
             if _ca.session_valid(_ca.session_from_cookie(self.headers.get("Cookie"))):
                 return False
@@ -4878,42 +4656,21 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return {}
 
     def _handle_auth_status_get(self):
-        """GET /api/auth/status — always public: is first-run setup needed?"""
+        """GET /api/auth/status — always public: sign-in only, never setup."""
         try:
             if str(PROJECT_ROOT) not in sys.path:
                 sys.path.insert(0, str(PROJECT_ROOT))
             from web.server import console_auth as _ca
-            self._send_json({"setup_needed": not _ca.is_setup(),
+            self._send_json({"setup_needed": False,
+                             "owner_missing": not _ca.is_setup(),
                              "email": _ca.owner_email()})
         except Exception as e:
             self._send_json({"error": str(e)[:200]}, status=500)
 
     def _handle_auth_setup_post(self):
-        """POST /api/auth/setup {email,password} — once only, then signs in."""
-        try:
-            if str(PROJECT_ROOT) not in sys.path:
-                sys.path.insert(0, str(PROJECT_ROOT))
-            from web.server import console_auth as _ca
-            data = self._read_json_body()
-            try:
-                email = _ca.setup_owner(str(data.get("email") or ""),
-                                        str(data.get("password") or ""))
-            except RuntimeError:
-                self._send_json({"error": "owner already set"}, status=409)
-                return
-            except ValueError as e:
-                self._send_json({"error": str(e)[:200]}, status=400)
-                return
-            token = _ca.create_session()
-            try:
-                from web.server import ws_auth as _wa
-                entry = _wa.mint(token)
-            except Exception:
-                entry = ""
-            self._send_json({"ok": True, "email": email, "ws_token": entry}, headers={
-                "Set-Cookie": _session_cookie(token)})
-        except Exception as e:
-            self._send_json({"error": str(e)[:200]}, status=500)
+        """POST /api/auth/setup — REMOVED. Owner is terminal-only (410)."""
+        self._send_json({"error": "Removed — create the owner in the terminal."},
+                        status=410)
 
     def _handle_auth_login_post(self):
         """POST /api/auth/login {email,password} — verifies, then signs in."""
@@ -4922,7 +4679,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 sys.path.insert(0, str(PROJECT_ROOT))
             from web.server import console_auth as _ca
             if not _ca.is_setup():
-                self._send_json({"error": "no owner yet — create it first"}, status=409)
+                self._send_json({"error": "no owner yet — create it in the terminal first",
+                                 "owner_missing": True}, status=503)
                 return
             data = self._read_json_body()
             if not _ca.verify_owner(str(data.get("email") or ""),
@@ -4930,13 +4688,43 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"error": "wrong email or password"}, status=401)
                 return
             token = _ca.create_session()
-            try:
-                from web.server import ws_auth as _wa
-                entry = _wa.mint(token)
-            except Exception:
-                entry = ""
-            self._send_json({"ok": True, "ws_token": entry}, headers={
+            self._send_json({"ok": True}, headers={
                 "Set-Cookie": _session_cookie(token)})
+        except Exception as e:
+            self._send_json({"error": str(e)[:200]}, status=500)
+
+    def _terminal_scope(self) -> str:
+        """Current terminal scope (limited_access default). Never raises."""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.paths import data_db_file as _ddf
+            raw = json.loads(_ddf("terminal_access.json").read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and raw.get("scope") == "full_access":
+                return "full_access"
+        except Exception:
+            pass
+        return "limited_access"
+
+    def _handle_terminal_access_get(self):
+        """GET /api/terminal_access — current scope (authed only)."""
+        self._send_json({"scope": self._terminal_scope()})
+
+    def _handle_terminal_access_post(self):
+        """POST /api/terminal_access {scope} — set scope, no question."""
+        try:
+            data = self._read_json_body()
+            scope = str(data.get("scope") or "").strip()
+            if scope not in ("full_access", "limited_access"):
+                self._send_json({"error": "scope must be full_access|limited_access"}, status=400)
+                return
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.paths import data_db_file as _ddf
+            path = _ddf("terminal_access.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"scope": scope}, ensure_ascii=False), encoding="utf-8")
+            self._send_json({"ok": True, "scope": scope})
         except Exception as e:
             self._send_json({"error": str(e)[:200]}, status=500)
 
@@ -4948,11 +4736,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             from web.server import console_auth as _ca
             sess = _ca.session_from_cookie(self.headers.get("Cookie"))
             _ca.drop_session(sess)
-            try:
-                from web.server import ws_auth as _wa
-                _wa.drop_session_tokens(sess)
-            except Exception:
-                pass
             self._send_json({"ok": True}, headers={
                 "Set-Cookie": _session_cookie("", clear=True)})
         except Exception as e:
@@ -4975,11 +4758,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except ValueError as e:
                 self._send_json({"error": str(e)[:200]}, status=400)
                 return
-            try:
-                from web.server import ws_auth as _wa
-                _wa.drop_session_tokens(_ca.session_from_cookie(self.headers.get("Cookie")))
-            except Exception:
-                pass
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"error": str(e)[:200]}, status=500)
@@ -5015,85 +4793,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 out.write(f"[dashboard] {self.address_string()} - {format % args}\n")
         except Exception:
             pass
-
-    def handle(self):
-        """Route GET /ws to serve_ws BEFORE the HTTP handler runs.
-
-        Peek-only detection (MSG_PEEK, never consumes): WS upgrades go to
-        serve_ws (module level, same file) on this same socket; everything
-        else keeps the normal HTTP dispatch. The HTTP handler never sees
-        /ws bytes.
-        """
-        try:
-            import socket as _socket
-
-            try:
-                peer = str(self.client_address[0]) if self.client_address else ""
-            except Exception:
-                peer = ""
-            try:
-                self.request.settimeout(3.0)
-                # Wait for the full request line: proxies (funnel included)
-                # may deliver the upgrade headers in several TCP segments, and
-                # a single peek() can return a partial line that misroutes
-                # /ws to the HTTP handler (upgrade never completes, wss fails).
-                import time as _time
-                peek = b""
-                deadline = _time.monotonic() + 3.0
-                while True:
-                    try:
-                        chunk = self.request.recv(4096, _socket.MSG_PEEK)
-                    except Exception:
-                        break
-                    if chunk:
-                        peek = chunk[:8192]
-                    if (not chunk or b"\r\n" in peek or b"\n" in peek
-                            or len(chunk) >= 8192
-                            or _time.monotonic() >= deadline):
-                        break
-                    try:
-                        _time.sleep(0.01)
-                    except Exception:
-                        break
-            except Exception:
-                peek = b""
-            finally:
-                try:
-                    self.request.settimeout(None)
-                except Exception:
-                    pass
-            try:
-                line = (peek or b"").split(b"\r\n", 1)[0].decode("latin-1")
-                parts = line.strip().split()
-                is_ws = (len(parts) >= 2 and parts[0].upper() == "GET"
-                         and parts[1].split("?", 1)[0] == "/ws")
-            except Exception:
-                is_ws = False
-            if is_ws:
-                try:
-                    from web.server.ws_proto import WsConnection
-
-                    conn = WsConnection(self.request, peer)
-                    conn.handshake()
-                except Exception:
-                    try:
-                        self.request.close()
-                    except Exception:
-                        pass
-                    return
-                try:
-                    serve_ws(conn, peer)
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        self.request.close()
-                    except Exception:
-                        pass
-                return
-        except Exception:
-            pass
-        super().handle()
 
     def handle_error(self, request, client_address):
         # A vanished client (cancelled fetch, closed tab, dead scanner probe)
@@ -5203,6 +4902,91 @@ def _print_final_report(port: int, public_url: str) -> None:
         pass
 
 
+def _ensure_owner_from_terminal() -> bool:
+    """Owner gate at startup: terminal ONLY, browser can never create it.
+
+    Order: existing record -> env X5_EMAIL/X5_PASSWORD -> interactive TTY
+    prompt -> refuse to start. env values are consumed from memory only and
+    never written anywhere except the salted-hash record file.
+    """
+    import getpass as _getpass
+    import hashlib as _hashlib
+    import os as _os
+    import re as _re
+    import secrets as _secrets
+    import time as _time
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from web.server import console_auth as _ca
+        from core.paths import data_db_file as _ddf
+        if _ca.is_setup():
+            print(f"  Owner: {_ca.owner_email()} (terminal-created)")
+            return True
+        email = (_os.environ.get("X5_EMAIL") or "").strip().lower()
+        password = _os.environ.get("X5_PASSWORD") or ""
+        if email and password:
+            if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+                print("  ERROR: X5_EMAIL is not a valid email", file=sys.stderr)
+                return False
+            if len(password) < 8:
+                print("  ERROR: X5_PASSWORD too short (min 8)", file=sys.stderr)
+                return False
+            salt = _secrets.token_hex(16)
+            digest = _hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                          bytes.fromhex(salt), 200_000).hex()
+            del password
+            path = _ddf("console_auth.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"email": email, "salt": salt, "hash": digest,
+                                        "updated_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                                     _time.gmtime())},
+                                       ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"  Owner created from env ({email}) - hash only, never plaintext")
+            return True
+        if sys.stdin.isatty():
+            print("  No owner yet — create it now in this terminal (browser cannot).")
+            try:
+                email = input("  email: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print(file=sys.stderr)
+                return False
+            if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+                print("  ERROR: invalid email format", file=sys.stderr)
+                return False
+            try:
+                password = _getpass.getpass("  password (min 8, hidden): ")
+            except (EOFError, KeyboardInterrupt):
+                print(file=sys.stderr)
+                return False
+            if len(password or "") < 8:
+                print("  ERROR: password too short (min 8)", file=sys.stderr)
+                return False
+            salt = _secrets.token_hex(16)
+            digest = _hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                          bytes.fromhex(salt), 200_000).hex()
+            del password
+            path = _ddf("console_auth.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"email": email, "salt": salt, "hash": digest,
+                                        "updated_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                                     _time.gmtime())},
+                                       ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"  Owner created ({email}) - hash only, never plaintext")
+            return True
+        print("  ERROR: no owner yet — refusing to start.", file=sys.stderr)
+        print("  Create it first: set X5_EMAIL + X5_PASSWORD env, or run install.py,",
+              file=sys.stderr)
+        print("  then start the server again. The browser can NEVER create the owner.",
+              file=sys.stderr)
+        return False
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"  ERROR: owner gate failed ({str(e)[:120]})", file=sys.stderr)
+        return False
+
+
 def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False) -> int:
     if not DASHBOARD_ROOT.exists():
         print(f"[ERROR] Dashboard root not found: {DASHBOARD_ROOT}", file=sys.stderr)
@@ -5232,6 +5016,11 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
     # Live links live in the library only (see X5Browser LiveLinks): a previous
     # process cannot leave one behind, so there is nothing to clear at boot.
 
+    # Owner gate: terminal ONLY. No owner -> create from env/TTY prompt,
+    # or refuse to start. The browser can NEVER create the owner.
+    if not _ensure_owner_from_terminal():
+        return 1
+
     # Gateway ingestion (Telegram poller + WhatsApp push wiring): daemon
     # thread for Telegram only; WhatsApp arrives via bridge push events and
     # agent runs automatically as channel messages arrive.
@@ -5250,10 +5039,8 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
     except Exception as e:
         print(f"[WARN] Scheduler loop failed to start: {e}", file=sys.stderr)
 
-    # WS sockets are detected in ThreadedServer.handle (MSG_PEEK on the raw
-    # socket, before HTTP runs) and served by serve_ws above. Broadcasts fan
-    # out to WS tabs inside _events_broadcast itself — no bridge needed.
-    # Plain wss works automatically behind the funnel: TLS terminates above us.
+    # Transport: server -> browser is SSE (GET /api/events), browser ->
+    # server is POST (chat + APIs). No WebSocket anywhere.
 
     try:
         with ThreadedServer((host, port), DashboardHandler) as httpd:

@@ -51,8 +51,6 @@ _LABELS = {
     "restart_browser": "Restarting the browser",
     "browser_status": "Checking the browser",
     "human_control": "Handing you control",
-    "take_control": "Handing you control",
-    "agent_control": "Taking back over",
     "live_preview": "Sharing a live look",
     "show_preview": "Showing you the live preview",
 }

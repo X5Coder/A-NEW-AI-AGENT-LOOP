@@ -8,7 +8,7 @@
  */
 "use strict";
 
-import { modalShell, openModal, closeModal, toast } from "./ui.js?v=9";
+import { modalShell, openModal, closeModal, toast, animateIn } from "./ui.js?v=9";
 
 const CLAUDE_URL = "https://claude.ai";
 
@@ -521,6 +521,18 @@ async function refresh() {
     el.addEventListener("click", () => openTemplateDialog(t, saved));
     grid.appendChild(el);
   }
+  // Cards are built async AFTER navigation's animateIn ran on an empty grid,
+  // so they never received .anim. Animate them here with a tidy cascade
+  // (base + i*40ms inside animateIn) on every refresh: first open, revisit, save.
+  animateIn(grid, 0);
+  // Entrance uses fill "both", whose forwards frame would pin
+  // transform and block .mini-card:hover lift — drop .anim once it lands.
+  grid.querySelectorAll("[data-anim].anim").forEach((el) => {
+    el.addEventListener("animationend", () => {
+      el.classList.remove("anim");
+      el.style.animationDelay = "";
+    }, { once: true });
+  });
 }
 
 export async function initAiModels() {

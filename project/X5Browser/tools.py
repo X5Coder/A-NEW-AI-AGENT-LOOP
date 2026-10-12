@@ -457,7 +457,7 @@ def _library_kwargs(name: str, clean: dict) -> dict:
 
     pre_wait/post_wait are wrapper concerns (slept locally); reason is never
     a tool parameter and is always dropped. Without this, tools like
-    human_control/take_control fail with 'unexpected keyword argument'."""
+    human_control fail with 'unexpected keyword argument'."""
     import inspect as _inspect
 
     kwargs = {k: v for k, v in clean.items() if k not in ("pre_wait", "post_wait", "reason")}

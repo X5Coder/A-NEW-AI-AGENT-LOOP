@@ -5,7 +5,7 @@
  */
 "use strict";
 
-import { onPush } from "./events.js?v=1";
+import { onPush } from "./events.js?v=4";
 
 function setText(id, value) {
   const el = document.getElementById(id);
@@ -99,11 +99,12 @@ function populateStats(dash, cost, models, balance) {
 export async function initDashboard() {
   await refreshDashboard();
 
-  // Push replaces the old 30s poll: the server fans one dashboard snapshot
-  // to all tabs only when due (O(1) total, SaaS-safe).
+  // hello section 2 (dashboard bundle, hashed): render without extra POSTs.
+  // Accepts both the hashed {hash,data} section and the legacy flat bundle.
   onPush("dashboard", (d) => {
     if (!d) return;
-    populateStats(d.dashboard, d.cost, d.models, d.balance);
+    const b = d && typeof d === "object" && d.data && typeof d.data === "object" ? d.data : d;
+    populateStats(b.dashboard, b.cost, b.models, b.balance);
   });
 
   // A model connected/disconnected on the AI Models page: re-read status

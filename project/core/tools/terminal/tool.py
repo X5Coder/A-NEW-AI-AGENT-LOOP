@@ -1,9 +1,17 @@
 """
-terminal tool - execute shell commands JAILED inside X5Agent/Workspace only.
-Security: workdir must resolve inside Workspace; commands attempting escape are blocked.
+terminal tool - execute shell commands.
+
+Access scope (NO approval question in either scope — commands run immediately):
+- limited_access (DEFAULT): jailed inside X5Agent/Workspace only; any escape
+  attempt outside Workspace is blocked.
+- full_access: any command on the whole machine runs normally.
+
+Scope file: X5Agent/Data/database/terminal_access.json = {"scope": ...}.
+Set from the Agent permission menu (Restricted/Limited vs Full access).
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -17,6 +25,29 @@ from .events import format_event
 MAX_COMMAND_LEN = 2000
 DEFAULT_TIMEOUT = 30
 MAX_TIMEOUT = 120
+
+LIMITED = "limited_access"
+FULL = "full_access"
+
+
+def _access_scope() -> str:
+    """Current terminal scope: full_access or limited_access (default).
+
+    Reads X5Agent/Data/database/terminal_access.json; anything missing or
+    invalid falls back to limited_access. Never raises.
+    """
+    try:
+        import sys as _sys
+        proj = Path(__file__).resolve().parents[3]
+        if str(proj) not in _sys.path:
+            _sys.path.insert(0, str(proj))
+        from core.paths import data_db_file as _ddf
+        raw = json.loads(_ddf("terminal_access.json").read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and raw.get("scope") == FULL:
+            return FULL
+    except Exception:
+        pass
+    return LIMITED
 
 
 def _kill_tree(pid: int) -> None:
@@ -81,7 +112,9 @@ def _validate_command(v) -> str:
         raise ValueError("command must be non-empty")
     if len(s) > MAX_COMMAND_LEN:
         raise ValueError(f"command too long (max {MAX_COMMAND_LEN})")
-    # Jail: block any escape attempt outside Workspace.
+    if _access_scope() == FULL:
+        return s  # full access: any command on the whole machine, no question
+    # limited_access (default) jail: block any escape attempt outside Workspace.
     low = s.lower()
     ws_str = str(_workspace_root()).lower()
     if ".." in s:
@@ -116,6 +149,20 @@ def _validate_command(v) -> str:
 
 def _validate_workdir(v) -> Path | None:
     ws = _workspace_root()
+    if _access_scope() == FULL:
+        # full access: any folder on the machine (default cwd = Workspace).
+        if v is None:
+            return ws
+        if not isinstance(v, str):
+            raise TypeError("workdir must be string")
+        s = v.strip()
+        if not s:
+            return ws
+        p = Path(s)
+        p = p.resolve() if p.is_absolute() else (ws / s).resolve()
+        if not p.exists() or not p.is_dir():
+            raise FileNotFoundError(f"workdir not found: {p}")
+        return p
     if v is None:
         return ws
     if not isinstance(v, str):

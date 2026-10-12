@@ -13,23 +13,28 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 # Registry: name -> (module_path, spec)
+# CORE = always in context. workspace + document_search live in core/tools on
+# disk but are classified discoverable (behind tool_search) per product
+# decision. There is no "trigger" tool: trigger_search alone searches AND
+# manages all library + project triggers (core.tools.trigger.tool is only its
+# internal implementation module, never exposed to the model).
 _CORE_MAP = {
     "tool_search": "core.tools.tool_search.tool",
     "trigger_search": "core.tools.trigger_search.tool",
-    "trigger": "core.tools.trigger.tool",
     "question": "core.tools.question.tool",
     "vector_chat_search": "core.tools.vector_chat_search.tool",
-    "document_search": "core.tools.document_search.tool",
     "todo_list": "core.tools.todo_list.tool",
     "scheduler": "core.tools.scheduler.tool",
     "skills_search": "core.tools.skills_search.tool",
     "skills_view": "core.tools.skills_view.tool",
+    "skill_create": "plugins.core_plugins.skill_create.tool",
     "terminal": "core.tools.terminal.tool",
     "wait": "core.tools.wait.tool",
-    "workspace": "core.tools.workspace.tool",
 }
 
 _DISCOVERABLE_MAP = {
+    "workspace": "core.tools.workspace.tool",
+    "document_search": "core.tools.document_search.tool",
     "read_file": "plugins.core_plugins.read_file.tool",
     "write_file": "plugins.core_plugins.write_file.tool",
     "search_files": "plugins.core_plugins.search_files.tool",
@@ -40,7 +45,6 @@ _DISCOVERABLE_MAP = {
     "audio_extract": "plugins.core_plugins.audio_extract.tool",
     "embedding_memory": "plugins.core_plugins.embedding_memory.tool",
     "text_to_speech": "plugins.core_plugins.text_to_speech.tool",
-    "skill_create": "plugins.core_plugins.skill_create.tool",
     "image_memory": "plugins.core_plugins.image_memory.tool",
     "important_memory": "plugins.core_plugins.important_memory.tool",
     "http_request": "plugins.core_plugins.http_request.tool",

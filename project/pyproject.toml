@@ -1,6 +1,6 @@
 [project]
 name = "x5agent"
-version = "0.17.5"
+version = "0.20.2"
 description = "Professional Agent Loop with built-in embedding model and universal AI model connections (AI Models templates)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ dependencies = [
     "safetensors>=0.4",
     "numpy>=1.24",
     "pillow>=10.0",
-    "x5browser==1.5.1",
+    "x5browser==1.5.2",
     "markitdown>=0.1.0",
     "mammoth>=1.11",
     "openpyxl>=3.1",

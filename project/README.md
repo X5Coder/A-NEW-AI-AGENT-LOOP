@@ -4,7 +4,7 @@
 
 ## Requirements
 
-- **Python 3.10+** (3.12 recommended for full browser support — `x5browser==1.5.1`
+- **Python 3.10+** (3.12 recommended for full browser support — `x5browser==1.5.2`
   runs on 3.10+; the browser check is the source of truth).
 - Linux / Mac / Windows + `pip`.
 - TCP port **7777** reachable on the machine (the installer tries to open

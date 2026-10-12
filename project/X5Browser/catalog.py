@@ -1,7 +1,7 @@
 """
-X5Browser tool catalog — single source of truth for all 44 browser tools.
+X5Browser tool catalog — single source of truth for all 42 browser tools.
 
-43 mirror the library's TOOL_SCHEMAS 1:1; `show_preview` is a small project
+41 mirror the library's TOOL_SCHEMAS 1:1; `show_preview` is a small project
 wrapper over the library's live_preview (floating watch-only window for the UI).
 All 44 are CORE PLUGINS: always on, hidden from the UI, found via tool_search.
 4 DANGEROUS tools: fill_form, upload_files, export_page, console_command.
@@ -18,15 +18,15 @@ so they are NOT repeated here. Tools take no reason parameter at all.
 """
 from __future__ import annotations
 
-CORE_TOOLS: tuple[str, ...] = ()
+CORE_TOOLS: tuple[str, ...] = ("open_browser", "navigate", "page_snapshot", "click", "fill", "human_control")
 
 DANGEROUS_TOOLS = frozenset({"fill_form", "upload_files", "export_page", "console_command"})
 
 SPECS: list[dict] = [
-    # ---------------- CORE (4) ----------------
+    # ---------------- CORE (6: always in context, rest behind tool_search) ----------------
     {
         "name": "page_snapshot",
-        "core": False,
+        "core": True,
         "description": (
             "Numbered map of the page's interactive elements, including modals and iframes. "
             "The agent's eyes: call this first on any page and re-run when the page may have changed. "
@@ -42,7 +42,7 @@ SPECS: list[dict] = [
     },
     {
         "name": "navigate",
-        "core": False,
+        "core": True,
         "description": (
             "Move in the current tab: open an http(s) URL, or go back, forward, or reload. "
             "Use whenever the user gives a link or the task needs a new page. Waits for load by itself."
@@ -55,7 +55,7 @@ SPECS: list[dict] = [
     },
     {
         "name": "click",
-        "core": False,
+        "core": True,
         "description": (
             "Real mouse press on an element (scrolls to it, checks it is uncovered, clicks the center) "
             "or on viewport x,y coordinates. The agent's hand: ~80% of browsing acts are clicks. "
@@ -74,7 +74,7 @@ SPECS: list[dict] = [
     },
     {
         "name": "fill",
-        "core": False,
+        "core": True,
         "description": (
             "Type into one field: focuses it, clears the old content, writes genuine text, "
             "optionally presses Enter. Use for search boxes, logins and any single input. "
@@ -88,7 +88,7 @@ SPECS: list[dict] = [
             "delay_ms": {"type": "number", "required": False, "description": "Per-character delay in ms. Default 0."},
         },
     },
-    # ---------------- DISCOVERABLE (32) ----------------
+    # ---------------- DISCOVERABLE (36: behind tool_search) ----------------
     {
         "name": "read_text",
         "core": False,
@@ -539,7 +539,7 @@ SPECS: list[dict] = [
     },
     {
         "name": "open_browser",
-        "core": False,
+        "core": True,
         "description": (
             "Start the hidden Chrome, or answer that it already runs plus its state. "
             "This is the ONLY tool that starts the browser: every other tool fails "
@@ -580,32 +580,15 @@ SPECS: list[dict] = [
     },
     {
         "name": "human_control",
-        "core": False,
+        "core": True,
         "description": (
-            "Hand the SAME browser to the user and answer the control link + JSON (does not block). "
-            "Give control back with agent_control. Use when the user must type or click."
+            "Hand the SAME live browser to the user and answer the control link + JSON "
+            "(does not block). The only handoff tool: the user returns control from "
+            "the UI when done, then the agent continues. Use when the user must type or click."
         ),
         "inputs": {
             "expects": {"type": "string", "required": False, "description": "captcha, 2fa, credentials or other."},
         },
-    },
-    {
-        "name": "take_control",
-        "core": False,
-        "description": (
-            "Hand control to the user and answer the CONTROL link (the same live browser, not "
-            "watch-only). The user drives; the agent waits."
-        ),
-        "inputs": {},
-    },
-    {
-        "name": "agent_control",
-        "core": False,
-        "description": (
-            "Resume agent control and answer the WATCH-only link (the user watches but cannot control). "
-            "Call after the user finishes driving."
-        ),
-        "inputs": {},
     },
     {
         "name": "live_preview",

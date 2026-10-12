@@ -7,19 +7,24 @@
 
 import { openModal, closeModal, toast } from "./ui.js?v=8";
 import { navigate } from "./navigation.js?v=10";
-import { onPush } from "./events.js?v=1";
-import { onWsRaw, sendOp } from "./ws.js?v=3";
+import { onPush } from "./events.js?v=4";
 import { remoteLiveUrl } from "./live-url.js?v=1";
 
-// WS answer/cancel helpers: same server ops as POST /api/chat_answer|cancel.
-async function wsAnswer(body) {
-  const r = await sendOp("chat_answer", body || {});
-  const ok = Boolean(r && r.ok);
-  return { ok, status: ok ? 200 : 400 };
+// POST helpers: browser -> server is plain POST only.
+// Server -> browser streaming is SSE (the POST response body below,
+// plus GET /api/events for pushes).
+async function postAnswer(body) {
+  const res = await fetch("/api/chat_answer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const ok = res.ok;
+  return { ok, status: res.status };
 }
-async function wsCancel() {
+async function postCancel() {
   try {
-    await sendOp("chat_cancel", {});
+    await fetch("/api/chat_cancel", { method: "POST" });
   } catch (_) {}
 }
 
@@ -34,6 +39,9 @@ let attachPreview = null;
 let composerAttachBox = null;
 let pendingAttachments = [];
 let mentionMenu = null;
+let pendingSkill = null; // {name, instructions} — picked via "/" menu, injected on send
+let pendingWsRefs = []; // [{path, name}] — picked via "@" menu, sent as metadata
+let skillsCache = null; // {at, list} — short-lived GET /api/skills cache
 
 const MODE_KEY = "x5-agent-mode";
 let agentMode = "restricted";
@@ -1254,12 +1262,173 @@ function cleanHistoryText(raw) {
   return { text: clean.slice(0, MAX_MESSAGE), files };
 }
 
+const HIST_PAGE = 50; // one page = 50 older messages per scroll-up load
+let histLoadingMore = false;
+let histHasMore = true; // server says so per page; false = reached the top
+let histOldestId = null; // id of the oldest rendered message (next page goes before it)
+
 async function loadHistory() {
   try {
+    histHasMore = true;
+    histOldestId = null;
     const res = await fetch("/api/conversation", { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
     const msgs = Array.isArray(data?.messages) ? data.messages : [];
+    renderHistoryMessages(msgs);
+    try {
+      const valid = msgs.filter((m) => m && m.id && (m.role === "user" || m.role === "assistant"));
+      histOldestId = valid.length ? String(valid[0].id) : null;
+      // Full-list load: older pages exist only when the list was capped.
+      histHasMore = Array.isArray(data?.messages) && typeof data?.has_more === "boolean"
+        ? data.has_more : false;
+    } catch (_) {}
+  } catch (_) {
+    // keep welcome message on failure
+  }
+}
+
+async function loadOlderHistory() {
+  // Scroll-up pagination: fetch the 50 messages BEFORE the oldest rendered
+  // one and prepend them above (position preserved, no jump).
+  if (histLoadingMore || !histHasMore || !histOldestId) return;
+  if (!chatScroll || !chatInner) return;
+  histLoadingMore = true;
+  try {
+    const res = await fetch(
+      "/api/conversation?limit=" + HIST_PAGE + "&before_id=" + encodeURIComponent(histOldestId),
+      { cache: "no-store" }
+    );
+    if (!res.ok) return;
+    const data = await res.json();
+    const msgs = Array.isArray(data?.messages) ? data.messages : [];
+    if (!msgs.length) {
+      histHasMore = false;
+      return;
+    }
+    const prevHeight = chatScroll.scrollHeight;
+    prependHistoryMessages(msgs);
+    try {
+      const valid = msgs.filter((m) => m && m.id);
+      if (valid.length) histOldestId = String(valid[0].id);
+    } catch (_) {}
+    histHasMore = data?.has_more !== false && msgs.length >= HIST_PAGE ? true : Boolean(data?.has_more);
+    if (msgs.length < HIST_PAGE && !data?.has_more) histHasMore = false;
+    // Keep the viewport anchored: new content above shifts scroll down equally.
+    try {
+      chatScroll.scrollTop += chatScroll.scrollHeight - prevHeight;
+    } catch (_) {}
+  } catch (_) {
+    // keep current view on failure
+  } finally {
+    histLoadingMore = false;
+  }
+}
+
+function buildHistoryNode(m) {
+  // Builds (but does not attach) one persisted history bubble. Returns null
+  // when the message carries nothing displayable. Never throws.
+  try {
+    if (!m || (m.role !== "user" && m.role !== "assistant") || !String(m.content || "").trim()) return null;
+    if (m.role === "user") {
+      const cleaned = cleanHistoryText(m.content);
+      if (!cleaned.text && !cleaned.files.length) return null;
+      const el = document.createElement("div");
+      el.className = "msg user";
+      applyMsgDir(el, cleaned.text, "rtl");
+      const content = document.createElement("div");
+      content.className = "msg-content";
+      cleaned.files.forEach((fname) => {
+        const badge = document.createElement("div");
+        badge.className = "msg-attach";
+        badge.innerHTML = attachBadgeIcon("image");
+        const nm = document.createElement("span");
+        nm.className = "msg-attach-name";
+        nm.textContent = fname;
+        badge.appendChild(nm);
+        content.appendChild(badge);
+      });
+      if (cleaned.text) {
+        const wrapper = document.createElement("div");
+        wrapper.innerHTML = formatRich(cleaned.text);
+        content.appendChild(wrapper);
+      }
+      el.appendChild(content);
+      if (m.id) el.dataset.mid = String(m.id);
+      attachUserBar(el);
+      return el;
+    }
+    const rawText = String(m.content || "");
+    const el = document.createElement("div");
+    el.className = "msg agent";
+    applyMsgDir(el, rawText, "ltr");
+    const content = document.createElement("div");
+    content.className = "msg-content";
+    const p = document.createElement("div");
+    p.innerHTML = formatRich(rawText.slice(0, MAX_MESSAGE));
+    content.appendChild(p);
+    el.appendChild(content);
+    try {
+      const histSteps = Array.isArray(m.steps) ? m.steps.slice(0, 12) : [];
+      const seenHist = new Set();
+      const histItems = [];
+      histSteps.forEach((s, i) => {
+        const key = typeof s === "string" ? `str:${i}:${s}` : (s?.key || `idx:${i}:${s?.event || ""}`);
+        if (!key || seenHist.has(key)) return;
+        seenHist.add(key);
+        try {
+          const item = createStepItem(s);
+          completeStepItem(item, {});
+          histItems.push(item);
+        } catch (_) {}
+      });
+      if (histItems && histItems.length) {
+        const block = createThinkingBlock();
+        histItems.forEach((item) => block._stepsInner.appendChild(item));
+        settleThinkingBlock(block, m.elapsed);
+        p.before(block);
+      }
+    } catch (_) {}
+    const rich = document.createElement("div");
+    rich.innerHTML = formatRich(rawText);
+    p.replaceWith(rich);
+    appendFinalImages(el, m.images);
+    appendFinalVoice(el, m.audio);
+    el.dataset.raw = rawText;
+    if (m.id) el.dataset.mid = String(m.id);
+    attachAssistantBar(el, rawText);
+    return el;
+  } catch (_) {
+    return null;
+  }
+}
+
+function prependHistoryMessages(msgs) {
+  // Prepends one older page ABOVE the current top (oldest-first order).
+  try {
+    if (!Array.isArray(msgs) || !msgs.length || !chatInner) return;
+    hideWelcome();
+    const frag = document.createDocumentFragment();
+    msgs.forEach((m) => {
+      const node = buildHistoryNode(m);
+      if (node) frag.appendChild(node);
+    });
+    if (frag.childNodes.length) chatInner.prepend(frag);
+  } catch (_) {}
+}
+
+function onHelloChatLast50(msgs) {
+  // hello section 1 (most important first): last-50 render immediately,
+  // but never wipe an in-flight run — same keep-rules as loadHistory.
+  try {
+    if (!Array.isArray(msgs) || !msgs.length) return;
+    if (activeRun || activeThinking) return; // a run owns the UI right now
+    renderHistoryMessages(msgs);
+  } catch (_) {}
+}
+
+function renderHistoryMessages(msgs) {
+  try {
     const valid = msgs.filter(
       (m) => m && (m.role === "user" || m.role === "assistant") && String(m.content || "").trim()
     );
@@ -1549,16 +1718,27 @@ function openShotLightbox(src) {
   document.body.classList.add("shotbox-open");
 }
 
-async function sendStream(value, attachments, thinking) {
-  // Live event streaming over the ONE ws.js socket — returns true when
-  // fully handled, false to fall back. Frames arrive as raw WS messages
-  // (same shapes as the old SSE frames), so rendering is unchanged.
+async function sendStream(value, attachments, thinking, skipHistoryIds) {
+  // Chat request: POST /api/chat_stream, progress streams back as SSE
+  // frames in the response body (server -> browser SSE, browser -> server
+  // POST — no WebSocket). Returns true when fully handled, false to fall
+  // back to the blocking endpoint.
   activeThinking = thinking;
   const myGen = ++runGen;
-  activeRun = { cancelled: false, gen: myGen, thinking };
-  let started;
+  const ctl = new AbortController();
+  activeRun = { cancelled: false, gen: myGen, thinking, abort: () => { try { ctl.abort(); } catch (_) {} } };
+  let res;
+  const streamBody = { message: value, attachments, mode: agentMode };
+  if (pendingSkill) streamBody.skill = pendingSkill;
+  if (pendingWsRefs.length) streamBody.workspace_refs = pendingWsRefs.map((r) => ({ name: r.name, path: r.path }));
+  if (skipHistoryIds && skipHistoryIds.length) streamBody.skip_history_ids = skipHistoryIds;
   try {
-    started = await sendOp("chat_stream", { message: value, attachments, mode: agentMode });
+    res = await fetch("/api/chat_stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(streamBody),
+      signal: ctl.signal,
+    });
   } catch (err) {
     const wasCancelled = Boolean(activeRun && activeRun.cancelled);
     activeRun = null;
@@ -1567,7 +1747,7 @@ async function sendStream(value, attachments, thinking) {
     }
     return false;
   }
-  if (!started || !started.ok) {
+  if (!res || !res.ok || !res.body) {
     activeRun = null;
     return false;
   }
@@ -1740,8 +1920,8 @@ async function sendStream(value, attachments, thinking) {
     else collected.push(entry);
     scrollToBottom();
   }
-  // WS frames arrive one message at a time on the same socket (same shapes
-  // as the old SSE frames). Wait for done/error/cancelled of THIS turn.
+  // SSE frames arrive in the POST response body ("data: {...}\n\n" each).
+  // Read them live with a streaming reader — instant, no polling.
   let doneReceived = false;
   let turnResult = null; // true = handled, false = fall back
   function onFrame(msg2) {
@@ -1795,8 +1975,32 @@ async function sendStream(value, attachments, thinking) {
           turnResult = true;
           return;
         } else if (msg2?.type === "done") {
+          // Sync mark FIRST: the server already persisted this reply. The
+          // reader loop must stop here and no blocking fallback may run —
+          // the async render below (typing animation) takes seconds, and
+          // without this the stream close reads as "not done" and resends
+          // via /api/chat, persisting a second duplicate reply.
+          doneReceived = true;
+          turnResult = true;
           (async () => {
             try {
+          // Push beat the stream: chat_done fired first and the history
+          // reload already rendered this persisted reply (same assistant
+          // id). Drop local artifacts and render nothing — one copy only.
+          try {
+            const _aid = msg2 && msg2.ids && msg2.ids.assistant;
+            const _key = _aid ? String(_aid).replace(/[^0-9a-zA-Z-]/g, "") : "";
+            if (_key && chatInner && chatInner.querySelector('.msg.assistant[data-mid="' + _key + '"]')) {
+              try { thinking.remove(); } catch (_) {}
+              try { if (shell) shell.remove(); } catch (_) {}
+              shell = null;
+              doneReceived = true;
+              activeThinking = null;
+              activeRun = null;
+              turnResult = true;
+              return;
+            }
+          } catch (_) {}
           const replyText = String(msg2.reply || "");
           // Finalization: the thinking-block settles (Working stops,
           // collapsed) and stays above; the final reply is always last.
@@ -1884,8 +2088,11 @@ async function sendStream(value, attachments, thinking) {
         }
     } catch (_) {}
   }
-  onWsRaw(onFrame);
+  // Stream the SSE body: split on blank lines, parse each "data:" frame.
   try {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buf = "";
     for (;;) {
       if (turnResult !== null) break;
       try {
@@ -1894,11 +2101,41 @@ async function sendStream(value, attachments, thinking) {
           break;
         }
       } catch (_) {}
-      await new Promise((r) => setTimeout(r, 50));
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (_) {
+        break;
+      }
+      if (chunk.done) break;
+      try {
+        buf += decoder.decode(chunk.value, { stream: true });
+      } catch (_) {
+        break;
+      }
+      let idx;
+      while (turnResult === null && (idx = buf.indexOf("\n\n")) >= 0) {
+        const part = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of part.split("\n")) {
+          const t = line.trim();
+          if (!t.startsWith("data:")) continue;
+          let msg2 = null;
+          try {
+            msg2 = JSON.parse(t.slice(5).trim());
+          } catch (_) {
+            continue;
+          }
+          if (msg2 && typeof msg2 === "object") onFrame(msg2);
+          if (turnResult !== null) break;
+        }
+      }
     }
+    try { await reader.cancel(); } catch (_) {}
+  } catch (_) {
+    // Genuine transport break below decides fallback vs quiet exit.
   } finally {
     try {
-      // Unsubscribe this turn (ws.js has no off; gen-guard makes it a no-op).
       turnResult = turnResult === null ? true : turnResult;
     } catch (_) {}
   }
@@ -1941,12 +2178,16 @@ function setSending(sending) {
   }
 }
 
-async function sendBlocking(value, attachments, thinking) {
+async function sendBlocking(value, attachments, thinking, skipHistoryIds) {
   try {
+    const blockBody = { message: value, attachments, mode: agentMode };
+    if (pendingSkill) blockBody.skill = pendingSkill;
+    if (pendingWsRefs.length) blockBody.workspace_refs = pendingWsRefs.map((r) => ({ name: r.name, path: r.path }));
+    if (skipHistoryIds && skipHistoryIds.length) blockBody.skip_history_ids = skipHistoryIds;
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: value, attachments, mode: agentMode }),
+      body: JSON.stringify(blockBody),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -2001,7 +2242,10 @@ async function handleSend() {
   }
   const value = composerInput.value.trim().slice(0, MAX_MESSAGE);
   const pending = pendingAttachments.slice();
-  if (!value && !pending.length) return;
+  // Picks count only while their "@name" / "/name" token is still in the text.
+  if (pendingSkill && !hasToken(value, "/", pendingSkill.name)) pendingSkill = null;
+  pendingWsRefs = pendingWsRefs.filter((r) => hasToken(value, "@", r.name));
+  if (!value && !pending.length && !pendingSkill && !pendingWsRefs.length) return;
   if (isUploadingFiles()) {
     toast("Waiting for files to finish uploading…");
     return;
@@ -2049,11 +2293,19 @@ async function handleSend() {
   autoResize();
   clearAttachment();
   await executeAgentTurn(value, attachments);
+  // Picks are one-shot: a new turn starts clean.
+  pendingSkill = null;
+  pendingWsRefs = [];
 }
 
-async function executeAgentTurn(value, attachments) {
+async function executeAgentTurn(value, attachments, opts) {
   // Runs one agent request WITHOUT appending a new user bubble.
   // Used by normal send (bubble already appended) and by resend/regenerate.
+  // Guard: only ONE turn runs at a time — a second call while one is active
+  // is ignored (that was the double-reply bug: edit/regenerate racing send).
+  // opts.skipHistoryIds: when re-sending an EDITED message, the server reuses
+  // the existing persisted user bubble instead of appending a duplicate.
+  if (activeRun) return;
   // The composer stays enabled so the user can type during generation
   // (pressing SEND while generating stops the loop, typed text is kept).
   // A catch-up run from a pre-refresh generation no longer owns the UI.
@@ -2066,15 +2318,16 @@ async function executeAgentTurn(value, attachments) {
   setSending(true);
 
   const thinking = addThinking(value);
+  const skipIds = opts && Array.isArray(opts.skipHistoryIds) ? opts.skipHistoryIds : null;
   try {
     let handled = false;
     try {
-      handled = await sendStream(value, attachments, thinking);
+      handled = await sendStream(value, attachments, thinking, skipIds);
     } catch (e) {
       if (e && e.aborted) return;
       handled = false;
     }
-    if (!handled) await sendBlocking(value, attachments, thinking);
+    if (!handled) await sendBlocking(value, attachments, thinking, skipIds);
   } finally {
     // Only clear state this turn still owns — a newer turn may have taken
     // over while this one was winding down.
@@ -2092,6 +2345,9 @@ function autoResize() {
   if (!composerInput) return;
   composerInput.style.height = "auto";
   composerInput.style.height = `${Math.min(composerInput.scrollHeight, 160)}px`;
+  try {
+    renderComposerHL();
+  } catch (_) {}
   // Edge glow while the user is writing (simple, transform-free pulse in CSS).
   try {
     document.getElementById("composer")?.classList.toggle(
@@ -2476,7 +2732,35 @@ function initAttachments() {
   });
 }
 
-/* ---------- voice: record -> local Whisper STT -> raw text into composer ---------- */
+/* ---------- voice: record -> STT model -> raw text into composer ---------- */
+// Pre-check: the STT template must be connected BEFORE recording.
+// Missing -> toast + auto-open the STT template dialog (guides to connect).
+async function ensureSttModel() {
+  try {
+    const res = await fetch("/api/ai_models", { cache: "no-store" });
+    if (!res.ok) return true; // fail-open: let the STT endpoint answer
+    const data = await res.json().catch(() => null);
+    const models = data && data.models ? data.models : data;
+    const stt = models ? models.stt || models.STT : null;
+    if (stt && (stt.configured || stt.model_name || stt.connected)) return true;
+  } catch (_) {
+    return true;
+  }
+  try {
+    toast("Connect a voice-to-text model first");
+  } catch (_) {}
+  try {
+    const { navigate } = await import("./navigation.js?v=10");
+    navigate("ai-models");
+  } catch (_) {}
+  try {
+    window.dispatchEvent(new CustomEvent("x5:open-model", { detail: { kind: "stt" } }));
+  } catch (_) {}
+  try {
+    if (typeof window.openAiModelDialog === "function") window.openAiModelDialog("stt");
+  } catch (_) {}
+  return false;
+}
 let mediaRecorder = null;
 let audioChunks = [];
 let isRecording = false;
@@ -2803,10 +3087,17 @@ async function finishRecording() {
 function initMic() {
   const micBtn = document.getElementById("micBtn");
   if (micBtn) {
-    micBtn.addEventListener("click", () => {
+    micBtn.addEventListener("click", async () => {
       if (micBtn.classList.contains("loading")) return;
       if (isRecording) stopVoiceToComposer();
-      else startRecording();
+      else {
+        // STT gate: no model -> toast + auto-open the STT dialog, no recording.
+        try {
+          const ok = await ensureSttModel();
+          if (!ok) return;
+        } catch (_) {}
+        startRecording();
+      }
     });
   }
   document.getElementById("voiceCancelBtn")?.addEventListener("click", cancelVoiceRecording);
@@ -2876,72 +3167,565 @@ function initUserMessageGestures() {
   chatScroll?.addEventListener("scroll", hideAllUserBars, { passive: true });
 }
 
-/* ---------- @mention image picker ---------- */
+/* ---------- @ / pickers: uploads + Workspace files, "/" skills ---------- */
 function hideMentionMenu() {
   if (mentionMenu) {
     mentionMenu.remove();
     mentionMenu = null;
   }
+  wsPickerSeq++;
+  closePathbar(true);
 }
 
-function showMentionMenu(query) {
-  const images = pendingImages();
-  const q = String(query || "").toLowerCase();
-  const matches = images
-    .map((item, i) => ({ item, label: `@${imageLabelFor(i)}` }))
-    .filter((m) => m.label.toLowerCase().includes(q));
-  if (!matches.length) {
-    hideMentionMenu();
-    return;
-  }
-  if (!mentionMenu) {
-    mentionMenu = document.createElement("div");
-    mentionMenu.className = "mention-menu";
-    document.querySelector(".composer")?.appendChild(mentionMenu);
-  }
-  mentionMenu.innerHTML = "";
-  const title = document.createElement("div");
-  title.className = "mention-title";
-  title.textContent = "Attach to message";
-  mentionMenu.appendChild(title);
-  matches.forEach((m) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "mention-item";
-    btn.innerHTML = `<span class="mention-label"></span><span class="mention-name"></span>`;
-    btn.querySelector(".mention-label").textContent = m.label;
-    btn.querySelector(".mention-name").textContent = m.item.name;
-    btn.addEventListener("click", () => insertMention(m.label));
-    mentionMenu.appendChild(btn);
-  });
-}
-
-function insertMention(label) {
+function replaceTriggerToken(text) {
   if (!composerInput) return;
   const pos = composerInput.selectionStart ?? composerInput.value.length;
   const before = composerInput.value.slice(0, pos);
   const after = composerInput.value.slice(pos);
-  const at = before.lastIndexOf("@");
-  const head = at >= 0 ? before.slice(0, at) : before;
-  composerInput.value = `${head}${label} ${after}`;
+  const m = before.match(/(^|\s)[@/][^@\n]*$/);
+  const head = m ? before.slice(0, m.index + m[1].length) : before;
+  composerInput.value = `${head}${text} ${after}`;
+  // Auto trailing space + caret right after it, so writing continues cleanly.
+  try {
+    const caret = Math.min(head.length + text.length + 1, composerInput.value.length);
+    composerInput.setSelectionRange(caret, caret);
+  } catch (_) {}
   hideMentionMenu();
   composerInput.focus();
   autoResize();
+  renderComposerHL();
+}
+
+/* Pathbar picker state (breadcrumb bar attached above the composer). */
+let wsPickerDir = "";
+let wsPickerSeq = 0;
+
+/* Composer highlight: ACTIVE @file / /skill tokens paint blue in a backdrop
+   layer under the transparent-text textarea (same proven pattern as the
+   AI-models protocol editor). Inactive @... stays the default text color. */
+let composerHL = null;
+
+function escapeHL(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function hlTokenRanges(text) {
+  // [{a, b, kind, key}] of ACTIVE tokens only. kind: "ws" (key=path),
+  // "skill" (key=name), "img" (upload label, no navigation target).
+  const ranges = [];
+  const push = (prefix, name, kind, key) => {
+    if (!name) return;
+    try {
+      const extra = prefix === "/" ? "/" : "";
+      const re = new RegExp(`(?<![\\w@${extra}])` + escapeRegExp(prefix + name) + `(?![\\w\\u0600-\\u06FF])`, "gu");
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        if (m[0]) ranges.push({ a: m.index, b: m.index + m[0].length, kind, key });
+        if (re.lastIndex === m.index) re.lastIndex++;
+      }
+    } catch (_) {}
+  };
+  pendingWsRefs.forEach((r) => push("@", r.name, "ws", r.path));
+  if (pendingSkill) push("/", pendingSkill.name, "skill", pendingSkill.name);
+  pendingAttachments.forEach((a, i) => {
+    if (a && a.type === "image") push("@", imageLabelFor(i), "img", null);
+  });
+  ranges.sort((x, y) => x.a - y.a || y.b - x.b);
+  const clean = [];
+  for (const r of ranges) {
+    if (clean.length && r.a < clean[clean.length - 1].b) continue; // overlap guard
+    clean.push(r);
+  }
+  return clean;
+}
+
+function tokenAtCaret() {
+  // Blue token strictly under the caret (edges count as edit, not a hit).
+  try {
+    if (!composerInput) return null;
+    const pos = composerInput.selectionStart;
+    if (pos == null || pos !== composerInput.selectionEnd) return null;
+    const ranges = hlTokenRanges(composerInput.value);
+    return ranges.find((r) => pos > r.a && pos < r.b) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function revealWorkspaceFile(path) {
+  // Jump to the Workspace page with that file revealed exactly at its path.
+  try {
+    const rel = String(path || "").replace(/\\/g, "/").replace(/^\/+/, "").slice(0, 500);
+    if (!rel || rel.split("/").includes("..")) return;
+    const parts = rel.split("/").filter(Boolean);
+    const name = parts.pop() || "";
+    window.dispatchEvent(new CustomEvent("x5:reveal-workspace", { detail: { dir: parts.join("/"), name } }));
+    navigate("workspace");
+  } catch (_) {}
+}
+
+function revealSkill(name) {
+  // Jump to the Skills page and open that skill's detail.
+  try {
+    const nm = String(name || "").slice(0, 100);
+    if (!nm.trim()) return;
+    navigate("skills");
+    window.dispatchEvent(new CustomEvent("x5:reveal-skill", { detail: { name: nm } }));
+  } catch (_) {}
+}
+
+function renderComposerHL() {
+  if (!composerInput || !composerHL) return;
+  let text = "";
+  try {
+    text = composerInput.value;
+  } catch (_) {
+    return;
+  }
+  let selA = -1;
+  let selB = -1;
+  try {
+    selA = composerInput.selectionStart ?? -1;
+    selB = composerInput.selectionEnd ?? -1;
+  } catch (_) {}
+  const ranges = hlTokenRanges(text);
+  const cuts = new Set([0, text.length]);
+  ranges.forEach((r) => {
+    cuts.add(r.a);
+    cuts.add(r.b);
+  });
+  const hasSel = selA >= 0 && selB > selA;
+  const sA = Math.min(selA, text.length);
+  const sB = Math.min(selB, text.length);
+  if (hasSel) {
+    cuts.add(sA);
+    cuts.add(sB);
+  }
+  const pts = [...cuts].sort((x, y) => x - y);
+  let html = "";
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    if (b <= a) continue;
+    const chunk = text.slice(a, b);
+    const isTok = ranges.some((r) => a >= r.a && b <= r.b);
+    const isSel = hasSel && a >= sA && b <= sB;
+    if (isSel) html += `<span class="hl-sel">${escapeHL(chunk)}</span>`;
+    else if (isTok) html += `<span class="hl-tok">${escapeHL(chunk)}</span>`;
+    else html += escapeHL(chunk);
+  }
+  composerHL.innerHTML = html;
+  try {
+    // Mirror the textarea's RESOLVED base direction (not auto): mixed
+    // Arabic/Latin text then lays out identically in both layers.
+    const cs = window.getComputedStyle(composerInput);
+    if (cs && cs.direction) composerHL.style.direction = cs.direction;
+    if (cs && cs.textAlign) composerHL.style.textAlign = cs.textAlign;
+    composerHL.scrollTop = composerInput.scrollTop;
+    composerHL.scrollLeft = composerInput.scrollLeft;
+  } catch (_) {}
+}
+
+function initComposerHL() {
+  if (!composerInput || composerHL) return;
+  try {
+    const wrap = document.createElement("div");
+    wrap.className = "composer-hlwrap";
+    composerInput.parentNode.insertBefore(wrap, composerInput);
+    wrap.appendChild(composerInput);
+    const bd = document.createElement("div");
+    bd.className = "composer-hl";
+    bd.setAttribute("aria-hidden", "true");
+    wrap.insertBefore(bd, composerInput);
+    composerHL = bd;
+    ["input", "click", "keyup", "select"].forEach((ev) => composerInput.addEventListener(ev, renderComposerHL));
+    // Clicking a BLUE token jumps to its home (file -> Workspace at its
+    // path, skill -> Skills detail). Edges/drag-select stay for editing.
+    composerInput.addEventListener("click", () => {
+      try {
+        setTimeout(() => {
+          const hit = tokenAtCaret();
+          if (!hit || hit.kind === "img" || !hit.key) return;
+          if (hit.kind === "ws") revealWorkspaceFile(hit.key);
+          else if (hit.kind === "skill") revealSkill(hit.key);
+        }, 0);
+      } catch (_) {}
+    });
+    composerInput.addEventListener("scroll", () => {
+      if (!composerHL) return;
+      try {
+        composerHL.scrollTop = composerInput.scrollTop;
+        composerHL.scrollLeft = composerInput.scrollLeft;
+      } catch (_) {}
+    }, { passive: true });
+    renderComposerHL();
+  } catch (_) {
+    composerHL = null;
+  }
+}
+
+const WS_FOLDER_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"></path></svg>';
+const WS_FILE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 2.5H6.5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8.5Z"></path><path d="M13.5 2.5v6h6"></path></svg>';
+
+function ensurePathbar() {
+  const form = document.getElementById("composer");
+  if (!form) return null;
+  let bar = document.getElementById("wsPathbar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.className = "pk-bar";
+    bar.id = "wsPathbar";
+    form.prepend(bar);
+  }
+  bar.classList.remove("closing");
+  return bar;
+}
+
+function closePathbar(animated) {
+  const bar = document.getElementById("wsPathbar");
+  if (!bar) return;
+  if (!animated) {
+    bar.remove();
+    return;
+  }
+  if (bar.classList.contains("closing")) return;
+  bar.classList.add("closing");
+  bar.addEventListener("animationend", () => bar.remove(), { once: true });
+  setTimeout(() => {
+    if (bar.isConnected) bar.remove();
+  }, 300);
+}
+
+function wsChip(svg, text, onClick, isCurrent) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "pk-chip clickable select-none" + (isCurrent ? " pk-current" : "");
+  b.setAttribute("aria-haspopup", "dialog");
+  b.setAttribute("aria-expanded", "false");
+  if (svg) {
+    const icon = document.createElement("span");
+    icon.innerHTML = svg;
+    icon.style.display = "inline-flex";
+    b.appendChild(icon);
+  }
+  const label = document.createElement("span");
+  label.textContent = text;
+  b.appendChild(label);
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function wsRow(svg, name, meta, onClick, iconCls) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "pk-row";
+  const icon = document.createElement("span");
+  icon.innerHTML = svg;
+  icon.style.display = "inline-flex";
+  if (iconCls) icon.className = iconCls;
+  b.appendChild(icon);
+  const label = document.createElement("span");
+  label.textContent = name;
+  label.style.overflow = "hidden";
+  label.style.textOverflow = "ellipsis";
+  label.style.whiteSpace = "nowrap";
+  b.appendChild(label);
+  const m = document.createElement("span");
+  m.className = "pk-meta";
+  m.textContent = meta;
+  b.appendChild(m);
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function wsSection(title) {
+  const d = document.createElement("div");
+  d.className = "pk-section";
+  d.textContent = title;
+  return d;
+}
+
+function wsNav(rel) {
+  // Enter a folder (or climb via breadcrumb): navigation only, writes
+  // nothing into the composer. Only picking a FILE inserts "@name".
+  wsPickerDir = rel || "";
+  showMentionMenu(wsPickerDir ? `${wsPickerDir}/` : "");
+  if (composerInput) {
+    try {
+      composerInput.focus({ preventScroll: true });
+    } catch (_) {
+      composerInput.focus();
+    }
+  }
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasToken(value, prefix, name) {
+  // Boundary-aware "@name" / "/name" check (plain includes() would match
+  // "@note" inside "@notes" or "/b" inside "a/b").
+  try {
+    const extra = prefix === "/" ? "/" : "";
+    const re = new RegExp(`(?<![\\w@${extra}])${escapeRegExp(prefix + name)}(?![\\w\\u0600-\\u06FF])`, "u");
+    return re.test(String(value));
+  } catch (_) {
+    return String(value).includes(prefix + name);
+  }
+}
+
+function continuesActivePick(q, prefix) {
+  // True while the trigger text belongs to an already-picked (blue) token:
+  // typing right after it, or DELETING chars inside it — the panel must
+  // never pop open for these keystrokes (no fetch, no flash).
+  const s = String(q || "");
+  if (!s) return false;
+  const names = [];
+  if (prefix === "@") {
+    pendingWsRefs.forEach((r) => names.push(r.name));
+    pendingAttachments.forEach((a, i) => {
+      if (a && a.type === "image") names.push(imageLabelFor(i));
+    });
+  } else if (pendingSkill) {
+    names.push(pendingSkill.name);
+  }
+  const low = s.toLowerCase();
+  return names.some((n) => {
+    if (!n) return false;
+    const nl = String(n).toLowerCase();
+    return s === n || s.startsWith(n + " ") || s.startsWith(n + "\n") || nl.startsWith(low);
+  });
+}
+
+async function showMentionMenu(query) {
+  // "@" picker: breadcrumb pathbar above the template (uploads + dir contents).
+  const mySeq = ++wsPickerSeq;
+  const raw = String(query || "").replace(/^"+|"+$/g, "");
+  let dir = "";
+  let filter = raw.toLowerCase();
+  const slash = raw.lastIndexOf("/");
+  if (slash >= 0) {
+    dir = raw.slice(0, slash);
+    filter = raw.slice(slash + 1).toLowerCase();
+  }
+  wsPickerDir = dir;
+  let entries = null;
+  try {
+    const res = await fetch("/api/workspace?path=" + encodeURIComponent(dir), { cache: "no-store" });
+    const data = await res.json().catch(() => null);
+    if (res.ok && data && Array.isArray(data.entries)) entries = data.entries;
+  } catch (_) {
+    entries = null;
+  }
+  if (mySeq !== wsPickerSeq) return; // stale keystroke, a newer fetch owns the bar
+  if (!entries && !pendingAttachments.length) {
+    hideMentionMenu();
+    return;
+  }
+  renderPathbar(dir, filter, entries || []);
+}
+
+function renderPathbar(dir, filter, entries) {
+  const bar = ensurePathbar();
+  if (!bar) return;
+  bar.innerHTML = "";
+  // Breadcrumb: Workspace root + segments (click any of them to go back).
+  const crumb = document.createElement("div");
+  crumb.className = "pk-crumb";
+  crumb.appendChild(wsChip(null, "Workspace", () => wsNav(""), !dir));
+  if (dir) {
+    let acc = "";
+    const segs = dir.split("/").filter(Boolean);
+    segs.forEach((seg, i) => {
+      acc = acc ? `${acc}/${seg}` : seg;
+      const sep = document.createElement("span");
+      sep.className = "pk-sep";
+      sep.textContent = "\\";
+      crumb.appendChild(sep);
+      const target = acc;
+      crumb.appendChild(wsChip(null, seg, () => wsNav(target), i === segs.length - 1));
+    });
+  }
+  bar.appendChild(crumb);
+  // Pending uploads (the send-template content) first.
+  const upRows = [];
+  pendingAttachments.forEach((item, i) => {
+    const label = item.type === "image" ? `@${imageLabelFor(i)}` : `@${item.name}`;
+    if (!filter || label.toLowerCase().includes(filter) || String(item.name || "").toLowerCase().includes(filter)) {
+      upRows.push({ item, i, label });
+    }
+  });
+  // Directory contents: folders enter, files pick + animated close.
+  const shown = entries.filter(
+    (e) => e && e.name && (!filter || String(e.name).toLowerCase().includes(filter))
+  );
+  // Strict rule: zero rows = no bar — EXCEPT browse mode (empty filter
+  // while navigating folders): an empty folder keeps the panel with its
+  // breadcrumb plus a "فاضي" notice instead of closing it.
+  if (!upRows.length && !shown.length) {
+    if (filter) {
+      hideMentionMenu();
+      return;
+    }
+    const d = document.createElement("div");
+    d.className = "pk-empty";
+    d.textContent = "فاضي";
+    bar.appendChild(d);
+    return;
+  }
+  if (upRows.length) {
+    bar.appendChild(wsSection("Attached"));
+    upRows.forEach(({ item, i, label }) => {
+      bar.appendChild(wsRow(WS_FILE_SVG, label, String(item.name || ""), () => replaceTriggerToken(label)));
+    });
+  }
+  shown.slice(0, 100).forEach((e) => {
+    const rel = dir ? `${dir}/${e.name}` : e.name;
+    if (e.type === "folder") {
+      // Folders only navigate (never a pick), path chips update via wsNav.
+      bar.appendChild(wsRow(WS_FOLDER_SVG, e.name, `${e.items ?? 0} items`, () => wsNav(rel), "pk-ico-folder"));
+    } else {
+      bar.appendChild(wsRow(WS_FILE_SVG, e.name, formatSize(e.size || 0), () => {
+        pickWorkspaceFile(rel);
+        closePathbar(true);
+      }));
+    }
+  });
+}
+
+function pickWorkspaceFile(rel) {
+  // Picking a file writes only "@name" into the text; the server injects
+  // that file's metadata exactly where the token stands.
+  const name = String(rel).split("/").pop();
+  if (!pendingWsRefs.some((r) => r.path === rel)) {
+    if (pendingWsRefs.length >= 10) {
+      toast("Max 10 workspace refs");
+      return;
+    }
+    pendingWsRefs.push({ path: rel, name });
+  }
+  replaceTriggerToken(`@${name}`);
+}
+
+const WS_SKILL_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--icon-secondary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path></svg>';
+
+async function showSkillsMenu(query) {
+  // "/" picker: same attached panel design as "@", but with skills.
+  const mySeq = ++wsPickerSeq;
+  const q = String(query || "").trim().toLowerCase();
+  try {
+    if (!skillsCache || Date.now() - skillsCache.at > 15000) {
+      const res = await fetch("/api/skills", { cache: "no-store" });
+      const data = await res.json().catch(() => null);
+      skillsCache = { at: Date.now(), list: (data && data.skills) || [] };
+    }
+  } catch (_) {
+    hideMentionMenu();
+    return;
+  }
+  if (mySeq !== wsPickerSeq) return; // stale keystroke
+  const list = (skillsCache.list || []).filter(
+    (s) => s && s.name && (!q || String(s.name).toLowerCase().includes(q))
+  );
+  if (!list.length) {
+    hideMentionMenu();
+    return;
+  }
+  renderSkillsPanel(list.slice(0, 100));
+}
+
+function renderSkillsPanel(list) {
+  const bar = ensurePathbar();
+  if (!bar) return;
+  bar.innerHTML = "";
+  const crumb = document.createElement("div");
+  crumb.className = "pk-crumb";
+  crumb.appendChild(wsChip(null, "Skills", () => hideMentionMenu(), true));
+  bar.appendChild(crumb);
+  list.forEach((s) => {
+    bar.appendChild(wsRow(WS_SKILL_SVG, `/${s.name}`, String(s.description || "").slice(0, 60), () => pickSkill(s.name), "pk-ico-skill"));
+  });
+}
+
+async function pickSkill(name) {
+  try {
+    const res = await fetch("/api/skills?name=" + encodeURIComponent(name), { cache: "no-store" });
+    const data = await res.json().catch(() => null);
+    const full = (data && data.skill) || null;
+    if (!full) {
+      toast("Skill not found");
+      return;
+    }
+    const instr = String(full.full_instructions || full.instructions || full.content || "").slice(0, 6000);
+    if (!instr.trim()) {
+      toast("Skill is empty");
+      return;
+    }
+    pendingSkill = { name: full.skill_name || full.name || name, instructions: instr };
+    replaceTriggerToken(`/${pendingSkill.name}`);
+  } catch (_) {
+    toast("Skill load failed");
+  }
 }
 
 function checkMention() {
   if (!composerInput) return;
   const pos = composerInput.selectionStart ?? composerInput.value.length;
   const before = composerInput.value.slice(0, pos);
-  const m = before.match(/@(\w*)$/);
-  if (m && pendingImages().length) showMentionMenu(m[1]);
-  else hideMentionMenu();
+  const sm = before.match(/(^|\s)\/([^@\n]*)$/);
+  if (sm) {
+    // Still writing next to the picked (blue) skill: never reopen.
+    if (continuesActivePick(sm[2], "/")) {
+      hideMentionMenu();
+      return;
+    }
+    showSkillsMenu(sm[2]);
+    return;
+  }
+  const am = before.match(/(^|\s)@([^@\n]*)$/);
+  if (am) {
+    // Still writing next to a picked (blue) ref: never reopen the panel.
+    if (continuesActivePick(am[2], "@")) {
+      hideMentionMenu();
+      return;
+    }
+    showMentionMenu(am[2]);
+  } else hideMentionMenu();
 }
 
-/* ---------- agent mode (restricted default, full access with notice) ---------- */
+/* ---------- agent mode (limited default, full access with notice) ---------- */
+// Scope (NOT approval): limited_access = Workspace jail only (default),
+// full_access = whole machine. BOTH run terminal commands immediately with
+// no per-command question. Synced with the server (terminal_access.json).
 function persistMode() {
   try {
     localStorage.setItem(MODE_KEY, agentMode);
+  } catch (_) {}
+  // Sync scope to the server (best-effort, never blocks the UI).
+  try {
+    fetch("/api/terminal_access", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: agentMode === "free" ? "full_access" : "limited_access" }),
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+async function syncModeFromServer() {
+  // Server is the source of truth (fresh tab / other device changed it).
+  try {
+    const res = await fetch("/api/terminal_access", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json().catch(() => null);
+    const scope = data && data.scope;
+    if (scope === "full_access" || scope === "limited_access") {
+      agentMode = scope === "full_access" ? "free" : "restricted";
+      try {
+        localStorage.setItem(MODE_KEY, agentMode);
+      } catch (_) {}
+      renderModeMenu();
+    }
   } catch (_) {}
 }
 
@@ -2951,16 +3735,16 @@ function renderModeMenu() {
   if (!menu) return;
   if (btn) btn.classList.toggle("full", agentMode === "free");
   const modeLabel = document.getElementById("modeLabel");
-  if (modeLabel) modeLabel.textContent = agentMode === "free" ? "Full access" : "Restricted";
-  if (btn) btn.title = agentMode === "free" ? "Full access — terminal runs without asking" : "Restricted — terminal asks first";
+  if (modeLabel) modeLabel.textContent = agentMode === "free" ? "Full access" : "Limited access";
+  if (btn) btn.title = agentMode === "free" ? "Full access — any command on the whole machine, no questions" : "Limited access — Workspace only, no questions";
   menu.innerHTML = "";
   const head = document.createElement("div");
   head.className = "mode-head";
   head.textContent = "Agent permission";
   menu.appendChild(head);
   [
-    { val: "restricted", title: "Restricted", desc: "Ask before any terminal command" },
-    { val: "free", title: "Full access", desc: "Terminal runs without asking" },
+    { val: "restricted", title: "Limited access", desc: "Workspace only, no questions" },
+    { val: "free", title: "Full access", desc: "Whole machine, no questions" },
   ].forEach((opt) => {
     const b = document.createElement("button");
     b.type = "button";
@@ -3243,7 +4027,7 @@ async function decideApproval(qid, decision) {
   // Instant action — resumes the loop silently, no chat message.
   hideQuestionCard();
   try {
-    await wsAnswer({ id: qid, decision });
+    await postAnswer({ id: qid, decision });
   } catch (_) {
     toast("Answer failed");
   }
@@ -3254,7 +4038,7 @@ async function decideNeedsModel(qid, decision, kind) {
   // deep-links to AI Models with that dialog auto-opened.
   hideQuestionCard();
   try {
-    await wsAnswer({ id: qid, decision });
+    await postAnswer({ id: qid, decision });
   } catch (_) {
     toast("Answer failed");
     return;
@@ -3355,7 +4139,7 @@ function showLiveControlCard(q) {
     btn.disabled = true;
     btn.textContent = "…";
     try {
-      const res = await wsAnswer({ id: q.id, decision: "continue" });
+      const res = await postAnswer({ id: q.id, decision: "continue" });
       if (!res.ok) throw new Error("bad status");
       pendingQuestion = null;
       // Handoff over: the preview may come back (the resumed loop re-attaches).
@@ -3457,9 +4241,9 @@ function showEdgeTab(url, continueQid) {
   refreshEdgeTab();
   const player = document.getElementById("liveMini");
   if (player) {
-    const frame = player.querySelector(".live-frame");
-    const out = remoteLiveUrl(clean);
-    if (frame && frame.getAttribute("src") !== out) frame.src = out;
+    // Sticky frame: never re-point an open player here (no auto reload).
+    // Fresh links stay in browserStreamUrl and apply only on manual reload
+    // or the next fresh build.
     syncPlayerContinue(player);
   }
 }
@@ -3641,12 +4425,9 @@ function openLivePlayer(atX, atY) {
         try {
           clearTimeout(timer);
           const u = data && data.active && data.active.url;
+          // Remember only — never re-point the open frame here (no auto reload).
           if (typeof u === "string" && u.startsWith("http") && u !== browserStreamUrl) {
             browserStreamUrl = u;
-            const player = document.getElementById("liveMini");
-            const frame = player ? player.querySelector(".live-frame") : null;
-            const out = remoteLiveUrl(u) || u;
-            if (frame && frame.getAttribute("src") !== out) frame.src = out;
           }
         } catch (_) {}
       })
@@ -3660,7 +4441,33 @@ function openLivePlayer(atX, atY) {
 
 function _buildLivePlayer(atX, atY) {
   if (!browserStreamUrl) return;
-  document.getElementById("liveMini")?.remove();
+  // Sticky frame: reopening (minimize -> maximize) reuses the SAME iframe
+  // with no reload — only a real error rebuilds it. The URL is adopted when
+  // it actually changed (fresh session), never re-pointed blindly.
+  const existing = document.getElementById("liveMini");
+  if (existing) {
+    try {
+      // Minimize -> maximize restores the SAME live frame with no reload.
+      // Never re-point src here; manual reload adopts fresh links.
+      // Re-clamp inside the viewport: a docked-away position must never
+      // restore half off-screen.
+      existing.classList.remove("mini-hidden");
+      try {
+        const _w = existing.offsetWidth || 264;
+        const _h = existing.offsetHeight || 160;
+        const _r = existing.getBoundingClientRect();
+        existing.style.left = `${Math.min(Math.max(8, _r.left), Math.max(8, window.innerWidth - _w - 8))}px`;
+        existing.style.top = `${Math.min(Math.max(70, _r.top), Math.max(70, window.innerHeight - _h - 8))}px`;
+      } catch (_) {}
+      try {
+        existing.classList.remove("docking");
+        delete existing.dataset.docking;
+      } catch (_) {}
+      document.getElementById("browserTab")?.classList.add("off");
+      startLiveWatch();
+    } catch (_) {}
+    return;
+  }
   document.getElementById("browserTab")?.classList.add("off");
   const mini = document.createElement("div");
   mini.id = "liveMini";
@@ -3679,17 +4486,31 @@ function _buildLivePlayer(atX, atY) {
     <div class="live-resize" data-edge="bottom" aria-hidden="true"></div>
     <div class="live-resize" data-edge="corner" aria-hidden="true"></div>
     <div class="live-resize" data-edge="corner-left" aria-hidden="true"></div>`;
-  // Fresh iframe every open => the live view reloads automatically.
-  mini.querySelector(".live-mini-body").appendChild(liveFrame(browserStreamUrl));
+  // Fresh iframe only on first build or after a real error. Minimize /
+  // maximize never rebuilds — same frame, no reload (only error reloads).
+  const freshFrame = liveFrame(browserStreamUrl);
+  try {
+    freshFrame.addEventListener("error", () => {
+      try { refreshLiveFrameFromServer(); } catch (_) {}
+    });
+  } catch (_) {}
+  mini.querySelector(".live-mini-body").appendChild(freshFrame);
   mini.querySelector('[data-act="reload"]').addEventListener("click", () => reloadLiveFrame());
   mini.querySelector('[data-act="close"]').addEventListener("click", () => {
-    // Player × minimizes straight back to the edge tab (no dialog).
-    // Real closing lives on the edge tab's × (with confirm).
+    // Player × parks the player off-screen (SAME iframe kept alive, stream
+    // keeps running, reopen is instant with no Loading). The watch keeps
+    // running so a flap heals silently while hidden. Real closing = edge tab ×.
     try {
-      const r = mini.getBoundingClientRect();
-      dockPlayerToTab(r.top);
+      mini.classList.add("mini-hidden");
+      document.getElementById("browserTab")?.classList.remove("off");
+      refreshEdgeTab();
     } catch (_) {
-      dockPlayerToTab(0);
+      try {
+        const r = mini.getBoundingClientRect();
+        dockPlayerToTab(r.top);
+      } catch (_) {
+        dockPlayerToTab(0);
+      }
     }
   });
   syncPlayerContinue(mini);
@@ -3840,8 +4661,8 @@ function reviveLiveFrames() {
       .catch(() => {});
     return;
   }
-  // Frames exist but sat through a long absence: one fresh connection, since
-  // the viewer shows "Loading" on disconnect and never reconnects by itself.
+  // Frames exist: never auto-reload them here. Remember the freshest link
+  // for the next manual reload; the open frame keeps its connection.
   fetch("/api/live_state", { cache: "no-store" })
     .then((r) => (r.ok ? r.json().catch(() => null) : null))
     .then((data) => {
@@ -3849,13 +4670,6 @@ function reviveLiveFrames() {
       const u = st && typeof st.url === "string" ? st.url : "";
       if (!u) return;
       if (u !== browserStreamUrl) browserStreamUrl = u;
-      const out = remoteLiveUrl(u) || u;
-      frames.forEach((f) => {
-        if (!f.isConnected) return;
-        try {
-          if (f.getAttribute("src") !== out) f.src = out;
-        } catch (_) {}
-      });
     })
     .catch(() => {});
 }
@@ -3873,11 +4687,17 @@ document.addEventListener("visibilitychange", () => {
 
 function dockPlayerToTab(top) {
   // Back to the right edge with a smooth slide-out: the player glides off
-  // screen first, then the peeking tab returns.
+  // screen first, then the peeking tab returns. The player is PARKED alive
+  // (same iframe, stream keeps running) — never destroyed, so reopening is
+  // instant with no Loading. Only a real browser close destroys it.
   const mini = document.getElementById("liveMini");
   const finish = () => {
-    stopLiveWatch();
-    document.getElementById("liveMini")?.remove();
+    const m = document.getElementById("liveMini");
+    if (m) {
+      try { delete m.dataset.docking; } catch (_) {}
+      m.classList.remove("docking");
+      m.classList.add("mini-hidden");
+    }
     const tab = document.getElementById("browserTab");
     if (!tab && browserStreamUrl) {
       showEdgeTab(browserStreamUrl);
@@ -4099,7 +4919,7 @@ function bindMiniClampOnce() {
   window.addEventListener("resize", () => {
     try {
       const mini = document.getElementById("liveMini");
-      if (!mini) return;
+      if (!mini || mini.classList.contains("mini-hidden")) return;
       const w = mini.offsetWidth || 264;
       const h = mini.offsetHeight || 160;
       const r = mini.getBoundingClientRect();
@@ -4135,7 +4955,7 @@ async function answerLiveContinue(qid, btn) {
     btn.textContent = "…";
   }
   try {
-    const res = await wsAnswer({ id: qid, decision: "continue" });
+    const res = await postAnswer({ id: qid, decision: "continue" });
     if (!res.ok) throw new Error("bad status");
     pendingQuestion = null;
     pendingLiveQid = null;
@@ -4602,9 +5422,7 @@ async function resumeActiveRun() {
   // while busy — the running message is not persisted yet).
   let st = null;
   try {
-    const r = await sendOp("chat_active", {});
-    if (!r || !r.ok) return;
-    st = (r && r.data) || {};
+    st = await fetch("/api/chat_active", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
   } catch (_) {
     return;
   }
@@ -4640,8 +5458,7 @@ async function resumeActiveRun() {
   // Rebuild the steps already streamed for this run (they are not in the
   // persisted history until the loop ends), then keep following live pushes.
   try {
-    const r = await sendOp("chat_frames", {});
-    const fd = (r && r.ok && r.data) || null;
+    const fd = await fetch("/api/chat_frames", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
     if (fd && Array.isArray(fd.frames)) replayRunFrames(fd.frames);
   } catch (_) {}
 }
@@ -4666,7 +5483,7 @@ async function sendQuestionAnswer() {
   sendBtn.disabled = true;
   composerInput.disabled = true;
   try {
-    const res = await wsAnswer({ id: q.id, answer });
+    const res = await postAnswer({ id: q.id, answer });
     if (!res.ok) toast("Answer failed");
     // The loop resumes on the still-open stream; its completion event
     // carries the Q + A into the step arrow, then work continues.
@@ -4695,6 +5512,21 @@ async function postMessageApi(body) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+  return data;
+}
+
+async function pruneBelowServer(anchorMid) {
+  // One atomic server prune: everything below the anchor is deleted in a
+  // single read-modify-write (+embeddings) and the server confirms the
+  // removed count. The caller waits for this — nothing below can leak into
+  // the resent context. Throws when the anchor is gone. Never half-done.
+  const res = await fetch("/api/message", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "prune", id: anchorMid }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data && data.error) || ("HTTP " + res.status));
   return data;
 }
 
@@ -4911,12 +5743,53 @@ function hideEditBanner() {
 }
 
 function updateEditSendState() {
-  // SEND stays off until the text actually differs (and is not empty).
+  // SEND stays enabled in edit mode (same text = regenerate the reply).
   if (!editingTarget || !sendBtn || !composerInput) return;
   if (sendBtn.classList.contains("stop")) return;
   const cur = String(composerInput.value || "").trim().slice(0, MAX_MESSAGE);
-  const orig = String(editingTarget.original || "").trim().slice(0, MAX_MESSAGE);
-  sendBtn.disabled = !(cur.length > 0 && cur !== orig);
+  sendBtn.disabled = !(cur.length > 0);
+}
+
+async function pruneBelow(el) {
+  // Deletes EVERY bubble below el (user + assistant, server + DOM +
+  // embeddings) so an edit/regenerate restarts the thread from this point.
+  // Each bubble fades/slides out with animation (staggered), then is removed.
+  // Returns the removed count. Never throws.
+  let removed = 0;
+  try {
+    await abortActiveStream();
+    const victims = [];
+    let node = el ? el.nextElementSibling : null;
+    while (node) {
+      victims.push(node);
+      node = node.nextElementSibling;
+    }
+    victims.forEach((n, i) => {
+      try {
+        n.style.transition = "opacity 220ms ease, transform 220ms ease";
+        n.style.transitionDelay = `${Math.min(i * 40, 400)}ms`;
+        n.style.opacity = "0";
+        n.style.transform = "translateY(10px)";
+      } catch (_) {}
+    });
+    const waitMs = Math.min(victims.length * 40, 400) + 240;
+    try {
+      await new Promise((r) => setTimeout(r, waitMs));
+    } catch (_) {}
+    for (const n of victims) {
+      try {
+        const rid = n.dataset ? n.dataset.mid : null;
+        if (rid) {
+          try {
+            await postMessageApi({ action: "delete", id: rid });
+          } catch (_) {}
+        }
+        n.remove();
+        removed += 1;
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return removed;
 }
 
 function startComposerEdit(el) {
@@ -4945,6 +5818,19 @@ function cancelComposerEdit() {
   composerInput.focus();
 }
 
+function resolveLiveMsg(mid) {
+  // History reloads rebuild every bubble: a node captured earlier (edit
+  // target, action-bar shell) may be detached. Resolve the LIVE node by id
+  // so prune/rerender/delete hit the real thread. Never throws.
+  try {
+    const key = String(mid || "").replace(/[^0-9a-zA-Z-]/g, "");
+    if (!key || !chatInner) return null;
+    return chatInner.querySelector('.msg[data-mid="' + key + '"]');
+  } catch (_) {
+    return null;
+  }
+}
+
 async function saveComposerEdit(value) {
   const target = editingTarget;
   if (!target) return false;
@@ -4953,65 +5839,111 @@ async function saveComposerEdit(value) {
     toast("Message is empty");
     return true;
   }
-  const orig = String(target.original || "").trim().slice(0, MAX_MESSAGE);
-  if (v === orig) {
-    toast("No changes yet");
-    return true;
-  }
-  const { el, mid } = target;
-  const isUserEdit = el.classList.contains("user");
-  if (mid) {
+  // SEND loading on the composer button until prune + regenerate is ready.
+  if (sendBtn) {
     try {
-      await postMessageApi({ action: "edit", id: mid, content: v });
-    } catch (err) {
-      toast(err instanceof Error ? err.message : "Save failed");
+      sendBtn.disabled = true;
+      sendBtn.classList.add("loading");
+    } catch (_) {}
+  }
+  try {
+    let { el, mid } = target;
+    if (mid) {
+      // The bubble may have left the screen (history re-render) after edit
+      // opened: acting on the detached node would prune nothing and resend
+      // with a stale context. Rebind to the live node or abort truthfully.
+      const live = resolveLiveMsg(mid);
+      if (!live) {
+        editingTarget = null;
+        composerInput.value = "";
+        autoResize();
+        hideEditBanner();
+        if (sendBtn) sendBtn.disabled = false;
+        toast("Message changed on screen — open it and edit again");
+        return true;
+      }
+      el = live;
+    }
+    const isUserEdit = el.classList.contains("user");
+    const orig = String(target.original || "").trim().slice(0, MAX_MESSAGE);
+    const changed = v !== orig;
+    if (changed && mid) {
+      try {
+        await postMessageApi({ action: "edit", id: mid, content: v });
+      } catch (err) {
+        toast(err instanceof Error ? err.message : "Save failed");
+        return true;
+      }
+      // Re-render the SAME bubble in place (old embedding replaced server-side).
+      const content = el.querySelector(".msg-content");
+      if (content) {
+        content.innerHTML = "";
+        const div = document.createElement("div");
+        div.innerHTML = formatRich(v);
+        content.appendChild(div);
+      }
+      el.dataset.raw = v;
+      if (el.classList.contains("assistant")) attachAssistantBar(el, v);
+      else attachUserBar(el);
+    }
+    editingTarget = null;
+    composerInput.value = "";
+    autoResize();
+    hideEditBanner();
+    if (isUserEdit) {
+      // Edit (or same-text resend) restarts the thread here in strict order
+      // (SEND keeps loading throughout):
+      // 1. verified atomic prune — the server deletes EVERYTHING below in
+      //    one write and confirms it; nothing below can leak into context.
+      // 2. resend the edited message with the EXISTING user id (no duplicate
+      //    persist, last-20 context).
+      // 3. regenerate its single reply.
+      if (mid) {
+        try {
+          await pruneBelowServer(mid);
+        } catch (err) {
+          toast(err instanceof Error && err.message ? err.message : "Delete failed");
+          return true;
+        }
+        // DOM mirror of the confirmed prune (instant, no extra requests).
+        try {
+          let n = el ? el.nextElementSibling : null;
+          while (n) {
+            const nx = n.nextElementSibling;
+            n.remove();
+            n = nx;
+          }
+        } catch (_) {}
+      } else {
+        // Never-persisted bubble: legacy per-node cleanup (DOM + best-effort).
+        await pruneBelow(el);
+      }
+      lastUserEl = el;
+      lastUserText = v;
+      composerInput.focus();
+      // A previous generation may still run: stop it first (same as
+      // regenerate/new-send), otherwise the old turn owns activeRun and
+      // this resend is silently dropped — or both persist a reply.
+      await abortActiveStream();
+      // Single attempt only: retrying without skip_history_ids would
+      // persist a duplicate user message and generate a second reply.
+      try {
+        await executeAgentTurn(v, [], { skipHistoryIds: mid ? [mid] : null });
+      } catch (_) {
+        toast("Send failed — try again");
+      }
       return true;
     }
-  }
-  // Old embedding replaced server-side; re-render the SAME bubble in place.
-  const content = el.querySelector(".msg-content");
-  if (content) {
-    content.innerHTML = "";
-    const div = document.createElement("div");
-    div.innerHTML = formatRich(v);
-    content.appendChild(div);
-  }
-  el.dataset.raw = v;
-  if (el.classList.contains("assistant")) attachAssistantBar(el, v);
-  else attachUserBar(el);
-  editingTarget = null;
-  composerInput.value = "";
-  autoResize();
-  hideEditBanner();
-  if (sendBtn) sendBtn.disabled = false;
-  if (isUserEdit) {
-    // Editing what you sent restarts the answer: drop every assistant
-    // reply after this bubble (server + DOM), then run the turn again.
-    await abortActiveStream();
-    const trailing = [];
-    let node = el.nextElementSibling;
-    while (node) {
-      const next = node.nextElementSibling;
-      if (node.classList && node.classList.contains("assistant")) trailing.push(node);
-      node = next;
-    }
-    for (const reply of trailing) {
-      const rid = reply.dataset.mid;
-      if (rid) {
-        try {
-          await postMessageApi({ action: "delete", id: rid });
-        } catch (_) {}
-      }
-      reply.remove();
-    }
-    lastUserEl = el;
-    lastUserText = v;
     composerInput.focus();
-    await executeAgentTurn(v, []);
     return true;
+  } finally {
+    if (sendBtn) {
+      try {
+        sendBtn.disabled = false;
+        sendBtn.classList.remove("loading");
+      } catch (_) {}
+    }
   }
-  composerInput.focus();
-  return true;
 }
 
 async function editAssistantMessage(shell, raw) {
@@ -5020,7 +5952,8 @@ async function editAssistantMessage(shell, raw) {
 }
 
 async function deleteMessage(shell) {
-  const mid = shell.dataset.mid;
+  const mid = shell && shell.dataset ? shell.dataset.mid : null;
+  const live = mid ? resolveLiveMsg(mid) : null;
   if (mid) {
     try {
       await postMessageApi({ action: "delete", id: mid });
@@ -5029,7 +5962,9 @@ async function deleteMessage(shell) {
       return;
     }
   }
-  shell.remove();
+  try {
+    (live || shell).remove();
+  } catch (_) {}
 }
 
 function previousUserText(shell) {
@@ -5045,28 +5980,116 @@ function previousUserText(shell) {
 }
 
 async function regenerateReply(shell) {
-  // Delete the old reply (+embedding), then generate a fresh one for the same prompt.
-  // No duplicate user bubble is appended.
+  // Regenerate from this reply's prompt: delete EVERYTHING from the reply
+  // down (the reply + all bubbles below, server + DOM + embeddings), then
+  // generate fresh for the same prompt. No duplicate user bubble appended.
   if (editingTarget) cancelComposerEdit();
   await abortActiveStream();
+  // Same staleness as edit: rebind to the live bubble before pruning.
+  try {
+    const _rmid = shell && shell.dataset ? shell.dataset.mid : null;
+    if (_rmid) {
+      const _live = resolveLiveMsg(_rmid);
+      if (!_live) {
+        toast("Message changed on screen — try again");
+        return;
+      }
+      shell = _live;
+    }
+  } catch (_) {}
   const userText = shell.dataset.userText || previousUserText(shell) || lastUserText;
   if (!userText) {
     toast("Nothing to regenerate");
     return;
   }
-  const mid = shell.dataset.mid;
-  if (mid) {
+  // SEND loading until the fresh reply lands (same contract as edit-resend).
+  if (sendBtn) {
     try {
-      await postMessageApi({ action: "delete", id: mid });
-    } catch (err) {
-      toast(err instanceof Error ? err.message : "Delete failed");
-      return;
+      sendBtn.disabled = true;
+      sendBtn.classList.add("loading");
+    } catch (_) {}
+  }
+  try {
+    // Anchor = the nearest persisted user bubble above: one atomic server
+    // prune drops the reply + everything below it (verified count), then
+    // the DOM mirrors it instantly.
+    let anchorMid = null;
+    try {
+      let p = shell.previousElementSibling;
+      while (p) {
+        if (p.classList && p.classList.contains("user") && p.dataset && p.dataset.mid) {
+          anchorMid = p.dataset.mid;
+          lastUserEl = p;
+          break;
+        }
+        p = p.previousElementSibling;
+      }
+    } catch (_) {}
+    if (anchorMid) {
+      try {
+        await pruneBelowServer(anchorMid);
+      } catch (err) {
+        toast(err instanceof Error && err.message ? err.message : "Delete failed");
+        return;
+      }
+      try {
+        let n = shell;
+        while (n) {
+          const nx = n.nextElementSibling;
+          n.remove();
+          n = nx;
+        }
+      } catch (_) {}
+    } else {
+      // No persisted anchor (fresh thread): legacy per-node cleanup.
+      const victims = [];
+      try {
+        let node = shell.nextElementSibling;
+        while (node) {
+          victims.push(node);
+          node = node.nextElementSibling;
+        }
+        victims.unshift(shell);
+        victims.forEach((n, i) => {
+          try {
+            n.style.transition = "opacity 220ms ease, transform 220ms ease";
+            n.style.transitionDelay = `${Math.min(i * 40, 400)}ms`;
+            n.style.opacity = "0";
+            n.style.transform = "translateY(10px)";
+          } catch (_) {}
+        });
+        const waitMs = Math.min(victims.length * 40, 400) + 240;
+        try {
+          await new Promise((r) => setTimeout(r, waitMs));
+        } catch (_) {}
+      } catch (_) {}
+      try {
+        for (const n of victims) {
+          try {
+            const rid = n.dataset ? n.dataset.mid : null;
+            if (rid) {
+              try {
+                await postMessageApi({ action: "delete", id: rid });
+              } catch (_) {}
+            }
+            n.remove();
+          } catch (_) {}
+        }
+      } catch (_) {
+        try { shell.remove(); } catch (_) {}
+      }
+    }
+    if (userText) lastUserText = userText;
+    // Reuse the kept user bubble (no duplicate persist); only the reply is new.
+    await executeAgentTurn(userText, [], { skipHistoryIds: anchorMid ? [anchorMid] : null });
+  } finally {
+    if (sendBtn) {
+      try {
+        sendBtn.disabled = false;
+        sendBtn.classList.remove("loading");
+      } catch (_) {}
     }
   }
-  shell.remove();
-  lastUserEl = null;
-  if (userText) lastUserText = userText;
-  await executeAgentTurn(userText, []);
 }
 
 async function editUserMessage(el) {
@@ -5076,7 +6099,10 @@ async function editUserMessage(el) {
 async function abortActiveStream() {
   if (!activeRun) return;
   activeRun.cancelled = true;
-  await wsCancel();
+  try {
+    if (typeof activeRun.abort === "function") activeRun.abort();
+  } catch (_) {}
+  await postCancel();
   activeRun = null;
   setSending(false);
 }
@@ -5087,9 +6113,12 @@ async function stopGeneration() {
   try {
     if (activeRun) {
       activeRun.cancelled = true;
+      try {
+        if (typeof activeRun.abort === "function") activeRun.abort();
+      } catch (_) {}
       activeRun = null;
     }
-    await wsCancel();
+    await postCancel();
   } catch (_) {}
   catchupResume = false;
   try {
@@ -5114,10 +6143,12 @@ export async function initChat() {
 
   // History first: resumeActiveRun appends after it, so nothing wipes it.
   await loadHistory().catch(() => {});
+  initComposerHL();
   initAttachments();
   initMic();
   initUserMessageGestures();
   initModeMenu();
+  syncModeFromServer().catch(() => {});
   ensureEditBanner();
   // Restored live sessions survive refresh — the task keeps all its data.
   // One-shot restore; afterwards everything arrives via push (no polling).
@@ -5127,11 +6158,8 @@ export async function initChat() {
   onPush("chat", onChatPush);
   onPush("chat_done", onChatDonePush);
   onPush("run", onRunPush);
-  // Returning to the agent page re-checks the browser automatically, so a
-  // session started while another page was open still shows its template.
-  window.addEventListener("x5:agent-open", () => {
-    autoCheckBrowserOnAgentOpen().catch(() => {});
-  });
+  // hello section 1 arrives first (last-50, hashed): render immediately.
+  onPush("chat_last50", onHelloChatLast50);
   // Returning to the agent page re-checks the browser automatically, so a
   // session started while another page was open still shows its template.
   window.addEventListener("x5:agent-open", () => {
@@ -5224,7 +6252,7 @@ export async function initChat() {
       cancelComposerEdit();
       return;
     }
-    if (e.key === "Escape" && mentionMenu) {
+    if (e.key === "Escape" && (mentionMenu || document.getElementById("wsPathbar"))) {
       e.preventDefault();
       hideMentionMenu();
       return;
@@ -5236,6 +6264,7 @@ export async function initChat() {
   });
   window.addEventListener("x5:agent-open", () => scrollToBottom(false));
 
+  // Scroll-up pagination: reaching the top auto-loads the 50 older messages.
   // Scroll-to-latest glass button: appears when the user scrolls up.
   const scrollBtn = document.getElementById("chatScrollBtn");
   const updateScrollBtn = () => {
@@ -5243,7 +6272,12 @@ export async function initChat() {
     const far = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight > 320;
     scrollBtn.classList.toggle("show", far);
   };
-  chatScroll.addEventListener("scroll", updateScrollBtn, { passive: true });
+  chatScroll.addEventListener("scroll", () => {
+    updateScrollBtn();
+    try {
+      if (chatScroll.scrollTop <= 120) loadOlderHistory();
+    } catch (_) {}
+  }, { passive: true });
   scrollBtn?.addEventListener("click", () => scrollToBottom());
   updateScrollBtn();
 }
