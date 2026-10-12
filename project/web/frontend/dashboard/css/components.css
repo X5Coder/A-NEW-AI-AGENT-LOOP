@@ -10184,3 +10184,9 @@ body:not(.sched-visible) #scheduleMini {
   animation: none;
   pointer-events: none;
 }
+/* The browser edge template lives in the Agent section only (same gate idea
+   as the scheduler template, flipped class). Off-agent it is fully gone. */
+body:not(.browser-visible) #browserTab,
+body:not(.browser-visible) #liveMini {
+  display: none;
+}

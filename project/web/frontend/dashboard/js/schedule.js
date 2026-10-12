@@ -2153,7 +2153,8 @@ async function schedRunTurn(jobId, userText, atts, opts) {
 
 function updateSchedVisibility() {
   // The scheduler tab + list live in the Agent section only (agent page and
-  // its full run sessions — never dashboard/workspace/models/...).
+  // its full run sessions — never dashboard/workspace/models/...). The
+  // browser edge template shares the same gate via body.browser-visible.
   let on = false;
   try {
     on = !!document.querySelector('.page[data-page="agent"].active')
@@ -2161,6 +2162,7 @@ function updateSchedVisibility() {
   } catch (_) {}
   try {
     document.body.classList.toggle("sched-visible", on);
+    document.body.classList.toggle("browser-visible", on);
   } catch (_) {}
 }
 
