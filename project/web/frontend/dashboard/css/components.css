@@ -79,9 +79,8 @@
 }
 
 /* ---------- buttons ---------- */
-/* White buttons, now professional glass (default + primary):
-   same glass tokens as .glass-btn — blurred translucent surface, bright top
-   edge, soft depth shadow. .btn-danger keeps its own look. */
+/* Buttons: default .btn is neutral glass oval; .btn-primary below is a solid
+   light oval; .btn-danger keeps its own look. */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -94,7 +93,7 @@
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-border);
-  border-radius: 8px;
+  border-radius: var(--r-full);
   color: #fff;
   font-family: inherit;
   font-size: 14px;
@@ -130,20 +129,31 @@
   box-shadow: var(--glass-hi), var(--glass-lo), var(--glass-sh);
 }
 
+/* Primary white buttons (Change password / Delete chat history): solid light
+   oval — dark text on a soft light pill with a gentle lift on hover. */
 .btn-primary {
-  background: var(--glass-bg), var(--background-menu-white);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
-  border-color: var(--glass-border);
-  color: #fff;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
-  box-shadow: var(--glass-hi), var(--glass-lo), var(--glass-sh);
+  background: var(--Button-black);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border-color: transparent;
+  border-radius: var(--r-full);
+  color: var(--text-onblack);
+  text-shadow: none;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 .btn-primary:hover {
-  background: var(--glass-bg), var(--background-menu-white);
-  border-color: rgba(255, 255, 255, 0.22);
-  box-shadow: var(--glass-hi), var(--glass-lo), 0 12px 32px rgba(0, 0, 0, 0.42);
+  background: var(--Button-black);
+  border-color: transparent;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.7);
   opacity: 1;
+  transform: translateY(-1px);
+}
+.btn-primary:active {
+  transform: scale(0.98);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+.btn-primary::before {
+  display: none;
 }
 
 .btn-danger {

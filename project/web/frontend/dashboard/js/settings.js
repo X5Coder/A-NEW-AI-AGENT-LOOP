@@ -120,7 +120,7 @@ async function _onCheckUpdates() {
     return;
   }
   const local = info.local || "unknown";
-  const localTag = "local v" + local + (info.local_commit ? " (" + info.local_commit + ")" : "");
+  const localTag = "local v" + local;
   if (info.error && !info.latest && info.up_to_date !== false) {
     _setStatus("Check failed: " + info.error + " (" + localTag + ")", false);
     _setUpdateButtons("check");
