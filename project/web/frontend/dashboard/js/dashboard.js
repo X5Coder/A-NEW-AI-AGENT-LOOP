@@ -5,7 +5,7 @@
  */
 "use strict";
 
-import { onPush } from "./events.js?v=4";
+import { onPush } from "./events.js?v=5";
 
 function setText(id, value) {
   const el = document.getElementById(id);
@@ -30,10 +30,6 @@ async function fetchJson(url) {
 }
 
 function populateStats(dash, cost, models, balance) {
-  // Data landed: settle the skeleton shimmer on the stat cards (once).
-  try {
-    document.querySelectorAll(".stat.skel").forEach((c) => c.classList.remove("skel"));
-  } catch (_) {}
   // Measured totals from /api/cost (usage_log). No per-message estimates.
   const totals = cost?.totals && typeof cost.totals === "object" ? cost.totals : null;
   const totalRequests = totals && isFinite(Number(totals.requests)) ? Number(totals.requests) : 0;
@@ -52,15 +48,33 @@ function populateStats(dash, cost, models, balance) {
     totalRequests === 0 ? "No usage yet" : "measured tokens"
   );
 
-  // Balance card: own API key with no quota -> Unlimited (local project has no balance).
-  // Provider-reported remaining credits -> $X.XX. Nothing connected -> connective empty state.
+  // Balance card: measured lifetime spend (every request captured its own
+  // price; the server summed the captures). Provider-reported remaining
+  // credits -> $X.XX. Nothing measured yet -> honest $0.00 empty state.
   const balValue = balance && typeof balance.balance === "number" ? balance.balance : null;
-  if (balance?.unlimited) {
+  let balReqs = 0;
+  try {
+    balReqs = Math.max(0, parseInt(balance?.requests, 10) || 0);
+  } catch (_) {}
+  if (balance?.measured) {
+    setText("statHosting", `$${(balValue || 0).toFixed(2)}`);
+    setText("statHostingMeta", balReqs > 0 ? `measured spend · ${balReqs} request${balReqs === 1 ? "" : "s"}` : "no measured usage yet");
+  } else if (balance?.unlimited) {
     setText("statHosting", "Unlimited");
     setText("statHostingMeta", "own API key · unlimited usage");
   } else if (balValue !== null && isFinite(balValue)) {
     setText("statHosting", `$${balValue.toFixed(2)}`);
     setText("statHostingMeta", "remaining credits");
+  } else if (cost?.totals && typeof cost.totals.cost === "number") {
+    // Older backend without a measured balance: fall back to the cost
+    // totals (same measured source) instead of showing an empty card.
+    const c = cost.totals.cost;
+    let rq = 0;
+    try {
+      rq = Math.max(0, parseInt(cost.totals.requests, 10) || 0);
+    } catch (_) {}
+    setText("statHosting", `$${c.toFixed(2)}`);
+    setText("statHostingMeta", rq > 0 ? `measured spend · ${rq} request${rq === 1 ? "" : "s"}` : "no measured usage yet");
   } else if (balance) {
     setText("statHosting", "—");
     setText("statHostingMeta", "connect a model in AI Models");
@@ -127,7 +141,6 @@ export async function refreshDashboard() {
     fetchJson("/api/models"),
     fetchJson("/api/balance"),
   ]);
-  // Always settle (even on partial failure): honest empty states replace the
-  // skeleton shimmer instead of leaving it spinning forever.
+  // Always render (even on partial failure): honest empty states.
   populateStats(dash, cost, models, balance);
 }

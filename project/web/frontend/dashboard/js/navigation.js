@@ -6,7 +6,7 @@
  */
 "use strict";
 
-import { animateIn, hideChartTip } from "./ui.js?v=10";
+import { animateIn, hideChartTip } from "./ui.js?v=13";
 
 const BP_MOBILE = 1024;
 const COLLAPSE_KEY = "x5_sidebar";
@@ -43,8 +43,8 @@ let content = null;
 let pageTitle = null;
 let pageSub = null;
 let currentPage = null;
-// Entrance plays ONCE per page: templates (incl. skeletons) animate on first
-// open, data swaps in silently later — revisits never replay the animation.
+// Entrance plays ONCE per page on first open, data swaps in silently
+// later — revisits never replay the animation.
 const seenPages = new Set();
 
 function isMobile() {

@@ -26,6 +26,18 @@ let sseSource = null; // the ONE stream: created once, never duplicated
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 
+// Boot barrier: resolves once the first hello snapshot (chat + dashboard +
+// everything else) is applied. The app.js boot splash waits on this plus
+// every module's first load, so the splash lifts only when all data is in.
+let helloSeen = false;
+let helloResolve = null;
+const helloPromise = new Promise((resolve) => {
+  helloResolve = resolve;
+});
+export function whenHello() {
+  return helloPromise;
+}
+
 export function onPush(type, fn) {
   if (typeof type !== "string" || typeof fn !== "function") return;
   if (!handlers.has(type)) handlers.set(type, new Set());
@@ -192,6 +204,13 @@ function connectStream() {
     reconnectAttempt = 0; // healthy stream: reset the redial backoff
     if (frame.type === "hello" && frame.data) {
       onHello(frame.data);
+      // First snapshot applied: release the app.js boot barrier.
+      if (!helloSeen) {
+        helloSeen = true;
+        try {
+          helloResolve();
+        } catch (_) {}
+      }
       return;
     }
     if (typeof frame.type === "string") onServerPush(frame.type, frame.data || {});

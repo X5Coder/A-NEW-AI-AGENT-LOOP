@@ -1,4 +1,4 @@
-﻿/**
+/**
  * ai_models.js — AI Models section (universal connection engine UI).
  * Owns: the fixed template cards (text, vision, image, tts, stt), each opening
  * a dialog with Claude-guided steps, 4 glass fields + a big Configuration
@@ -8,7 +8,7 @@
  */
 "use strict";
 
-import { modalShell, openModal, closeModal, toast } from "./ui.js?v=10";
+import { modalShell, openModal, closeModal, toast } from "./ui.js?v=13";
 
 const CLAUDE_URL = "https://claude.ai";
 
@@ -545,7 +545,7 @@ async function refresh() {
       el.addEventListener("click", () => openTemplateDialog(t, saved));
       grid.appendChild(el);
     }
-    // Silent swap: the entrance already played once on the skeletons —
+    // Silent swap: the page entrance already played once at boot —
     // data appears with no re-animation. (Fresh cards carry data-anim but
     // never get .anim, so they render statically.)
   })();

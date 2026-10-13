@@ -7,7 +7,7 @@
  */
 "use strict";
 
-import { openModal, toast } from "./ui.js?v=10";
+import { openModal, toast } from "./ui.js?v=13";
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

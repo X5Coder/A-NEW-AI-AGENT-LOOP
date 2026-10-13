@@ -13,8 +13,8 @@
  */
 "use strict";
 
-import { onPush } from "./events.js?v=4";
-import { openModal, closeModal, toast } from "./ui.js?v=10";
+import { onPush } from "./events.js?v=5";
+import { openModal, closeModal, toast } from "./ui.js?v=13";
 
 let jobs = []; // summarized jobs from the server (executing flag included)
 let miniOpen = false;
@@ -2630,7 +2630,8 @@ function bindRunFormOnce() {
 
 export function initSchedule() {
   onPush("scheduler", onSchedPush);
-  fetchInitial();
+  // Returned for the app.js boot barrier (black splash waits on it).
+  return fetchInitial();
   bindRunFormOnce();
   // Hash session routing: open run page on deep-link/refresh, close on back.
   window.addEventListener("hashchange", handleHash);

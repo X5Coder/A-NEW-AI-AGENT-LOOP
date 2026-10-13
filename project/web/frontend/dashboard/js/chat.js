@@ -5,9 +5,9 @@
  */
 "use strict";
 
-import { openModal, closeModal, toast, clearChatSkeleton } from "./ui.js?v=10";
+import { openModal, closeModal, toast } from "./ui.js?v=13";
 import { navigate } from "./navigation.js?v=12";
-import { onPush } from "./events.js?v=4";
+import { onPush } from "./events.js?v=5";
 import { remoteLiveUrl } from "./live-url.js?v=1";
 
 // POST helpers: browser -> server is plain POST only.
@@ -676,8 +676,6 @@ function formatRich(text) {
 
 function hideWelcome() {
   document.getElementById("welcomeMsg")?.remove();
-  // Real content is on screen: drop the loading skeleton (no-op afterwards).
-  clearChatSkeleton();
 }
 
 /* ---------- per-message direction: Arabic right, English left (both roles) ----------
@@ -1328,9 +1326,6 @@ async function loadHistory() {
     const data = await res.json();
     const msgs = Array.isArray(data?.messages) ? data.messages : [];
     renderHistoryMessages(msgs);
-    // Empty history keeps the welcome message — but the loading skeleton
-    // must still go (non-empty history already cleared it via hideWelcome).
-    clearChatSkeleton();
     try {
       const valid = msgs.filter((m) => m && m.id && (m.role === "user" || m.role === "assistant"));
       histOldestId = valid.length ? String(valid[0].id) : null;

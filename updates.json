@@ -1,6 +1,6 @@
 {
-  "version": "0.26.2",
-  "description": "Fixes the public-link (Tailscale Funnel) dashboard dying with 502 / connection-reset on /api/events: the live stream now uses proxy-safe SSE headers with a 15s heartbeat, and the page redirects to login only after the session is proven expired (401) — funnel blips just reconnect automatically.",
+  "version": "0.28.0",
+  "description": "The Balance card now shows real measured spend: every model request captures its own price at call time and the card sums those per-request captures instead of re-pricing aggregates. The boot splash only appears when loading actually takes a moment, so a quick boot never flashes black at all.",
   "features": [
     "Typing @ mid-word in Arabic opens the file picker; emails like mail@x never trigger it.",
     "@file and /skill boundaries match between editor paint and server injection, including Arabic adjacency.",
@@ -34,6 +34,12 @@
     "White buttons redesigned as light ovals (Change password, Delete chat history, Cancel): solid pill, dark text, gentle lift on hover.",
     "Public link stays alive: the live stream survives Tailscale Funnel resets (proxy-safe SSE headers + 15s heartbeat) instead of dying with 502.",
     "No more false logout over the public link: the page goes to login only when the session is proven expired, otherwise it reconnects by itself.",
-    "Reconnects fast after a funnel blip (1s/2s/5s backoff) and replays the latest snapshot on every redial."
+    "Reconnects fast after a funnel blip (1s/2s/5s backoff) and replays the latest snapshot on every redial.",
+    "Black boot splash with the Working ring-wave dots and wave brand text replaces all skeleton shimmer templates, including the agent chat placeholders.",
+    "The splash lifts only after all boot data is ready (live snapshot plus dashboard, charts, chat, plugins, skills, models, workspace, scheduler, gateway and settings first loads).",
+    "Page entrance replays on reveal, and a 15s watchdog guarantees the splash can never trap the screen when the backend is unreachable.",
+    "Balance card shows measured lifetime spend (per-request captured prices summed), e.g. $0.55 measured spend · 174 requests, instead of the empty connect-a-model state.",
+    "Daily cost charts use the same per-request sums, so charts and Balance always agree; older rows without a capture are priced from the cached table.",
+    "Boot splash never flashes on fast loads: it only appears when loading takes longer than a moment, otherwise the screen goes straight to data.", "Boot reveal is a single animation: page content stays hidden until all data lands, then appears exactly once with its entrance - no multi-jump refresh.", "Balance pricing also matches short custom model names to provider rates (gpt-4o-mini finds openai/gpt-4o-mini), so more requests measure a real dollar cost."
   ]
 }

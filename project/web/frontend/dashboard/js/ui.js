@@ -1,6 +1,6 @@
 /**
  * ui.js — shared interface helpers (X5Agent workshop)
- * Owns: entry animations, modal shell, toast, chart tooltip.
+ * Owns: entry animations, boot splash hide, modal shell, toast, chart tooltip.
  * No business logic, no API calls.
  */
 "use strict";
@@ -17,77 +17,35 @@ export function animateIn(root, base = 0) {
   });
 }
 
-/* ---------- skeleton loading (one system for every page) ----------
-   paintSkeletons() runs ONCE at boot before the first navigate(), so the
-   page entrance animation plays on the skeleton templates. Each module then
-   swaps real data in with no re-animation. Idempotent (data-skel guard). */
+/* ---------- boot splash (black start screen) ----------
+   Shown from first paint (static HTML in index.html). hideBootSplash()
+   runs once the app.js boot barrier resolves (every boot payload landed):
+   the splash fades out and is removed from the DOM. Idempotent, never
+   throws, safe to call before the splash exists. */
 
-function skeletonCards(n) {
-  let html = "";
-  for (let i = 0; i < n; i++) {
-    html += `<div class="mini-card skel-card skel" data-anim aria-hidden="true">`
-      + `<div class="mini-top"><div class="skel-ic"></div></div>`
-      + `<div class="skel-line skel-w55"></div>`
-      + `<div class="skel-line skel-w85"></div>`
-      + `<div class="skel-line skel-w70"></div>`
-      + `<div class="skel-badge"></div></div>`;
-  }
-  return html;
-}
+let splashHidden = false;
 
-export function clearChatSkeleton() {
+export function hideBootSplash() {
+  if (splashHidden) return;
+  splashHidden = true;
   try {
-    document.getElementById("chatSkeleton")?.remove();
+    window.__x5bootDone = true;
   } catch (_) {}
-}
-
-export function paintSkeletons() {
   try {
-    const grids = [
-      ["aiModelsGrid", 5],
-      ["pluginsGrid", 6],
-      ["skillsGrid", 3],
-    ];
-    grids.forEach(([id, n]) => {
-      const grid = document.getElementById(id);
-      if (grid && !grid.dataset.skel && !grid.children.length) {
-        grid.dataset.skel = "1";
-        grid.innerHTML = skeletonCards(n);
-      }
-    });
-    // Workspace rows.
-    const ws = document.getElementById("wsList");
-    if (ws && !ws.dataset.skel && !ws.children.length) {
-      ws.dataset.skel = "1";
-      ws.innerHTML = `<div class="skel-rowbox skel" data-anim aria-hidden="true"></div>`
-        + `<div class="skel-rowbox skel" data-anim aria-hidden="true" style="margin-top:12px"></div>`
-        + `<div class="skel-rowbox skel" data-anim aria-hidden="true" style="margin-top:12px"></div>`;
+    document.body.classList.remove("booting");
+    const el = document.getElementById("bootSplash");
+    if (!el) return;
+    if (!el.classList.contains("show")) {
+      // Data landed before the splash ever appeared: no flash at all.
+      el.remove();
+      return;
     }
-    // Charts.
-    ["chartTokens", "chartRequests"].forEach((id) => {
-      const el = document.getElementById(id);
-      if (el && !el.dataset.skel && !el.children.length) {
-        el.dataset.skel = "1";
-        el.innerHTML = `<div class="skel-chartbox skel" data-anim aria-hidden="true"></div>`;
-      }
-    });
-    // Stat cards shimmer as a whole until dashboard.js settles them.
-    document.querySelectorAll(".stat").forEach((c) => c.classList.add("skel"));
-    // Chat history bubbles until loadHistory/hello fills or clears them.
-    const inner = document.getElementById("chatInner");
-    if (inner && !document.getElementById("chatSkeleton") && !inner.querySelector(".msg")) {
-      const sk = document.createElement("div");
-      sk.id = "chatSkeleton";
-      sk.setAttribute("aria-hidden", "true");
-      sk.innerHTML = `<div class="skel-bubble skel"><div class="skel-line skel-w70"></div><div class="skel-line skel-w85"></div></div>`
-        + `<div class="skel-bubble skel"><div class="skel-line skel-w55"></div><div class="skel-line skel-w70"></div><div class="skel-line skel-w40"></div></div>`
-        + `<div class="skel-bubble skel"><div class="skel-line skel-w85"></div><div class="skel-line skel-w55"></div></div>`;
-      inner.appendChild(sk);
-    }
-    // Small badges shimmer until their module settles them.
-    ["waBadge", "chatCountBadge", "projVersion"].forEach((id) => {
-      document.getElementById(id)?.classList.add("skel");
-    });
+    el.classList.add("done");
+    setTimeout(() => {
+      try {
+        el.remove();
+      } catch (_) {}
+    }, 650);
   } catch (_) {}
 }
 

@@ -809,7 +809,9 @@ def _get_cost_data() -> dict:
     """
     REAL cost history for last 30 days - measured, never estimated.
     Tokens/requests come from Data/database/usage_log.json (every provider call logged).
-    USD comes from live OpenRouter model pricing (public /models endpoint, cached 24h).
+    USD is the SUM of each request's own captured price (stored on the entry at
+    call time) - never a re-pricing of day aggregates. Live OpenRouter pricing
+    is still refreshed here so future requests capture from a warm cache.
     Days with no measured calls show 0 (honest empty, no fabricated baseline).
     """
     import datetime
@@ -820,7 +822,7 @@ def _get_cost_data() -> dict:
     counts = []
     tokens = []
     daily_cost = []
-    pricing, pricing_state = _get_pricing()
+    _, pricing_state = _get_pricing()
     for row in days:
         try:
             dt = datetime.date.fromisoformat(row["date"])
@@ -830,16 +832,11 @@ def _get_cost_data() -> dict:
         dates.append(row["date"])
         counts.append(int(row["requests"]))
         tokens.append(int(row["tokens_in"]) + int(row["tokens_out"]))
-        cost = 0.0
-        for mdl, m in (row.get("models") or {}).items():
-            pp, cp = pricing.get(str(mdl), (None, None))
-            if pp is None or cp is None:
-                continue
-            try:
-                cost += int(m.get("in") or 0) * pp + int(m.get("out") or 0) * cp
-            except Exception:
-                continue
-        daily_cost.append(round(cost, 4))
+        try:
+            cost = round(float(row.get("cost") or 0.0), 4)
+        except Exception:
+            cost = 0.0
+        daily_cost.append(cost)
 
     total = round(sum(daily_cost), 4)
     max_v = max(daily_cost) if daily_cost else 0
@@ -953,11 +950,19 @@ def _get_pricing() -> tuple[dict, str]:
 
 def _get_balance_data() -> dict:
     """
-    Balance card: universal templates bill on their own services, so there is
-    no single quota to show. Returns the connective empty state (the UI points
-    to AI Models). Never exposes any key.
+    Balance card: measured lifetime spend. Every logged request captures its
+    own price at call time (see core.lm.usage); this sums those per-request
+    captures instead of re-pricing aggregates. Universal templates bill on
+    their own services, so this is spend - never a quota. Never exposes any key.
     """
-    return {"balance": None, "currency": "USD", "unlimited": False, "label": "own models"}
+    try:
+        from core.lm.usage import get_totals
+        t = get_totals()
+        return {"balance": float(t.get("cost") or 0.0), "currency": "USD",
+                "measured": True, "requests": int(t.get("requests") or 0),
+                "label": "measured spend"}
+    except Exception:
+        return {"balance": None, "currency": "USD", "unlimited": False, "label": "own models"}
 
 
 class _ChatError(Exception):

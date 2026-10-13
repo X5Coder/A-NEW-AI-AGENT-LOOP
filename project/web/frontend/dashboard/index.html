@@ -12,12 +12,62 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Cairo:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/css/tokens.css?v=13" />
-  <link rel="stylesheet" href="/css/base.css?v=10" />
-  <link rel="stylesheet" href="/css/layout.css?v=20" />
+  <link rel="stylesheet" href="/css/base.css?v=12" />
+  <link rel="stylesheet" href="/css/layout.css?v=21" />
   <link rel="stylesheet" href="/css/components.css?v=117" />
   <link rel="stylesheet" href="/css/responsive.css?v=22" />
 </head>
 <body>
+  <!-- ============ BOOT SPLASH ============ -->
+  <!-- Black start screen: painted on first paint, covers everything until
+       ALL boot data lands, then fades out (hideBootSplash in ui.js, driven
+       by the app.js boot barrier). Dots speak the Working ring-wave language
+       (pure CSS so they run before the JS bundle); the word reuses the
+       Working wave text style. -->
+  <div class="boot-splash" id="bootSplash" aria-hidden="true">
+    <div class="boot-dots" id="bootDots"></div>
+    <div class="working-text boot-word">X5Agent</div>
+  </div>
+  <script>
+    /* Earliest paint (runs during parsing): lock scroll + build the 5x5
+       ring dots (same ring map as the Working dot-square in chat.js). */
+    (function () {
+      try {
+        // Boot flag: hideBootSplash sets it when all data lands. The splash
+        // only APPEARS when loading actually takes a moment - a fast boot
+        // never flashes black at all.
+        window.__x5bootDone = false;
+        document.body.classList.add("booting");
+        var host = document.getElementById("bootDots");
+        if (host) {
+          var html = "";
+          for (var r = 0; r < 5; r++) {
+            for (var c = 0; c < 5; c++) {
+              html += '<span data-ring="' + Math.max(Math.abs(r - 2), Math.abs(c - 2)) + '"></span>';
+            }
+          }
+          host.innerHTML = html;
+        }
+        setTimeout(function () {
+          try {
+            if (!window.__x5bootDone) {
+              var sp = document.getElementById("bootSplash");
+              if (sp) sp.classList.add("show");
+            }
+          } catch (e) {}
+        }, 350);
+        // Catastrophic fallback (app.js never ran, e.g. broken bundle):
+        // never trap the user behind an invisible app forever.
+        setTimeout(function () {
+          try {
+            document.body.classList.remove("booting");
+            var sp2 = document.getElementById("bootSplash");
+            if (sp2) sp2.remove();
+          } catch (e) {}
+        }, 20000);
+      } catch (e) {}
+    })();
+  </script>
   <div class="app">
 
     <!-- ============ SIDEBAR ============ -->
@@ -171,7 +221,7 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" /></svg>
                 </span>
               </div>
-              <div class="stat-value small" id="statHosting">—</div>
+              <div class="stat-value" id="statHosting">—</div>
               <div class="stat-meta" id="statHostingMeta">Loading…</div>
             </div>
 
@@ -614,6 +664,6 @@
   <div class="chart-tip" id="chartTip"></div>
   <div class="toast-wrap" id="toastWrap"></div>
 
-  <script type="module" src="/js/app.js?v=68"></script>
+  <script type="module" src="/js/app.js?v=72"></script>
 </body>
 </html>

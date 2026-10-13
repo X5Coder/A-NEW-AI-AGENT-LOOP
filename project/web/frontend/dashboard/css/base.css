@@ -293,90 +293,81 @@ pre,
   animation: a-fade var(--dur) var(--ease) both;
 }
 
-/* ---------- skeleton loading (shimmer) ----------
-   Page templates animate ONCE via navigate()'s animateIn; while data loads,
-   skeleton blocks shimmer in place, then real content swaps in with NO
-   re-animation. Static under prefers-reduced-motion (global rule below). */
-@keyframes a-shimmer {
-  from {
-    background-position: 180% 0;
-  }
-  to {
-    background-position: -80% 0;
-  }
-}
-.skel {
-  position: relative;
+/* ---------- boot splash (black start screen) ----------
+   Painted on first paint (static HTML in index.html), covers everything
+   until the app.js boot barrier resolves (every boot payload landed), then
+   fades out via .done (see hideBootSplash in ui.js). Dots mirror the
+   Working dot-square ring wave; the word reuses .working-text's wave.
+   Exit is opacity-only (compositor); static under reduced-motion. */
+body.booting {
   overflow: hidden;
 }
-.skel::after {
-  content: "";
-  position: absolute;
+/* While booting, the app shell stays invisible: no empty-card flash before
+   the splash, no double reveal - content appears exactly once, animated,
+   when the boot barrier lifts (see replayEntrance in app.js). Layout is
+   kept (visibility, not display) so boot-time measurements still work. */
+body.booting .app {
+  visibility: hidden;
+}
+.boot-splash {
+  position: fixed;
   inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.1) 50%, transparent 70%);
-  background-size: 200% 100%;
-  animation: a-shimmer 1.4s linear infinite;
-  pointer-events: none;
-}
-/* Base fill for skeleton bars (the sweep above glides over them). */
-.skel-line,
-.skel-ic,
-.skel-badge,
-.skel-chartbox,
-.skel-rowbox,
-.skel-bubble {
-  background: var(--fill-tsp-white-light);
-}
-.skel-line {
-  height: 12px;
-  border-radius: 6px;
-}
-.skel-ic {
-  width: 40px;
-  height: 40px;
-  flex: 0 0 40px;
-  border-radius: 10px;
-}
-.skel-badge {
-  height: 22px;
-  width: 88px;
-  border-radius: var(--r-full);
-}
-.skel-chartbox {
-  height: 190px;
-  border-radius: 12px;
-}
-.skel-rowbox {
-  height: 76px;
-  border-radius: 14px;
-}
-.skel-w40 { width: 40%; }
-.skel-w55 { width: 55%; }
-.skel-w70 { width: 70%; }
-.skel-w85 { width: 85%; }
-/* Skeleton cards reuse the real card box but never interact. */
-.skel-card {
-  pointer-events: none;
-  cursor: default;
-}
-.skel-card:hover {
-  transform: none;
-  border-color: var(--glass-border);
-  box-shadow: var(--glass-hi), var(--glass-lo), var(--glass-sh);
-}
-/* Chat history placeholders: plain bubbles, alternating sides. */
-.skel-bubble {
-  max-width: 75%;
-  padding: var(--sp-4);
-  border-radius: 14px;
+  z-index: 9999;
+  background: #000;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-bottom: var(--sp-3);
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  /* Hidden until the delayed show fires: fast boots never flash black. */
+  visibility: hidden;
+  transition: opacity 0.55s ease, visibility 0.55s;
 }
-.skel-bubble:nth-child(even) {
-  margin-inline-start: auto;
+.boot-splash.show {
+  visibility: visible;
+}
+.boot-splash.done {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.boot-dots {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  direction: ltr;
+}
+.boot-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #1e1e1e;
+  animation: boot-glow 1.6s linear infinite;
+}
+.boot-dots span[data-ring="1"] {
+  animation-delay: 0.3s;
+}
+.boot-dots span[data-ring="2"] {
+  animation-delay: 0.6s;
+}
+@keyframes boot-glow {
+  0%, 3% {
+    background: #1e1e1e;
+    box-shadow: none;
+  }
+  6%, 78% {
+    background: #ffffff;
+    box-shadow:
+      0 0 6px rgba(255, 255, 255, 0.9),
+      0 0 14px rgba(255, 255, 255, 0.4);
+  }
+  84%, 100% {
+    background: #1e1e1e;
+    box-shadow: none;
+  }
+}
+.boot-word {
+  font-size: 1.1rem;
 }
 
 @media (prefers-reduced-motion: reduce) {

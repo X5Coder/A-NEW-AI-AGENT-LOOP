@@ -6,8 +6,8 @@
  */
 "use strict";
 
-import { attachChartTooltip, pinChartTip } from "./ui.js?v=10";
-import { onPush } from "./events.js?v=4";
+import { attachChartTooltip, pinChartTip } from "./ui.js?v=13";
+import { onPush } from "./events.js?v=5";
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const RANGE_LABELS = { "7d": "Last 7 days", "30d": "Last 30 days", "months": "By month" };
@@ -196,7 +196,7 @@ export async function initCharts() {
 
   // Silent background refresh: skip DOM updates when data is unchanged
   // (no flicker, open tooltips stay), and keep the last good chart if a tick
-  // fails instead of wiping it. The entrance played once on the skeletons —
+  // fails instead of wiping it. The page entrance played once at boot —
   // data swaps in with no re-animation.
   const seen = { tokens: null, req: null };
   let firstPaint = true;

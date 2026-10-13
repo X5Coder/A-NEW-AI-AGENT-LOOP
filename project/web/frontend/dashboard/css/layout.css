@@ -35,6 +35,24 @@
   box-shadow: none;
 }
 
+/* Desktop boot entrance: the rail slides in from the left exactly once.
+   The class is added by app.js after the boot barrier lifts (so the motion
+   is visible, never played behind the splash); min-width keeps phones on
+   the drawer pattern. transform-only, same rhythm as page entrances. */
+@keyframes sidebar-in {
+  from {
+    transform: translateX(-102%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@media (min-width: 1025px) {
+  .sidebar.sidebar-enter {
+    animation: sidebar-in var(--dur-slow) var(--ease) both;
+  }
+}
+
 .brand {
   display: flex;
   align-items: center;
