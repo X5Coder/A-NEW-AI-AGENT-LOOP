@@ -47,6 +47,26 @@ function isImageName(name) {
   return /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(String(name || ""));
 }
 
+function isPdfName(name) {
+  return /\.pdf$/i.test(String(name || ""));
+}
+
+function isHtmlName(name) {
+  return /\.html?$/i.test(String(name || ""));
+}
+
+/* Inline preview URL: the download endpoint serves ?preview=1 as inline
+   (PDF/HTML/images) so the file renders instead of forcing a download. */
+function previewUrl(full) {
+  return "/api/workspace/download?path=" + encodeURIComponent(full) + "&preview=1";
+}
+
+/* Preview size caps: the endpoint streams any size, but embedding a huge
+   file would freeze the page — over the cap we show download-only. */
+const PDF_PREVIEW_MAX = 20 * 1024 * 1024;
+const HTML_PREVIEW_MAX = 5 * 1024 * 1024;
+const IMG_PREVIEW_MAX = 10 * 1024 * 1024;
+
 /* File kind by extension — each kind gets its own thumb icon + tint. */
 function fileKind(name) {
   const m = /\.([a-z0-9]+)$/i.exec(String(name || ""));
@@ -218,7 +238,7 @@ async function loadWorkspace() {
       const thumb = isFolder
         ? `<span class="ws-thumb folder">${folderSvg()}</span>`
         : isImageName(e?.name)
-          ? `<img class="ws-thumb-img" loading="lazy" alt="" src="/api/workspace/download?path=${encodeURIComponent(full)}" />`
+          ? `<img class="ws-thumb-img" loading="lazy" alt="" src="${previewUrl(full)}" />`
           : `<span class="ws-thumb ${kind}">${thumbSvg(kind)}</span>`;
       const badge = isExt ? `<span class="ws-ext">browser</span>` : "";
       const go = isFolder ? arrowSvg() : downloadSvg();
@@ -244,7 +264,7 @@ async function loadWorkspace() {
           wsFile = null;
           loadWorkspace();
         } else {
-          wsFile = { full, name: e?.name || "", meta, kind };
+          wsFile = { full, name: e?.name || "", meta, kind, size: Number(e?.size) || 0 };
           lastSig = "";
           loadWorkspace();
         }
@@ -474,20 +494,80 @@ function downloadFile(full, name) {
   a.remove();
 }
 
-/* Opened file view (in-page, no dialog): identity block + no-preview note + download. */
+/* Big preview dialog (animated modal): the PDF renders with the
+   browser's built-in viewer (all pages, scrollable), HTML renders static,
+   images render large. Footer holds the full-file download — PDF pages
+   are not separate files, so per-page download buttons are intentionally
+   not offered; the whole file downloads with one tap. */
+function isTouchDevice() {
+  try {
+    return window.matchMedia("(pointer: coarse)").matches;
+  } catch (_) {
+    return false;
+  }
+}
+function openPreviewDialog(file) {
+  const url = previewUrl(file.full);
+  const size = Number(file.size) || 0;
+  let body;
+  if (isPdfName(file.name)) {
+    body = size > PDF_PREVIEW_MAX
+      ? `<p class="ws-preview-note">This PDF is too large for preview — download it to view.</p>`
+      : `<iframe class="ws-preview-frame ws-preview-dialog-pdf" src="${url}" title="PDF preview"></iframe>`;
+  } else if (isHtmlName(file.name)) {
+    // sandbox="allow-scripts" WITHOUT allow-same-origin: the deck's own
+    // scripts run (slide navigation works), but the frame stays an opaque
+    // origin — no access to the console page, cookies, or storage.
+    // Desktop keeps scrolling="no" (no ugly scrollbar strips); touch
+    // phones stay scrollable so the content moves with a finger swipe
+    // (mobile OS hides scrollbars on its own).
+    body = size > HTML_PREVIEW_MAX
+      ? `<p class="ws-preview-note">This HTML file is too large for preview — download it to view.</p>`
+      : `<iframe class="ws-preview-frame ws-preview-dialog-html" src="${url}" title="HTML preview" sandbox="allow-scripts"${isTouchDevice() ? "" : ' scrolling="no"'}></iframe>`;
+  } else {
+    body = size > IMG_PREVIEW_MAX
+      ? `<p class="ws-preview-note">This image is too large for preview — download it to view.</p>`
+      : `<img class="ws-preview-frame ws-preview-dialog-img" src="${url}" alt="" />`;
+  }
+  openModal(modalShell({
+    icon: docSvg(),
+    title: "Preview",
+    subtitle: escName(file.name),
+    body: `<div class="ws-preview-dialog">${body}</div>`,
+    foot: `
+      <button class="glass-btn" data-close type="button">Close</button>
+      <button class="glass-btn" id="wsPreviewDownload" type="button">Download file</button>`,
+  }));
+  document.getElementById("wsPreviewDownload")?.addEventListener("click", () => {
+    downloadFile(file.full, file.name);
+  });
+}
+
+/* Opened file view: identity + actions only — the preview lives ONLY in
+   the Preview dialog (never auto-loads here, so opening a file can never
+   trigger an automatic download anymore; that was the HTML/PDF bug). */
 function renderFileView(list, file) {
   const view = document.createElement("div");
   view.className = "ws-file";
   view.setAttribute("data-anim", "");
   const kindLabel = file.kind === "file" ? "File" : file.kind[0].toUpperCase() + file.kind.slice(1);
+  const size = Number(file.size) || 0;
+  let canPreview = false;
+  if (isPdfName(file.name)) canPreview = size <= PDF_PREVIEW_MAX;
+  else if (isHtmlName(file.name)) canPreview = size <= HTML_PREVIEW_MAX;
+  else if (isImageName(file.name)) canPreview = size <= IMG_PREVIEW_MAX;
+  const note = canPreview
+    ? `<p class="ws-preview-note">Tap Preview to view it here.</p>`
+    : `<p class="ws-preview-note">Preview isn't available for this file here.</p>`;
   view.innerHTML = `
     <span class="ws-thumb big ${file.kind}">${thumbSvg(file.kind)}</span>
     <span class="ws-kind">${escName(kindLabel)}</span>
     <span class="ws-file-name"></span>
     <span class="ws-meta">${escName(file.meta || "")}</span>
-    <p class="ws-preview-note">Preview isn't available for this file here.</p>
+    ${note}
     <span class="ws-file-actions">
       <button type="button" class="glass-btn" id="wsFileBack">Back</button>
+      ${canPreview ? `<button type="button" class="glass-btn" id="wsFilePreview">Preview</button>` : ""}
       ${wsDeleteBlocked ? "" : `<button type="button" class="glass-btn danger" id="wsFileDelete">Delete</button>`}
       <button type="button" class="glass-btn" id="wsFileDownload">Download</button>
     </span>`;
@@ -497,6 +577,9 @@ function renderFileView(list, file) {
     wsFile = null;
     lastSig = "";
     loadWorkspace();
+  });
+  view.querySelector("#wsFilePreview")?.addEventListener("click", () => {
+    openPreviewDialog(file);
   });
   view.querySelector("#wsFileDownload")?.addEventListener("click", () => {
     downloadFile(file.full, file.name);

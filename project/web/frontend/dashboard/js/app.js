@@ -7,10 +7,10 @@
 import { initModal, hideBootSplash, animateIn } from "./ui.js?v=13";
 import { initNavigation } from "./navigation.js?v=13";
 import { startEvents, whenHello } from "./events.js?v=5";
-import { initWorkspace } from "./workspace.js?v=17";
+import { initWorkspace } from "./workspace.js?v=20";
 import { initDashboard } from "./dashboard.js?v=14";
 import { initCharts } from "./charts.js?v=14";
-import { initChat } from "./chat.js?v=86";
+import { initChat } from "./chat.js?v=94";
 import { initSchedule } from "./schedule.js?v=25";
 import { initPlugins } from "./plugins.js?v=9";
 import { initSkills } from "./skills.js?v=10";

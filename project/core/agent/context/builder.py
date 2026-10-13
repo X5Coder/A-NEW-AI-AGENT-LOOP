@@ -178,9 +178,10 @@ def _env_block() -> str:
 
 
 def _workspace_block() -> str:
-    # Workspace OUTER level only: a pure map of name + type + size.
-    # Folders show item counts, files show bytes + extension. Never walks
-    # inside. Details come from the workspace tool (via tool_search).
+    # Workspace OUTER level only: every file carries its full metadata shape
+    # (id + full path + type + size); folders show item counts. Never walks
+    # inside: enter any folder with the workspace tool (via tool_search) and
+    # every file there shows the SAME shape with its own path.
     # Bounded: first 100 entries, counts capped.
     try:
         ws = (Path(__file__).resolve().parents[4] / "X5Agent" / "Workspace").resolve()
@@ -218,7 +219,11 @@ def _workspace_block() -> str:
                 except Exception:
                     size = 0
                 ext = p.suffix.lower().lstrip(".") if p.suffix else "no-ext"
-                lines.append(f"  file: {p.name} ({size} bytes, type: {ext})")
+                try:
+                    full = str(p.resolve()).replace("\\", "/")
+                except Exception:
+                    full = p.name
+                lines.append(f"  file: {p.name} (id: \"{p.name}\", path: \"{full}\", type: {ext}, size: {size} bytes)")
         except Exception:
             continue
     # Virtual browser-downloads folder (read-only view, same rule as the
@@ -243,8 +248,12 @@ def _workspace_block() -> str:
     except Exception:
         pass
     more = "" if len(children) <= 100 else f"\n  ... +{len(children) - 100} more"
-    return ("[Workspace map - outer level only: name + type + size - L4]\n"
-            + "\n".join(lines) + more)
+    return ("[Workspace map - outer level only: id + path + type + size - L4]\n"
+            + "\n".join(lines) + more
+            + "\n(Use these exact file path links as-is in any code or HTML: images, fonts, any file. "
+              "An @<file-id> mention in the user message refers to the map entry with that id. "
+              "You may copy any Workspace file into the folder you work in so everything lives in one "
+              "folder, then reference it by its file name.)")
 
 
 def _embedding_memory_block() -> str:
@@ -287,7 +296,10 @@ def _memories_block() -> str:
             lines = []
             for x in persistent[-10:]:
                 vt = x.get("vision_text") or ""
-                lines.append(f"  - {x.get('image_id')}: {x.get('name')} ({x.get('type')}, {x.get('width')}x{x.get('height')}) path={x.get('path')} vision='{vt[:120]}'")
+                _sz = x.get("size")
+                _sz_txt = f", size: {_sz} bytes" if isinstance(_sz, int) else ""
+                _ip = str(x.get("path") or "").replace("\\", "/")
+                lines.append(f"  - {x.get('image_id')}: {x.get('name')} ({x.get('type')}{_sz_txt}, {x.get('width')}x{x.get('height')}) path=\"{_ip}\" vision='{vt[:120]}'")
             parts.append("[Image Memory - persistent, sent every request - L5]\n" + "\n".join(lines))
             # also show with vision count
     # important_memory
@@ -336,11 +348,26 @@ def _documents_block() -> str:
         return ""
     if not docs:
         return ""
+    try:
+        import sys as _sys2
+        _proj2 = Path(__file__).resolve().parents[3]
+        if str(_proj2) not in _sys2.path:
+            _sys2.path.insert(0, str(_proj2))
+        from core.paths import workspace_root as _ws2
+        _wsroot = _ws2().resolve()
+    except Exception:
+        _wsroot = None
     lines = []
     for d in docs[:20]:
         try:
             state = f"{d.get('chunk_count', 0)} chunks" if d.get("indexed") else "not indexed yet"
-            lines.append(f"  - {d.get('file_id')}: {state} ({d.get('size', 0)} bytes)")
+            _fid = str(d.get("file_id") or "")
+            _ext = Path(_fid).suffix.lower().lstrip(".") or "no-ext"
+            try:
+                _full = str((_wsroot / _fid).resolve()).replace("\\", "/") if _wsroot is not None else _fid
+            except Exception:
+                _full = _fid
+            lines.append(f"  - {_fid} [id: \"{_fid}\", path: \"{_full}\", type: {_ext}, size: {d.get('size', 0)} bytes] — {state}")
         except Exception:
             continue
     if not lines:

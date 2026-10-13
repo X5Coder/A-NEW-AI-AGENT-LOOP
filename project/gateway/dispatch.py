@@ -179,24 +179,56 @@ def is_allowed(msg: dict) -> bool:
 
 
 def _mirror_workspace(blob: bytes, display: str) -> str | None:
-    """Best-effort Workspace copy (jailed). Returns rel file_id or None."""
+    """Workspace copy keeping the ORIGINAL name (stable file_id — the SAME
+    rule as the site chat mirror, so gateway uploads show in the Workspace
+    map under their own name); short suffix on collision. Jailed.
+    Best-effort: returns rel file_id or None. Never raises."""
     try:
         from core.paths import workspace_root as _ws
 
         ws = _ws()
         ws.mkdir(parents=True, exist_ok=True)
         base = ws.resolve()
-        safe = (Path(str(display or "file")[:120]).name or "file").replace('"', "'")
-        candidate = (ws / f"{uuid.uuid4().hex[:8]}_{safe}").resolve()
+        safe = (Path(str(display or "file")[:150]).name or "file").replace('"', "'")
+        if not safe or safe in (".", ".."):
+            safe = "file"
+        stem, dot, suffix = safe.rpartition(".")
+        if not stem:
+            stem, suffix = safe, ""
+        else:
+            suffix = dot + suffix
+        candidate = (ws / safe).resolve()
         try:
             candidate.relative_to(base)
         except ValueError:
             return None
+        if candidate.exists():
+            candidate = (ws / f"{stem}_{uuid.uuid4().hex[:6]}{suffix}").resolve()
+            try:
+                candidate.relative_to(base)
+            except ValueError:
+                return None
         if not candidate.exists():
             candidate.write_bytes(blob)
         return str(candidate.relative_to(base)).replace("\\", "/")
     except Exception:
         return None
+
+
+def _ws_full_path(rel: str | None) -> str | None:
+    """Full exact path of a Workspace file_id (forward slashes, so the agent
+    pastes it as-is into any code or HTML). Never raises."""
+    try:
+        if not rel or not isinstance(rel, str):
+            return None
+        from core.paths import workspace_root as _ws
+
+        return str((_ws() / rel).resolve()).replace("\\", "/")
+    except Exception:
+        return None
+
+
+_VIDEO_EXTS = frozenset({"mp4", "mov", "mkv", "webm", "avi", "m4v", "3gp", "flv", "wmv"})
 
 
 def _convert_part(part: dict) -> tuple[str, str]:
@@ -244,12 +276,30 @@ def _convert_part(part: dict) -> tuple[str, str]:
             entry = store_image(name=name, path=str(p), is_persistent=False, is_temp=True)
             iid = str(entry.get("image_id") or "")
             ws_file = _mirror_workspace(blob, name)
-            hint = f'- image: name="{name}" image_id="{iid}"' + (f' file_id="{ws_file}"' if ws_file else "")
+            if ws_file:
+                _abs = _ws_full_path(ws_file) or ws_file
+                hint = (f'- image: name="{name}" image_id="{iid}" file_id="{ws_file}"'
+                        f' | path: "{_abs}" | type: {ext} | size: {len(blob)} bytes'
+                        f'\n- file_id="{ws_file}": image above, analyze it first (also in Workspace)')
+            else:
+                hint = f'- image: name="{name}" image_id="{iid}"'
             return text, hint
         except Exception:
             return text or "[image — could not save]", ""
     ws_file = _mirror_workspace(blob, name)
-    hint = f'- document: name="{name}" file_id="{ws_file}"' if ws_file else ""
+    if not ws_file:
+        return text or f"[file received: {name}]", ""
+    _abs = _ws_full_path(ws_file) or ws_file
+    _ext = Path(ws_file).suffix.lower().lstrip(".") or "no-ext"
+    if _ext in _VIDEO_EXTS:
+        hint = (f'- video: name="{name}" file_id="{ws_file}"'
+                f' | path: "{_abs}" | type: {_ext} | size: {len(blob)} bytes'
+                f'\n- file_id="{ws_file}": video above, process it first (also in Workspace)')
+    else:
+        hint = (f'- document: name="{name}" file_id="{ws_file}"'
+                f' | path: "{_abs}" | type: {_ext} | size: {len(blob)} bytes'
+                f'\n- file_id="{ws_file}": find document_search via tool_search, then call '
+                f'document_search(file_id="{ws_file}", query=<question>, top_k=<1..20>)')
     return text or f"[file received: {name}]", hint
 
 

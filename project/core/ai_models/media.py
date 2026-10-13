@@ -52,23 +52,60 @@ def resolve_image(image_id: str | None = None, image_path: str | None = None) ->
             if alt.exists():
                 p = alt
             else:
-                raise FileNotFoundError(f"Image not found: {image_path}")
+                # Workspace-relative id (the stable file_id the context shows).
+                try:
+                    import sys as _sys2
+                    if str(_project_root()) not in _sys2.path:
+                        _sys2.path.insert(0, str(_project_root()))
+                    from core.paths import resolve_inside_workspace as _ws_resolve
+                    _w = _ws_resolve(image_path)
+                    if _w.exists():
+                        p = _w
+                    else:
+                        raise FileNotFoundError(f"Image not found: {image_path}")
+                except (FileNotFoundError, ValueError, TypeError):
+                    raise FileNotFoundError(f"Image not found: {image_path}") from None
         return _checked(p, IMAGE_EXTS, MAX_IMAGE_BYTES, "Image")
     if not image_id or not isinstance(image_id, str):
         raise ValueError("At least one of image_id or image_path is required")
-    if "/" in image_id or "\\" in image_id or ".." in image_id:
+    if "\\" in image_id or ".." in image_id:
         raise ValueError("Invalid image_id")
-    for allowed in _image_dirs():
+    # A Workspace file_id (Workspace-relative path, e.g. "logo.png" or
+    # "deck/logo.png") resolves straight inside the Workspace jail.
+    if "/" in image_id:
         try:
-            cand = (allowed / image_id).resolve()
+            import sys as _sys3
+            if str(_project_root()) not in _sys3.path:
+                _sys3.path.insert(0, str(_project_root()))
+            from core.paths import resolve_inside_workspace as _ws_resolve2
+            _w2 = _ws_resolve2(image_id)
+            if _w2.is_file():
+                return _checked(_w2, IMAGE_EXTS, MAX_IMAGE_BYTES, "Image")
+        except (ValueError, TypeError, OSError):
+            pass
+    else:
+        # Bare file name: also try the Workspace root before the data dirs.
+        try:
+            import sys as _sys4
+            if str(_project_root()) not in _sys4.path:
+                _sys4.path.insert(0, str(_project_root()))
+            from core.paths import resolve_inside_workspace as _ws_resolve3
+            _w3 = _ws_resolve3(image_id)
+            if _w3.is_file():
+                return _checked(_w3, IMAGE_EXTS, MAX_IMAGE_BYTES, "Image")
+        except (ValueError, TypeError, OSError):
+            pass
+        for allowed in _image_dirs():
             try:
-                cand.relative_to(allowed)
-            except ValueError:
+                cand = (allowed / image_id).resolve()
+                try:
+                    cand.relative_to(allowed)
+                except ValueError:
+                    continue
+                if cand.exists():
+                    return _checked(cand, IMAGE_EXTS, MAX_IMAGE_BYTES, "Image")
+            except (ValueError, OSError):
                 continue
-            if cand.exists():
-                return _checked(cand, IMAGE_EXTS, MAX_IMAGE_BYTES, "Image")
-        except (ValueError, OSError):
-            continue
     # Fall back to the stored path of the image_memory entry.
     try:
         import sys as _sys

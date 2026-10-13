@@ -1112,6 +1112,18 @@
   font-size: 12px;
   color: var(--text-primary);
 }
+/* Attached images stand centered and prominent in the user bubble. */
+.msg-attach-img {
+  text-align: center;
+  margin: 2px 0 10px;
+}
+.msg-attach-img img {
+  max-width: 100%;
+  max-height: 260px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  display: inline-block;
+}
 
 .thinking-text {
   display: inline-flex;
@@ -2081,6 +2093,70 @@
   margin-top: var(--sp-3);
   flex-wrap: wrap;
   justify-content: center;
+}
+/* Inline file preview: fixed size per kind, same glass frame, enter with
+   the shared scale-in motion (no layout shift while it loads). */
+.ws-preview-frame {
+  width: 100%;
+  max-width: 640px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: var(--glass-hi), var(--glass-lo), var(--glass-sh);
+  overflow: hidden;
+  animation: a-scale-in var(--dur-slow) var(--ease) both;
+}
+.ws-preview-pdf {
+  height: 480px;
+}
+.ws-preview-html {
+  height: 360px;
+}
+.ws-preview-img {
+  height: auto;
+  max-height: 420px;
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.25);
+}
+/* Fullscreen preview theater (PDF + HTML + images): the dialog becomes
+   the whole screen with an edge-to-edge viewer sized by flex (never fixed
+   vh) — slim head on top, actions at the bottom, zero outer scroll. The
+   modal shell's own transform open/close animation carries the entrance. */
+.modal-backdrop:has(.ws-preview-dialog) {
+  padding: 0;
+}
+.modal-backdrop:has(.ws-preview-dialog) .modal-panel {
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  border: none;
+  border-radius: 0;
+}
+.modal-panel:has(.ws-preview-dialog) .modal-body {
+  overflow: hidden;
+  padding: 0;
+}
+.ws-preview-dialog {
+  display: flex;
+  justify-content: center;
+  height: 100%;
+}
+.ws-preview-dialog .ws-preview-frame {
+  max-width: none;
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.ws-preview-dialog-img {
+  object-fit: contain;
+}
+.ws-preview-dialog-html {
+  /* Finger swipes pan the slide content instead of the page behind it. */
+  touch-action: pan-x pan-y;
 }
 /* Desktop: exactly 4 cards per row. */
 @media (min-width: 1025px) {
@@ -6158,14 +6234,17 @@ h4,
   max-height: 240px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
+  /* Hidden scrollbar: the panel still scrolls, but no visible bar. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 .pk-bar::-webkit-scrollbar {
-  width: 6px;
+  display: none;
+  width: 0;
+  height: 0;
 }
 .pk-bar::-webkit-scrollbar-thumb {
-  background: var(--border-main);
-  border-radius: 3px;
+  background: transparent;
 }
 .pk-bar.closing {
   animation: a-wsbar-out 160ms var(--ease) forwards;
@@ -6360,6 +6439,11 @@ h4,
   background: rgba(90, 169, 255, 0.35);
   color: #fff;
   border-radius: 3px;
+}
+/* Picked @file / /skill names inside a sent user bubble: same blue as the
+   composer highlight (color only, never weight — layout must not shift). */
+.msg-content .hl-tok-msg {
+  color: var(--text-blue);
 }
 
 /* ---------- step toggle pop ---------- */
@@ -6771,7 +6855,211 @@ h4,
 }
 .question-card.needs-model .glass-btn {
   flex: 1;
+  animation: ask-chip-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
+
+/* ---------- produced file card (PDF deck + preview + downloads) ---------- */
+.msg-final-files {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.msg-file {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 15px 16px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04));
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 20px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  overflow: hidden;
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1), border-color 200ms ease, box-shadow 200ms ease;
+}
+.msg-file::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  inset-inline: 18px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--blue-hi), transparent);
+  opacity: 0.8;
+}
+.msg-file:hover {
+  transform: translateY(-2px);
+  border-color: rgba(109, 182, 255, 0.45);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.44), 0 0 22px rgba(59, 158, 255, 0.16);
+}
+.msg-file-icon {
+  position: relative;
+  flex: 0 0 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  color: #fff;
+  background: linear-gradient(150deg, #e0523c 0%, #b03322 45%, #7e2015 100%);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 13px;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.3), inset 0 -8px 14px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+.msg-file-icon::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  inset-inline-end: 0;
+  border-style: solid;
+  border-width: 0 14px 14px 0;
+  border-color: transparent rgba(0, 0, 0, 0.35) transparent transparent;
+}
+[dir="rtl"] .msg-file-icon::after {
+  border-width: 14px 14px 0 0;
+  border-color: rgba(0, 0, 0, 0.35) transparent transparent transparent;
+}
+.msg-file-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.msg-file-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.msg-file-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+}
+.msg-file-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.msg-file-actions .needs-model-btn {
+  text-decoration: none;
+  padding: 10px 18px;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 12px;
+}
+.msg-file-actions .needs-model-btn:first-child {
+  background: linear-gradient(145deg, var(--blue-hi), var(--blue-lo));
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(59, 158, 255, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+.msg-file-actions .needs-model-btn:first-child:hover {
+  background: linear-gradient(145deg, var(--blue-hi), var(--blue-deep));
+  opacity: 1;
+}
+/* Full-screen PDF preview (same edge-to-edge pattern as the workspace viewer). */
+.modal-backdrop:has(.pdf-preview-dialog) {
+  padding: 0;
+}
+.modal-backdrop:has(.pdf-preview-dialog) .modal-panel {
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  border: none;
+  border-radius: 0;
+}
+.modal-panel:has(.pdf-preview-dialog) .modal-body {
+  overflow: hidden;
+  padding: 0 18px;
+  display: flex;
+  flex-direction: column;
+}
+.pdf-preview-dialog {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.pdf-preview-dialog .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.pdf-preview-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  background: #fff;
+}
+.pdf-imgs-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 10px 0 6px;
+  flex: 0 0 auto;
+}
+.pdf-imgs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 10px;
+  flex: 0 0 auto;
+}
+.pdf-img img {
+  width: 76px;
+  height: 76px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  display: block;
+}
+
+/* ---------- question strip merged into the writing template ---------- */
+/* Every agent question (ask / approval / model) emerges from the composer
+   itself: same width, same glass, same 32px corners — never a separate
+   floating card. Enter rises out of the template, exit sinks back into it. */
+.question-card.from-composer {
+  max-width: 800px;
+  margin: 0 auto 8px;
+  padding: 12px 14px;
+  background: rgba(33, 33, 33, 0.98);
+  -webkit-backdrop-filter: blur(20px) saturate(1.25);
+  backdrop-filter: blur(20px) saturate(1.25);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-inline-start: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 32px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  transform-origin: bottom center;
+  animation: composer-emerge 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.question-card.from-composer.leaving {
+  animation: composer-sink 200ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+@keyframes composer-emerge {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes composer-sink {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
 }
 
 /* ---------- voice level bars ---------- */
@@ -10189,4 +10477,137 @@ body:not(.sched-visible) #scheduleMini {
 body:not(.browser-visible) #browserTab,
 body:not(.browser-visible) #liveMini {
   display: none;
+}
+
+/* ---------- image tile INSIDE the composer box (Manus-style 54px) ----------
+   Same strip as the document cards (above writing): the composer grows with
+   the same expand/collapse animation, tile image covers it, X top-end
+   (hover on desktop, always on touch), click opens fullscreen below. */
+.composer-attachments .attach-imgtile {
+  align-self: center;
+}
+.attach-imgtile {
+  position: relative;
+  width: 54px;
+  height: 54px;
+  flex: 0 0 54px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  cursor: pointer;
+  border-radius: 12px;
+  border: 1px solid var(--border-main);
+  background: var(--background-nav);
+}
+.attach-imgtile-img {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attach-imgtile-x {
+  display: none;
+  position: absolute;
+  top: 4px;
+  inset-inline-end: 4px;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 0;
+  padding: 2px;
+  cursor: pointer;
+  background: var(--icon-tertiary);
+  color: #fff;
+  transition: opacity 200ms var(--ease);
+}
+.attach-imgtile-x svg {
+  width: 10px;
+  height: 10px;
+}
+.attach-imgtile-x:hover {
+  opacity: 0.85;
+}
+.attach-imgtile:hover .attach-imgtile-x {
+  display: flex;
+}
+@media (hover: none) {
+  .attach-imgtile-x {
+    display: flex;
+  }
+}
+/* Same entrance/exit language as the document cards (rise + settle in,
+   sink + shrink out) so the tile feels like part of the composer box. */
+.attach-imgtile.anim {
+  animation: doc-card-in 450ms cubic-bezier(0.2, 0.9, 0.25, 1.08) both;
+  will-change: transform, opacity;
+}
+.attach-imgtile.leaving {
+  animation: doc-card-out 220ms var(--ease) both;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+@media (prefers-reduced-motion: reduce) {
+  .attach-imgtile.anim,
+  .attach-imgtile.leaving {
+    animation: none;
+  }
+}
+
+/* ---------- fullscreen image preview (click a tile to inspect) ---------- */
+.x5-img-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.85);
+  cursor: zoom-out;
+  animation: a-fade-in 180ms var(--ease);
+}
+.x5-img-lightbox-img {
+  max-width: min(92vw, 1100px);
+  max-height: 88vh;
+  object-fit: contain;
+  border-radius: 12px;
+  border: 1px solid var(--border-main);
+  background: #000;
+  cursor: default;
+}
+.x5-img-lightbox-x {
+  position: absolute;
+  top: 16px;
+  inset-inline-end: 16px;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-main);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.x5-img-lightbox-x:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* ---------- @ picker image thumbs (picture instead of default icon) ---------- */
+.pk-thumb-img {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border-main);
+  background: var(--background-nav);
 }

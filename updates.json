@@ -1,6 +1,6 @@
 {
-  "version": "0.29.0",
-  "description": "Console startup is now persistent: the setup one-liner and the x5agent command both start the server detached, so closing SSH or the terminal never stops it, and re-running the same command kills the old server and starts a fresh one on the same port. x5agent --off stops every project server on the port.",
+  "version": "0.37.0",
+  "description": "Every Workspace file now shows one metadata shape everywhere (map, @ lines, uploads, folder listings): id + full path + type + size. The map teaches the agent to paste exact path links as-is into any code/HTML and to copy files into its working folder; PDF decks accept sub-path file ids.",
   "features": [
     "Typing @ mid-word in Arabic opens the file picker; emails like mail@x never trigger it.",
     "@file and /skill boundaries match between editor paint and server injection, including Arabic adjacency.",
@@ -28,6 +28,17 @@
     "Scheduled run pages no longer show the task name on top, so they fit phones.",
     "Opening a scheduled run auto-hides the floating Scheduled Tasks window.",
     "Settings has a black Delete chat history button with the live message count and a loading spinner; it clears the main chat + its search index only — saved memories stay.",
+    "New pdf_create tool behind tool_search: create a whole slide deck from one slides JSON (create), edit it later by task_id with only changed slides regenerating (update), or fetch the stored JSON plus the latest PDF (get).",
+    "Missing-model tools no longer stop the loop: the tool is skipped with its connect message, the model decides to continue or present it, and the final reply carries a Connect button for the right AI Models dialog.",
+    "Every model call now sends the seed context plus the last 30 conversation units (one reply or one call+output each), keeping linkage without unbounded history.",
+    "Unconnected tools now end the reply with a per-tool Connect/Skip choice (no note message): Skip sends the agent a message to continue without the tool, Connect opens that tool's AI Models dialog.",
+    "PDF decks arrive as a designed file card under the reply: click opens a preview with per-image downloads plus whole-file download.",
+    "PDF decks support page sizes (A4/Letter/square, rectangle default) and render through headless Chrome so the PDF matches the slide design exactly, with a pure-Python fallback when Chrome is missing.",
+    "PDF rendering rebuilt for true fidelity: each slide file prints separately with its full design and the pages merge into one PDF (selectable text, embedded images, exact page size).",
+    "The PDF file card is redesigned with page info and a full-screen preview with per-image downloads plus whole-file download.",
+    "Missing-model tools pause with a Connect/Skip strip above the composer (both continue without the tool; Connect also opens that model's dialog).",
+    "Attached images are injected exactly where mentioned, render centered in the message, and Workspace files carry stable ids everywhere.",
+    "The PDF builder sees the same tool catalog and Workspace map as the main agent and resolves image and file ids into the deck folder automatically.",
     "Project card in Settings redesigned with a cleaner repository + version layout.",
     "Update check fixed: the description is back within its 500-char limit and the console version matches updates.json.",
     "Default white buttons (Cancel / secondary actions) are now professional glass, matching the dashboard glass language; black and red buttons keep their look.",
@@ -43,6 +54,15 @@
     "Boot splash never flashes on fast loads: it only appears when loading takes longer than a moment, otherwise the screen goes straight to data.", "Boot reveal is a single animation: page content stays hidden until all data lands, then appears exactly once with its entrance - no multi-jump refresh.", "Balance pricing also matches short custom model names to provider rates (gpt-4o-mini finds openai/gpt-4o-mini), so more requests measure a real dollar cost.",
     "The setup one-liner and x5agent now start the console detached: safe to close SSH, same command restarts (old server killed, new one on 7777).",
     "x5agent --off (alias x5agent-off) stops every project server on the port.",
-    "Server log lives in X5Agent/Data/logs/console.log for persistent runs."
+    "Server log lives in X5Agent/Data/logs/console.log for persistent runs.",
+    "Every Workspace file owns one stable id (its Workspace-relative path) shown in the context map, the @ picker, and @ mention lines, so the agent compares ids instead of guessing names.",
+    "Chat uploads mirror into Workspace under their original name (suffixed only on collision) and arrive as image metadata plus a priority Workspace pointer in the same request.",
+    "@ picks render blue in the sent bubble and regenerate/edit resends inject the identical @ ids and / skill.",
+    "vision_analyze resolves Workspace file ids directly (jailed), and pdf_create accepts folder file ids, copies them jailed into the deck, and tells the slide session to use the exact id as <img src>.",
+    "Connect always reaches the AI Models dialog even when its pause already expired, and no pause strip ever appears after STOP.",
+    "Every file line (Workspace map, uploads, folder listings) carries id + full path + type + size; @ mentions send @<file-id> + full path in place (the map holds the rest) while the picked name stays blue in the message.",
+    "The Workspace map instructs the agent to use exact path links and to copy any file into its working folder so everything lives in one folder.",
+    "pdf_create accepts Workspace-relative sub-path file ids (jailed, traversal rejected) and copies them into the deck preserving the relative path the slide HTML references.",
+    "WhatsApp/Telegram uploads use the same unified file logic: original-name Workspace mirror plus full id/path/type/size hints with analyze/search pointers."
   ]
 }

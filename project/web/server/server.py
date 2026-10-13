@@ -1894,7 +1894,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_workspace_api(parse_qs(parsed.query).get("path", [""])[0])
             return
         if parsed.path == "/api/workspace/download":
-            self._handle_workspace_download_get(parse_qs(parsed.query).get("path", [""])[0])
+            _qs = parse_qs(parsed.query)
+            _pv = (_qs.get("preview", [""])[0] or "").strip() == "1"
+            self._handle_workspace_download_get(_qs.get("path", [""])[0], preview=_pv)
             return
         if parsed.path == "/api/gateway/config":
             self._handle_gateway_config_get()
@@ -2493,6 +2495,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             final = result.get("final_answer") or ""
             audio_list = result.get("final_audio") or []
             _need_kind = result.get("needs_model_kind")
+            _need_tools = result.get("needs_model_tools") or []
             _out = {
                 "ok": True,
                 "reply": str(final),
@@ -2501,12 +2504,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 "model": result.get("model_used", ""),
                 "ids": result.get("message_ids"),
                 "images": result.get("final_images") or [],
+                "files": result.get("final_files") or [],
                 "audio": audio_list,
                 "elapsed": result.get("elapsed_sec", 0),
             }
             if isinstance(_need_kind, str) and _need_kind:
                 _out["needs_model"] = True
                 _out["needs_kind"] = _need_kind
+            if isinstance(_need_tools, list) and _need_tools:
+                _out["needs_model"] = True
+                _out["needs_tools"] = [
+                    {"tool": str(t.get("tool") or "")[:40], "kind": str(t.get("kind") or "")[:16]}
+                    for t in _need_tools[:10] if isinstance(t, dict)
+                ]
             self._send_json(_out)
         except (ValueError, RuntimeError) as e:
             self._send_json({"error": "LLM request failed", "detail": str(e)[:200]}, status=502)
@@ -2753,6 +2763,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             children = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
         except Exception:
             raise _ChatError("cannot list folder", status=500)
+        # Stable file ids: Workspace-relative paths, so @ picks and the agent
+        # reference the exact same id the context map shows.
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.paths import workspace_root as _ws
+            _ws_root = _ws().resolve()
+        except Exception:
+            _ws_root = None
         entries: list[dict] = []
         for p in children[:200]:
             try:
@@ -2770,12 +2789,24 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     entries.append({"name": p.name, "type": "folder",
                                     "items": n, "items_truncated": trunc})
                 elif p.is_file():
+                    _fid = None
+                    try:
+                        if _ws_root is not None:
+                            _fid = str(p.resolve().relative_to(_ws_root)).replace("\\", "/")
+                    except Exception:
+                        _fid = None
+                    try:
+                        _abs = str(p.resolve()).replace("\\", "/")
+                    except Exception:
+                        _abs = _fid or p.name
                     try:
                         st = p.stat()
                         entries.append({"name": p.name, "type": "file",
+                                        "id": _fid or p.name, "path": _abs,
                                         "size": st.st_size, "mtime": int(st.st_mtime)})
                     except Exception:
-                        entries.append({"name": p.name, "type": "file"})
+                        entries.append({"name": p.name, "type": "file",
+                                        "id": _fid or p.name, "path": _abs})
             except Exception:
                 continue
         return {"entries": entries, "truncated": len(children) > 200}
@@ -3208,11 +3239,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             self._send_json({"error": "gateway failed"}, status=500)
 
-    def _handle_workspace_download_get(self, raw_path: str):
-        """Serve one Workspace file by name only (no preview — download).
+    def _handle_workspace_download_get(self, raw_path: str, preview: bool = False):
+        """Serve one Workspace file by name only (jailed, streamed).
 
-        No size cap by requirement: files stream in 1MB chunks straight from
-        disk and are never buffered in memory (GB browser downloads included).
+        Default is a download (attachment). With ?preview=1 and a safe
+        previewable extension (pdf/html/images) it serves inline so the
+        Workspace page can embed it in an <iframe>/<img> instead of
+        forcing a download — this fixes HTML files always downloading
+        when opened. Streams in 1MB chunks, never buffered in memory.
+        Supports single Range requests (206) because Chrome's built-in
+        PDF viewer fetches PDFs in ranges — ignoring Range is what broke
+        the PDF preview. Filenames are RFC 5987-encoded in the header so
+        non-ASCII (e.g. Arabic) names never produce an invalid response.
         Virtual downloads/downloads/... paths stream from the library folder.
         A client that disconnects mid-stream ends it quietly server-side.
         """
@@ -3254,18 +3292,77 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     pass
                 return
             import mimetypes as _mt
-            import shutil as _shutil
+            from urllib.parse import quote as _quote
             mime = _mt.guess_type(target.name)[0] or "application/octet-stream"
-            self.send_response(200)
+            # Inline preview only for safe viewable types; anything else
+            # stays a forced download even when ?preview=1 is passed.
+            _ext = (target.suffix or "").lower().lstrip(".")
+            _inline_exts = frozenset({
+                "pdf", "html", "htm",
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif",
+            })
+            _inline = bool(preview) and _ext in _inline_exts
+            if _ext in ("html", "htm"):
+                mime = "text/html; charset=utf-8"
+            # Raw non-ASCII names in this header are what produced
+            # "127.0.0.1 sent an invalid response" — ASCII fallback plus
+            # the RFC 5987 filename* parameter keeps every name valid.
+            _ascii = (target.name.encode("ascii", "ignore").decode() or "file")
+            _ascii = _ascii.replace('"', "").replace("\\", "")[:100] or "file"
+            _disp = f'{"inline" if _inline else "attachment"}; filename="{_ascii}"; filename*=UTF-8\'\'{_quote(target.name)}'
+            # Single Range support (bytes=start-end / start- / -tail): the
+            # built-in PDF viewer requests ranges; answer 206 for them.
+            _start, _end = 0, size - 1
+            _status = 200
+            if size > 0:
+                _rg = (self.headers.get("Range") or "").strip()
+                if _rg.startswith("bytes="):
+                    try:
+                        _spec = _rg[6:].split(",")[0].strip()
+                        if _spec.startswith("-"):
+                            _tail = int(_spec[1:])
+                            if _tail > 0:
+                                _start = max(0, size - _tail)
+                        else:
+                            _a, _, _b = _spec.partition("-")
+                            _start = int(_a) if _a else 0
+                            _end = int(_b) if _b else size - 1
+                            _end = min(_end, size - 1)
+                        if 0 <= _start <= _end < size:
+                            _status = 206
+                        else:
+                            _start, _end = 0, size - 1
+                    except ValueError:
+                        _start, _end = 0, size - 1
+            _length = _end - _start + 1 if size > 0 else 0
+            self.send_response(_status)
             self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(size))
-            self.send_header("Content-Disposition", f'attachment; filename="{target.name}"')
+            self.send_header("Content-Length", str(_length))
+            self.send_header("Accept-Ranges", "bytes")
+            if _status == 206:
+                self.send_header("Content-Range", f"bytes {_start}-{_end}/{size}")
+            self.send_header("Content-Disposition", _disp)
+            if _inline:
+                # Same-origin iframe embedding allowed (Workspace preview),
+                # other sites cannot frame it.
+                self.send_header("X-Frame-Options", "SAMEORIGIN")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             try:
                 with open(target, "rb") as _fh:
-                    _shutil.copyfileobj(_fh, self.wfile, length=1024 * 1024)
+                    if _start:
+                        _fh.seek(_start)
+                    _remaining = _length
+                    while _remaining > 0:
+                        _chunk = _fh.read(min(1024 * 1024, _remaining))
+                        if not _chunk:
+                            break
+                        try:
+                            self.wfile.write(_chunk)
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
+                        _remaining -= len(_chunk)
             except (BrokenPipeError, ConnectionResetError):
                 pass
         except _ChatError:
@@ -3735,27 +3832,56 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         def _mirror_workspace(blob_bytes: bytes) -> str | None:
             # Best-effort mirror: every chat upload lives in Workspace too so it
             # shows with other files + jailed model tools can read it.
-            # Returns Workspace-relative file_id or None. Never raises.
+            # The mirror keeps the ORIGINAL file name (stable file_id matching
+            # the @ token and the Workspace map); on collision a short suffix
+            # is added. Returns Workspace-relative file_id or None. Never raises.
             try:
                 from core.paths import workspace_root as _ws
                 ws = _ws()
                 ws.mkdir(parents=True, exist_ok=True)
                 ws_resolved = ws.resolve()
-                candidate = (ws / f"{_uuid.uuid4().hex[:8]}_{safe_display}").resolve()
+                base = (safe_display or "file")[:150].replace("/", "_").replace("\\", "_")
+                if not base or base in (".", ".."):
+                    base = "file"
+                stem, dot, suffix = base.rpartition(".")
+                if not stem:
+                    stem, suffix = base, ""
+                else:
+                    suffix = dot + suffix
+                candidate = (ws / base).resolve()
                 try:
                     candidate.relative_to(ws_resolved)
                 except ValueError:
                     return None
+                if candidate.exists():
+                    candidate = (ws / f"{stem}_{_uuid.uuid4().hex[:6]}{suffix}").resolve()
+                    try:
+                        candidate.relative_to(ws_resolved)
+                    except ValueError:
+                        return None
                 if not candidate.exists():
                     candidate.write_bytes(blob_bytes)
                 return str(candidate.relative_to(ws_resolved)).replace("\\", "/")
             except Exception:
                 return None
 
+        def _ws_abs(rel) -> str | None:
+            # Full exact path of a Workspace file_id (forward slashes, so the
+            # agent pastes it as-is into any code or HTML). Never raises.
+            try:
+                if not rel or not isinstance(rel, str):
+                    return None
+                from core.paths import workspace_root as _ws2
+                return str((_ws2() / rel).resolve()).replace("\\", "/")
+            except Exception:
+                return None
+
         if kind == "document":
             # The Workspace copy is what document_search indexes (file_id).
             file_id = _mirror_workspace(blob) or safe_display
-            ref = f"- document: name=\"{safe_display}\" file_id=\"{file_id}\""
+            _abs = _ws_abs(file_id) or file_id
+            ref = (f"- document: name=\"{safe_display}\" file_id=\"{file_id}\""
+                   f" | path: \"{_abs}\" | type: {ext} | size: {len(blob)} bytes")
             return kind, saved, ref, file_id
 
         if kind == "image":
@@ -3765,14 +3891,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             entry = store_image(name=safe_display, path=str(saved), is_persistent=False, is_temp=True)
             ws_file = _mirror_workspace(blob)
             if ws_file:
-                ref = f"- image: name=\"{safe_display}\" image_id=\"{entry['image_id']}\" file_id=\"{ws_file}\""
+                _abs = _ws_abs(ws_file) or ws_file
+                ref = (f"- image: name=\"{safe_display}\" image_id=\"{entry['image_id']}\" file_id=\"{ws_file}\""
+                       f" | path: \"{_abs}\" | type: {ext} | size: {len(blob)} bytes")
             else:
                 ref = f"- image: name=\"{safe_display}\" image_id=\"{entry['image_id']}\""
             return kind, saved, ref, entry["image_id"]
         elif kind == "video":
             ws_file = _mirror_workspace(blob)
             if ws_file:
-                ref = f"- video: name=\"{safe_display}\" video_path=\"{saved}\" file_id=\"{ws_file}\""
+                _abs = _ws_abs(ws_file) or ws_file
+                ref = (f"- video: name=\"{safe_display}\" video_path=\"{saved}\" file_id=\"{ws_file}\""
+                       f" | path: \"{_abs}\" | type: {ext} | size: {len(blob)} bytes")
             else:
                 ref = f"- video: name=\"{safe_display}\" video_path=\"{saved}\""
             return kind, saved, ref, None
@@ -3785,7 +3915,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 raise ValueError("text file is empty")
             ws_file = _mirror_workspace(blob)
             if ws_file:
-                ref = f"- text: name=\"{safe_display}\" chars=\"{len(text_content)}\" file_id=\"{ws_file}\""
+                _abs = _ws_abs(ws_file) or ws_file
+                ref = (f"- text: name=\"{safe_display}\" chars=\"{len(text_content)}\" file_id=\"{ws_file}\""
+                       f" | path: \"{_abs}\" | type: {ext} | size: {len(blob)} bytes")
             else:
                 ref = f"- text: name=\"{safe_display}\" chars=\"{len(text_content)}\""
             return kind, saved, ref, text_content
@@ -3975,9 +4107,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             _sname, _sinstr = "", ""
         # Optional workspace refs (frontend "@" picker): [{name, path}] (or
-        # plain path strings). Each "@name" token is replaced IN PLACE with
-        # that file's metadata; leftovers are appended (bounded).
-        _ref_metas: list = []
+        # plain path strings). Each "@name" token becomes "@<file-id> + full
+        # path" IN PLACE — id and path only, never the full metadata: the
+        # complete metadata for that id already travels in the Workspace map.
+        # Unused picks append as "@<file-id> + path" lines (bounded).
+        _ref_ids: list = []
         try:
             _refs = payload.get("workspace_refs") or []
             if isinstance(_refs, list) and _refs:
@@ -3996,28 +4130,21 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     except (_ChatError, ValueError, OSError):
                         continue
                     try:
-                        if _t.is_dir():
-                            _n = 0
-                            try:
-                                for _ in _t.iterdir():
-                                    _n += 1
-                                    if _n >= 1001:
-                                        break
-                            except Exception:
-                                pass
-                            _ref_metas.append((_nm, f"[Workspace file: {_pth} | type: folder | items: {_n}]"))
-                        elif _t.is_file():
-                            try:
-                                _sz = _t.stat().st_size
-                            except Exception:
-                                _sz = 0
-                            _ext = _t.suffix.lower().lstrip(".") or "no-ext"
-                            _ref_metas.append((_nm, f"[Workspace file: {_pth} | type: {_ext} | size: {_sz} bytes]"))
+                        if not (_t.is_dir() or _t.is_file()):
+                            continue
                     except Exception:
                         continue
+                    _fid = _pth.strip().replace("\\", "/").strip("/")
+                    if not _fid:
+                        continue
+                    try:
+                        _full = str(_t).replace("\\", "/")
+                    except Exception:
+                        _full = _fid
+                    _ref_ids.append((_nm, _fid, _full))
         except Exception:
-            _ref_metas = []
-        if not msg and not raw_attachments and not _sinstr and not _ref_metas:
+            _ref_ids = []
+        if not msg and not raw_attachments and not _sinstr and not _ref_ids:
             raise _ChatError("message required")
         try:
             skip_ids = payload.get("skip_history_ids") or []
@@ -4064,6 +4191,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             if _kind == "image" and _iid:
                 img_no += 1
                 msg = _re.sub(rf"@image{img_no}(?![0-9])", f"@{_iid}", msg)
+        # Center each image where it stands: the opaque @<id> token becomes
+        # that image's own metadata line, so the agent sees every image (id +
+        # file) exactly where the user mentioned it — not only in the block
+        # below. Unmatched leftovers still append, so nothing is lost.
+        try:
+            _iid_to_line = {}
+            for (_k, _i), _ln in zip(saved_meta, attach_lines):
+                if _k == "image" and _i:
+                    _iid_to_line[str(_i)] = _ln
+            for _iid, _ln in _iid_to_line.items():
+                msg = _re.sub(r"(?<![\w@])@" + _re.escape(_iid) + r"(?![\w])",
+                              "\n" + _ln + "\n", msg)
+        except Exception:
+            pass
 
         if attach_lines:
             if msg:
@@ -4106,10 +4247,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                                + "\n".join(_prio[:4]))
         else:
             loop_input = msg
-        # In-place injection: "@name" becomes that file's metadata where it
-        # stands, "/skillname" becomes the skill instructions in place — so
-        # mid-message mentions land in context exactly where the user put
-        # them. Anything unmatched is appended (bounded) so nothing is lost.
+        # In-place injection: "@name" becomes "@<file-id> + full path" where
+        # it stands, "/skillname" becomes the skill instructions in place —
+        # so mid-message mentions land in context exactly where the user put
+        # them. Unused picks append as "@<file-id> + path" lines (bounded).
         try:
             import re as _re
 
@@ -4124,17 +4265,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 except Exception:
                     return None
 
-            _used_metas: set = set()
-            for _nm, _line in _ref_metas:
+            _used_ids: set = set()
+            for _nm, _fid, _full in _ref_ids:
                 _rx = _tok_rx(_nm, "@")
                 if _rx is None:
                     continue
-                loop_input, _cnt = _rx.subn("\n" + _line + "\n", loop_input)
+                _rep = "@" + _fid + ' "' + _full + '"'
+                loop_input, _cnt = _rx.subn(lambda _m, _r=_rep: _r, loop_input)
                 if _cnt:
-                    _used_metas.add((_nm, _line))
-            _leftover = [ln for (nm, ln) in _ref_metas if (nm, ln) not in _used_metas]
+                    _used_ids.add(_fid)
+            _leftover = [(_f, _p) for (_nm, _f, _p) in _ref_ids if _f not in _used_ids]
             if _leftover:
-                loop_input += "\n\n[Workspace files — metadata]\n" + "\n".join(_leftover[:10])
+                loop_input += "\n\n[Workspace files mentioned]\n" + "\n".join(
+                    "@" + _f + ' "' + _p + '"' for (_f, _p) in _leftover[:10])
             if _sname and _sinstr:
                 _srx = _tok_rx(_sname, "/")
                 _stext = f"\n[Skill: {_sname}]\n{_sinstr}\n"
@@ -4229,7 +4372,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             answer = payload.get("answer")
             if isinstance(decision, str) and decision in ("continue", "stop"):
                 q.put({"decision": decision})
-            elif isinstance(decision, str) and decision in ("skip", "activate"):
+            elif isinstance(decision, str) and decision in ("skip", "connect", "activate"):
                 q.put({"decision": decision})
             elif isinstance(answer, str) and answer.strip():
                 q.put({"answer": answer.strip()[:2000]})
@@ -4280,6 +4423,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     ev.set()
                 except Exception:
                     pass
+            # A STOP during a pause (ask/approval/needs_model/live) must wake
+            # the loop so it sees the cancel and never resumes on its own —
+            # not after 600s expiry, not after a page refresh. Best-effort.
+            try:
+                with _PQ_LOCK:
+                    _qs = list(_PENDING_QUESTIONS.values())
+                for _q in _qs:
+                    try:
+                        _q.put({"decision": "stop"})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"error": "cancel failed", "detail": str(e)[:200]}, status=500)
@@ -4413,6 +4569,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             final = result.get("final_answer") or ""
             audio_list = result.get("final_audio") or []
             _need_kind = result.get("needs_model_kind")
+            _need_tools = result.get("needs_model_tools") or []
             _out = {
                 "reply": str(final),
                 "events": events,
@@ -4420,12 +4577,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 "model": result.get("model_used", ""),
                 "ids": result.get("message_ids"),
                 "images": result.get("final_images") or [],
+                "files": result.get("final_files") or [],
                 "audio": audio_list,
                 "elapsed": result.get("elapsed_sec", 0),
             }
             if isinstance(_need_kind, str) and _need_kind:
                 _out["needs_model"] = True
                 _out["needs_kind"] = _need_kind
+            if isinstance(_need_tools, list) and _need_tools:
+                _out["needs_model"] = True
+                _out["needs_tools"] = [
+                    {"tool": str(t.get("tool") or "")[:40], "kind": str(t.get("kind") or "")[:16]}
+                    for t in _need_tools[:10] if isinstance(t, dict)
+                ]
             self._send_json(_out)
         except Exception as e:
             self._send_json({"error": "chat failed", "detail": str(e)}, status=500)
@@ -4742,6 +4906,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 else:
                     final = res.get("final_answer") or ""
                     _need_kind = res.get("needs_model_kind")
+                    _need_tools = res.get("needs_model_tools") or []
                     _done = {
                         "type": "done",
                         "reply": str(final),
@@ -4749,12 +4914,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                         "steps": res.get("steps", 0),
                         "ids": res.get("message_ids"),
                         "images": res.get("final_images") or [],
+                        "files": res.get("final_files") or [],
                         "audio": res.get("final_audio") or [],
                         "elapsed": res.get("elapsed_sec", 0),
                     }
                     if isinstance(_need_kind, str) and _need_kind:
                         _done["needs_model"] = True
                         _done["needs_kind"] = _need_kind
+                    if isinstance(_need_tools, list) and _need_tools:
+                        _done["needs_model"] = True
+                        _done["needs_tools"] = [
+                            {"tool": str(t.get("tool") or "")[:40], "kind": str(t.get("kind") or "")[:16]}
+                            for t in _need_tools[:10] if isinstance(t, dict)
+                        ]
                     _emit(_done)
         except Exception:
             pass

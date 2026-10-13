@@ -75,29 +75,43 @@ def _is_dangerous_browser_tool(name: str) -> bool:
         return False
 
 
-def _pause_for_missing_model(name: str, args: Any, kind: str, on_question) -> dict:
-    """Pause the loop when a tool needs a model kind that is not connected.
+def _resolve_missing_model(name: str, args: Any, kind: str, on_question) -> dict:
+    """Pause for the user's Connect/Skip choice, then continue WITHOUT the tool.
 
-    Returns a tool-style result dict (never raises). Skip lets the loop
-    continue without this tool; activate (or expiry) stops the loop so the
-    UI can send the user to the right AI Models dialog.
+    The strip above the composer offers the choice per tool: Skip continues
+    the task without it; Connect also continues (and opens that kind's model
+    dialog so it is ready next time). Expiry or no-UI also continues — a
+    missing model pauses for a decision but never stalls the loop, it only
+    ever skips the tool. Never raises.
     """
-    if on_question is None:
-        return {"tool": name, "arguments": args,
-                "error": _missing_text(kind, name), "success": False,
-                "needs_model_kind": kind}
+    if on_question is not None:
+        try:
+            on_question("needs_model", {"kind": kind, "tool": name})
+        except Exception:
+            pass
+    return _model_skipped_result(name, args, kind)
+
+
+def _model_skipped_result(name: str, args: Any, kind: str) -> dict:
+    """A tool gated on an unconnected model kind becomes a skipped success.
+
+    The loop NEVER pauses or stops for this: the sentence goes to the MODEL,
+    which decides — continue the task without this tool, or present the
+    message to the user. The turn's final reply carries needs_model_kind, so
+    the UI renders its /ai-models link as a Connect button opening the right
+    model dialog. Never raises.
+    """
     try:
-        decision = on_question("needs_model", {"kind": kind, "tool": name})
+        text = _missing_text(kind, name)
     except Exception:
-        decision = None
-    if isinstance(decision, dict) and decision.get("decision") == "skip":
-        return {"tool": name, "arguments": args,
-                "output": {"event": f"Skipped {name} (no model)", "skipped": True,
-                           "needs_model_kind": kind},
-                "success": True}
+        text = f"No {kind} model connected."
     return {"tool": name, "arguments": args,
-            "error": _missing_text(kind, name), "success": False,
-            "needs_model_kind": kind}
+            "output": {"event": f"Skipped {name} (no model)", "skipped": True,
+                       "needs_model_kind": kind,
+                       "message": text + " Continue the task without this tool "
+                                  "when possible; otherwise present this message "
+                                  "to the user with its /ai-models link."},
+            "success": True}
 
 
 def _missing_text(kind: str, name: str) -> str:
@@ -669,10 +683,95 @@ def _collect_final_audio(tool_calls_log: list) -> list[dict]:
     return audios
 
 
+def _collect_final_files(tool_calls_log: list) -> list[dict]:
+    """Workspace files produced via tools (e.g. pdf_create), for the file card.
+
+    Scans for successful results carrying a Workspace-relative `file` path
+    (plus slide images for pdf decks, so the preview can offer them too).
+    Bounded (4 files, 20 images each), deduped by path. Never raises.
+    """
+    files: list[dict] = []
+    seen: set[str] = set()
+    try:
+        from core.paths import resolve_inside_workspace
+    except Exception:
+        resolve_inside_workspace = None  # type: ignore[assignment]
+    try:
+        for entry in (tool_calls_log or [])[-12:]:
+            if not isinstance(entry, dict):
+                continue
+            res = entry.get("result") or {}
+            if not isinstance(res, dict) or not res.get("success"):
+                continue
+            out = res.get("output") or {}
+            if not isinstance(out, dict):
+                continue
+            rel = out.get("file")
+            if not isinstance(rel, str) or not rel.strip() or rel.strip() in seen:
+                continue
+            rel = rel.strip()[:300]
+            size = 0
+            if resolve_inside_workspace is not None:
+                try:
+                    target = resolve_inside_workspace(rel)
+                    if target.is_file():
+                        size = target.stat().st_size
+                    else:
+                        continue
+                except Exception:
+                    continue
+            seen.add(rel)
+            item: dict = {"name": rel.rsplit("/", 1)[-1][:100], "path": rel, "size": size}
+            try:
+                images: list[dict] = []
+                if isinstance(out.get("slides"), list):
+                    folder = rel.rsplit("/", 1)[0] if "/" in rel else ""
+                    for slide in out["slides"][:50]:
+                        if not isinstance(slide, dict):
+                            continue
+                        for img in (slide.get("images") or [])[:10]:
+                            if not isinstance(img, dict):
+                                continue
+                            nm = str(img.get("file") or "").strip()
+                            if not nm or "/" in nm.replace("\\", "/") or ".." in nm:
+                                continue
+                            irel = f"{folder}/{nm}" if folder else nm
+                            if irel in seen:
+                                continue
+                            if resolve_inside_workspace is not None:
+                                try:
+                                    if not resolve_inside_workspace(irel).is_file():
+                                        continue
+                                except Exception:
+                                    continue
+                            seen.add(irel)
+                            images.append({"name": nm[:100], "path": irel})
+                            if len(images) >= 20:
+                                break
+                        if len(images) >= 20:
+                            break
+                if images:
+                    item["images"] = images
+            except Exception:
+                pass
+            try:
+                count = out.get("slides_done") or out.get("slides") or []
+                if isinstance(count, list) and count:
+                    item["pages"] = len(count)
+            except Exception:
+                pass
+            files.append(item)
+            if len(files) >= 4:
+                break
+    except Exception:
+        pass
+    return files
+
+
 def _persist_conversation(user_input: str, assistant_output: str, steps: list | None = None,
                           images: list | None = None, elapsed: int | None = None,
-                          audios: list | None = None, session_key: str | None = None,
-                          reuse_user_id: str | None = None):
+                           audios: list | None = None, session_key: str | None = None,
+                           reuse_user_id: str | None = None, files: list | None = None):
     import uuid
     if isinstance(session_key, str) and session_key.strip():
         # Branch session (one per scheduled job / trigger): NEVER touches the
@@ -701,6 +800,8 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
                 extra["images"] = images[:6]
             if isinstance(audios, list) and audios:
                 extra["audio"] = audios[:4]
+            if isinstance(files, list) and files:
+                extra["files"] = files[:4]
             # Edit/regenerate resend: the edited user bubble already persists
             # (server updated it in place) — append ONLY the assistant reply,
             # same contract as the main chat (fixes the duplicated-message bug).
@@ -750,6 +851,8 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
         assistant_msg["images"] = images[:6]
     if isinstance(audios, list) and audios:
         assistant_msg["audio"] = audios[:4]
+    if isinstance(files, list) and files:
+        assistant_msg["files"] = files[:4]
     data.append(assistant_msg)
     if len(data) > 1000:
         removed = data[:-1000]
@@ -776,6 +879,35 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
     except Exception:
         pass
     return uid, aid
+
+
+_UNIT_LIMIT = 30
+
+
+def _outgoing_messages(seed: list, units: list, limit: int = _UNIT_LIMIT) -> list:
+    """Per-step provider input: seed + the last N conversation units.
+
+    One unit = one model reply, or one tool call + its output together, so
+    the model always sees what it did in the last 30 units with call/output
+    linkage intact. The seed (system + full L4-L8 context, task included) is
+    sent every step; full history stays in `messages`, only the send is
+    windowed. Never raises.
+    """
+    try:
+        count = int(limit) if isinstance(limit, int) else _UNIT_LIMIT
+        if count < 1:
+            count = _UNIT_LIMIT
+        tail = units[-count:] if len(units) > count else units
+        out = list(seed)
+        for unit in tail:
+            if isinstance(unit, list):
+                out.extend(unit)
+        return out
+    except Exception:
+        try:
+            return list(seed)
+        except Exception:
+            return []
 
 
 def _clear_temp_images_if_any():
@@ -888,6 +1020,11 @@ def run_loop(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_context},
     ]
+    # Windowing: `seed` (system + full L4-L8 context) goes out every step;
+    # every turn unit (one reply, or one call + its output) is appended to
+    # `units`, and the provider only ever receives seed + last 30 units.
+    seed = list(messages)
+    units: list[list[dict]] = []
     # Universal text model (AI Models section). No provider-specific code here:
     # the record carries everything the engine needs (see core/ai_models).
     try:
@@ -940,7 +1077,10 @@ def run_loop(
     final_answer: str | None = None
     cancelled = False
     persist_ids: tuple | None = None
-    needs_model_stop: str | None = None
+    # Tools skipped this turn for a missing model connection, in order
+    # (deduplicated by tool). Flags the final reply so the UI offers a
+    # per-tool Connect/Skip choice. The loop itself never stops for this.
+    skipped_models: list[dict] = []
     # Discovered tools become directly callable once tool_search returns their specs
     known_tool_names = {t.get("function", {}).get("name") for t in core_tools}
     dynamic_tools: list[dict] = []
@@ -964,6 +1104,9 @@ def run_loop(
                 pass
 
         try:
+            # First injection happened once above (seed); every later step
+            # resends the seed plus only what is new (last 30 units).
+            outgoing = _outgoing_messages(seed, units)
             # NOTE (protocol v1): the provider returns text only, so the
             # loop answers directly. Tool calling via the model returns in a
             # future protocol version; local tools stay wired and gated below.
@@ -974,7 +1117,7 @@ def run_loop(
             if _use_aip:
                 from core.ai_models import aip as _aip_run
                 _canonical = _aip_run.canonical_from_loop(
-                    messages, list(core_tools) + list(dynamic_tools))
+                    outgoing, list(core_tools) + list(dynamic_tools))
                 _res = _aip_run.execute_compiled(_compiled, _canonical)
                 content_text = _res.get("text") or ""
                 _emit_token(content_text)
@@ -982,7 +1125,7 @@ def run_loop(
                             "tool_calls": _res.get("tool_calls") or []}
             else:
                 content_text = _universal_chat(
-                    _model_record, messages,
+                    _model_record, outgoing,
                     {"on_chunk": _emit_chunk if on_token is not None else None,
                      "cancel_event": cancel_flag},
                 )
@@ -1003,7 +1146,9 @@ def run_loop(
                                     "Please try again or check the AI model connection.")
                     break
             # Add an assistant error note to messages so next iteration can recover
-            messages.append({"role": "assistant", "content": f"[System note: provider temporarily unavailable: {str(e)[:200]}. Will retry.]"})
+            _note = {"role": "assistant", "content": f"[System note: provider temporarily unavailable: {str(e)[:200]}. Will retry.]"}
+            messages.append(_note)
+            units.append([_note])
             # Small backoff
             time.sleep(1)
             if step == max_steps:
@@ -1047,7 +1192,9 @@ def run_loop(
                     "arguments": json.dumps(targs, ensure_ascii=False) if isinstance(targs, dict) else str(targs)
                 }
             })
-        messages.append({"role": "assistant", "content": content or "", "tool_calls": raw_tool_calls})
+        assistant_msg = {"role": "assistant", "content": content or "", "tool_calls": raw_tool_calls}
+        messages.append(assistant_msg)
+        unit = [assistant_msg]
 
         # No narration for tool calls: tools run silently, only their event
         # line is shown. An optional `reason` arg is stripped before execute.
@@ -1097,47 +1244,34 @@ def run_loop(
                 result = execute_tool(name, args)
             else:
                 result = execute_tool(name, args)
-            # Missing-model gate: a tool that needs an unconnected model kind
-            # pauses the loop (skip continues, activate stops) instead of
-            # spamming the same failure every step.
+            # Missing-model gate: never pauses, never stops the loop. A tool
+            # that needs an unconnected model kind becomes a skipped success
+            # carrying the connect sentence, so the MODEL decides: continue
+            # without this tool, or present it to the user (the turn's final
+            # reply carries the first skipped kind, and the UI renders its
+            # /ai-models link as a Connect button for the right dialog).
             try:
                 _mkind = _missing_kind_of(result) if isinstance(result, dict) else None
             except Exception:
                 _mkind = None
-            _needs_stop_kind: str | None = None
             if _mkind is not None:
                 try:
-                    result = _pause_for_missing_model(name, args, _mkind, on_question)
+                    result = _resolve_missing_model(name, args, _mkind, on_question)
+                except Exception:
+                    try:
+                        result = _model_skipped_result(name, args, _mkind)
+                    except Exception:
+                        pass
+                try:
+                    if not any(s.get("tool") == name for s in skipped_models):
+                        skipped_models.append({"tool": str(name)[:40], "kind": str(_mkind)[:16]})
                 except Exception:
                     pass
-                try:
-                    if isinstance(result, dict) and not result.get("success"):
-                        _needs_stop_kind = str(result.get("needs_model_kind") or _mkind)
-                except Exception:
-                    _needs_stop_kind = _mkind
-            # Fresh-answer cancel: the user answered a question as a NEW
-            # request — drop this result silently and stop the whole run
-            # (no events, no history append, no persist; the client starts a
-            # brand-new loop with the answer). Also covers STOP pressed while
-            # a question/approval/live pause was blocking in on_question.
-                try:
-                    if isinstance(result, dict) and not result.get("success"):
-                        _needs_stop_kind = str(result.get("needs_model_kind") or _mkind)
-                except Exception:
-                    _needs_stop_kind = _mkind
             if _is_cancelled(cancel_flag):
                 cancelled = True
                 break
             tool_calls_log.append({"step": step, "tool": name, "arguments": args,
                                    "result": result, "reason": call_reason})
-            # User chose "activate model": stop the loop here so the UI can
-            # send them to the right dialog. Skip already continued above.
-            if _needs_stop_kind is not None:
-                try:
-                    needs_model_stop = str(_needs_stop_kind)
-                except Exception:
-                    needs_model_stop = "text"
-                break
             # Live handoff: human_control pauses the loop so the user
             # can drive the browser; the UI resumes it via on_question("live").
             # live_preview never pauses — it only shows the floating player.
@@ -1247,21 +1381,19 @@ def run_loop(
             output_str = json.dumps(result, ensure_ascii=False, indent=2)
             if len(output_str) > 12000:
                 output_str = output_str[:12000] + "\n... truncated"
-            messages.append({
+            tool_msg = {
                 "role": "tool",
                 "tool_call_id": tc["id"],
                 "content": output_str,
-            })
+            }
+            messages.append(tool_msg)
+            unit.append(tool_msg)
 
+        # The step's unit (call + all its outputs) is complete: visible to the
+        # model from the next step on, inside the last-30 window.
+        units.append(unit)
         # A mid-step cancel (fresh answer / STOP during a pause) stops now.
         if cancelled:
-            break
-        # Missing-model activate: stop the whole run with a connect prompt.
-        if needs_model_stop is not None:
-            try:
-                final_answer = _missing_text(needs_model_stop, "")
-            except Exception:
-                final_answer = "Model not connected."
             break
 
         # Loop continues - next iteration will see tool outputs
@@ -1289,6 +1421,7 @@ def run_loop(
     # turn sees it was stopped by the user and never continues it unasked.
     # No media for unfinished work — nothing final was produced.
     final_images: list[dict] = []
+    final_files: list[dict] = []
     final_audio: list[dict] = []
     try:
         elapsed_sec = max(0, int(round(time.time() - turn_t0)))
@@ -1308,11 +1441,15 @@ def run_loop(
         except Exception:
             final_images = []
         try:
+            final_files = _collect_final_files(tool_calls_log)
+        except Exception:
+            final_files = []
+        try:
             final_audio = _collect_final_audio(tool_calls_log)
         except Exception:
             final_audio = []
         try:
-            persist_ids = _persist_conversation(user_input, final_answer, _persist_steps(tool_calls_log), final_images, elapsed_sec, final_audio, session_key=session_key, reuse_user_id=reuse_user_id)
+            persist_ids = _persist_conversation(user_input, final_answer, _persist_steps(tool_calls_log), final_images, elapsed_sec, final_audio, session_key=session_key, reuse_user_id=reuse_user_id, files=final_files)
         except Exception:
             pass
 
@@ -1337,7 +1474,9 @@ def run_loop(
         "cancelled": cancelled,
         "elapsed_sec": elapsed_sec,
         "final_images": final_images,
+        "final_files": final_files,
         "final_audio": final_audio,
         "message_ids": {"user": persist_ids[0], "assistant": persist_ids[1]} if persist_ids else None,
-        "needs_model_kind": needs_model_stop,
+        "needs_model_kind": skipped_models[0]["kind"] if skipped_models else None,
+        "needs_model_tools": skipped_models[:10],
     }

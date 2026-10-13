@@ -51,6 +51,53 @@ try {
   agentMode = "restricted";
 }
 let pendingQuestion = null;
+// Unanswered agent question (ask/approval/needs_model) persisted across page
+// refresh: the server keeps the same question id blocked (up to its timeout),
+// so restoring the strip lets the user still answer it. Live handoffs are
+// excluded (they restore through the live state instead).
+const PENDING_Q_KEY = "x5:pending-question";
+function storePendingQuestion(frame) {
+  try {
+    if (!frame || !frame.id || frame.kind === "live") return;
+    if (!["ask", "approval", "needs_model"].includes(frame.kind || "ask")) return;
+    localStorage.setItem(PENDING_Q_KEY, JSON.stringify({
+      id: String(frame.id).slice(0, 16),
+      kind: frame.kind || "ask",
+      text: String(frame.text || frame.command || "").slice(0, 2000),
+      choices: Array.isArray(frame.choices) ? frame.choices.slice(0, 8).map((c) => String(c).slice(0, 200)) : [],
+      command: String(frame.command || "").slice(0, 500),
+      needs_kind: String(frame.needs_kind || "text").slice(0, 20),
+      tool: String(frame.tool || "").slice(0, 40),
+    }));
+  } catch (_) {}
+}
+function readPendingStored() {
+  try {
+    const raw = localStorage.getItem(PENDING_Q_KEY);
+    if (!raw) return null;
+    const q = JSON.parse(raw);
+    if (!q || typeof q !== "object" || !q.id || q.kind === "live") return null;
+    if (!["ask", "approval", "needs_model"].includes(q.kind)) return null;
+    return { type: "question", ...q };
+  } catch (_) {
+    return null;
+  }
+}
+function clearPendingStored() {
+  try {
+    localStorage.removeItem(PENDING_Q_KEY);
+  } catch (_) {}
+}
+function restorePendingQuestion() {
+  // One-shot: if the user refreshes mid-question, the strip comes back
+  // exactly as it was until they choose (or it expires server-side).
+  try {
+    if (document.getElementById("questionCard")) return;
+    if (!document.querySelector('.page[data-page="agent"].active')) return;
+    const saved = readPendingStored();
+    if (saved) showQuestionCard(saved);
+  } catch (_) {}
+}
 let activeThinking = null;
 let lastUserText = "";
 let lastUserEl = null;
@@ -507,6 +554,126 @@ function appendFinalVoice(el, audioList) {
   scrollToBottom();
 }
 
+function fileDownloadUrl(rel, preview) {
+  // Workspace file URL (server-validated). preview=1 renders inline.
+  try {
+    return "/api/workspace/download?path=" + encodeURIComponent(String(rel || "")) + (preview ? "&preview=1" : "");
+  } catch (_) {
+    return "";
+  }
+}
+
+function formatFileSize(bytes) {
+  try {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1048576).toFixed(1)} MB`;
+  } catch (_) {
+    return "";
+  }
+}
+
+function openPdfPreview(file) {
+  // Designed PDF card preview: the embedded file fills the screen, plus one
+  // general download for the whole file. Slide images live INSIDE the PDF
+  // itself (embedded at build time) — never listed separately. Never throws.
+  try {
+    const name = String(file?.name || "file");
+    const url = fileDownloadUrl(file?.path, true);
+    const dl = fileDownloadUrl(file?.path, false);
+    openModal(`
+    <div class="pdf-preview-dialog">
+    <div class="modal-head">
+      <div class="modal-head-text"><h3>${name.replace(/</g, "&lt;")}</h3><p>PDF preview — full screen</p></div>
+      <button class="modal-close" data-close type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <iframe class="pdf-preview-frame" src="${url}" title="PDF preview"></iframe>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close type="button">Close</button>
+      <a class="btn btn-primary" href="${dl}" download>Download PDF</a>
+    </div>
+    </div>`);
+  } catch (_) {}
+}
+
+function createFileCard(file) {
+  const card = document.createElement("div");
+  card.className = "msg-file";
+  try {
+    const icon = document.createElement("div");
+    icon.className = "msg-file-icon";
+    icon.textContent = "PDF";
+    const meta = document.createElement("div");
+    meta.className = "msg-file-meta";
+    const title = document.createElement("div");
+    title.className = "msg-file-name";
+    title.setAttribute("dir", "auto");
+    title.textContent = String(file?.name || "file");
+    const sub = document.createElement("div");
+    sub.className = "msg-file-sub";
+    const bits = [];
+    if (Number(file?.pages) > 0) bits.push(`${Number(file.pages)} pages`);
+    if (file?.size) bits.push(formatFileSize(file.size));
+    if (Array.isArray(file?.images) && file.images.length) bits.push(`${file.images.length} images`);
+    sub.textContent = bits.join(" · ") || "PDF file";
+    meta.appendChild(title);
+    meta.appendChild(sub);
+    const actions = document.createElement("div");
+    actions.className = "msg-file-actions";
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "needs-model-btn glass";
+    preview.textContent = "Preview";
+    preview.addEventListener("click", () => openPdfPreview(file));
+    const dl = document.createElement("a");
+    dl.className = "needs-model-btn glass";
+    dl.textContent = "Download";
+    dl.href = fileDownloadUrl(file?.path, false);
+    dl.setAttribute("download", "");
+    actions.appendChild(preview);
+    actions.appendChild(dl);
+    card.appendChild(icon);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    card.addEventListener("click", (e) => {
+      try {
+        if (e.target && e.target.closest && e.target.closest("a,button")) return;
+        openPdfPreview(file);
+      } catch (_) {}
+    });
+  } catch (_) {}
+  return card;
+}
+
+function appendFinalFiles(el, files) {
+  // Workspace files produced this turn (pdf_create decks): a designed file
+  // card under the reply — click opens the preview, with per-image and
+  // whole-file downloads. Live and after refresh. Never throws.
+  try {
+    const list = (Array.isArray(files) ? files : []).filter(
+      (f) => f && typeof f.path === "string" && f.path
+    ).slice(0, 4);
+    if (!el || !list.length) return;
+    const content = el.querySelector(".msg-content");
+    if (!content || content.querySelector(":scope > .msg-final-files")) return;
+    const wrap = document.createElement("div");
+    wrap.className = "msg-final-files";
+    list.forEach((f) => wrap.appendChild(createFileCard({
+      name: String(f.name || "file").slice(0, 100),
+      path: String(f.path).slice(0, 300),
+      size: Number(f.size) || 0,
+      images: Array.isArray(f.images) ? f.images.slice(0, 20) : [],
+    })));
+    content.appendChild(wrap);
+    scrollToBottom();
+  } catch (_) {}
+}
+
 function codeblockShell(langTag, rawCode) {
   // Professional code card: fixed header (language + copy) over expanded,
   // highlighted, LTR code. Copy reads textContent (spans + entities resolve).
@@ -715,6 +882,22 @@ function appendUserMessage(text, attachments) {
   el.setAttribute("data-anim", "");
   list.forEach((attachment) => {
     if (!attachment) return;
+    // Attached IMAGES render centered and prominent in the bubble (the user
+    // points at them with @name); other files keep the compact badge.
+    if (attachment.type === "image") {
+      const src = attachment.dataUrl || attachment.thumb || "";
+      if (typeof src === "string" && /^(data:image|blob:|https?:)/.test(src)) {
+        const fig = document.createElement("div");
+        fig.className = "msg-attach-img";
+        const im = document.createElement("img");
+        im.src = src;
+        im.alt = attachment.name || "image";
+        im.loading = "lazy";
+        fig.appendChild(im);
+        el.appendChild(fig);
+        return;
+      }
+    }
     const name = document.createElement("span");
     name.className = "msg-attach-name";
     name.textContent = attachment.name;
@@ -1444,6 +1627,7 @@ function buildHistoryNode(m) {
     p.replaceWith(rich);
     appendFinalImages(el, m.images);
     appendFinalVoice(el, m.audio);
+    appendFinalFiles(el, m.files);
     el.dataset.raw = rawText;
     if (m.id) el.dataset.mid = String(m.id);
     attachAssistantBar(el, rawText);
@@ -1578,6 +1762,7 @@ function renderHistoryMessages(msgs) {
         p.replaceWith(rich);
         appendFinalImages(el, m.images);
         appendFinalVoice(el, m.audio);
+        appendFinalFiles(el, m.files);
         el.dataset.raw = rawText;
         if (m.id) el.dataset.mid = String(m.id);
         if (lastSeenUserText) el.dataset.userText = lastSeenUserText;
@@ -2006,11 +2191,12 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
             markLiveSeen();
             if (msg2.view_only) showEdgeTab(msg2.url, msg2.id);
             else showLiveControlCard(msg2);
-          } else showQuestionCard(msg2);
+          }             else showQuestionCardUnlessStopped(msg2);
         }
         else if (msg2?.type === "question-expired") {
           if (pendingQuestion && pendingQuestion.id === msg2.id) {
             hideQuestionCard();
+            clearPendingStored();
             toast("Question expired — continued without answer");
           }
         } else if (msg2?.type === "cancelled") {
@@ -2090,6 +2276,7 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
             await typeRich(holder, replyText);
             appendFinalImages(shell, msg2.images);
             appendFinalVoice(shell, msg2.audio);
+            appendFinalFiles(shell, msg2.files);
             finalEl = shell;
             shell = null;
           } else if (liveHadSteps) {
@@ -2103,6 +2290,7 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
             await typeRich(holder, replyText);
             appendFinalImages(thinking, msg2.images);
             appendFinalVoice(thinking, msg2.audio);
+            appendFinalFiles(thinking, msg2.files);
             finalEl = thinking;
           } else {
             // Direct answer, no steps: Working artifact dropped, reply only.
@@ -2110,6 +2298,7 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
             finalEl = await typeMessage(replyText, collected);
             appendFinalImages(finalEl, msg2.images);
             appendFinalVoice(finalEl, msg2.audio);
+            appendFinalFiles(finalEl, msg2.files);
           }
           const ids = msg2.ids || null;
           if (lastUserEl && ids && ids.user) lastUserEl.dataset.mid = ids.user;
@@ -2117,7 +2306,6 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
           finalEl.dataset.raw = replyText;
           finalEl.dataset.userText = value;
           attachAssistantBar(finalEl, replyText);
-          if (msg2.needs_model) appendNeedsModelButton(finalEl, msg2.needs_kind);
           doneReceived = true;
           activeThinking = null;
           activeRun = null;
@@ -2137,7 +2325,6 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
           const { el: errEl, p: perr } = appendAssistantShell();
           perr.textContent =
             `Error: ${[msg2.error, msg2.detail].filter(Boolean).join(" — ") || "request failed"}`;
-          if (msg2.needs_model) appendNeedsModelButton(errEl, msg2.needs_kind);
           scrollToBottom();
           turnResult = true;
           return;
@@ -2263,19 +2450,18 @@ async function sendBlocking(value, attachments, thinking, skipHistoryIds) {
     const finalEl = await typeMessage(replyText, data?.events, data?.elapsed);
     appendFinalImages(finalEl, data?.images);
     appendFinalVoice(finalEl, data?.audio);
+    appendFinalFiles(finalEl, data?.files);
     const ids = data?.ids || null;
     if (lastUserEl && ids && ids.user) lastUserEl.dataset.mid = ids.user;
     if (ids && ids.assistant) finalEl.dataset.mid = ids.assistant;
     finalEl.dataset.raw = replyText;
     finalEl.dataset.userText = value;
     attachAssistantBar(finalEl, replyText);
-    if (data?.needs_model) appendNeedsModelButton(finalEl, data?.needs_kind);
   } catch (err) {
     thinking.remove();
     activeThinking = null;
     const { el: errEl, p } = appendAssistantShell();
     p.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
-    if (err && err.needsModel) appendNeedsModelButton(errEl, err.needsKind);
     scrollToBottom();
   }
 }
@@ -2291,9 +2477,9 @@ async function handleSend() {
     await sendQuestionAnswer();
     return;
   }
-  // Model-activation pause: the loop waits for Skip / Activate buttons only.
+  // Model-activation pause: the loop waits for the strip's Skip / Connect.
   if (pendingQuestion && pendingQuestion.kind === "needs_model") {
-    toast("Pick Skip or Activate model first");
+    toast("Pick Skip or Connect first");
     return;
   }
   const value = composerInput.value.trim().slice(0, MAX_MESSAGE);
@@ -2316,6 +2502,10 @@ async function handleSend() {
 
   lastUserEl = appendUserMessage(value, pending);
   attachUserBar(lastUserEl);
+  // Stash this turn's picks on the bubble so regenerate / edit-resend
+  // inject the SAME @ ids + / skill, then paint its @ names blue.
+  try { stashBubbleRefs(lastUserEl, pending); } catch (_) {}
+  try { paintBubbleMentions(lastUserEl); } catch (_) {}
   if (value) lastUserText = value;
   hideMentionMenu();
 
@@ -2607,10 +2797,11 @@ function removeAttachmentAt(index) {
       return;
     }
   } catch (_) {}
-  // Play the delete animation first. When it is the last card, collapse
-  // the strip (while the fading card is still inside) so the composer
-  // shrinks with animation instead of snapping, then clear the DOM.
-  const isLastDoc = pendingAttachments.filter((a) => a && a.type === "document").length <= 1;
+  // Play the delete animation first. When it is the last card inside the
+  // composer box (doc or image tile), collapse the box (while the fading
+  // card is still inside) so the composer shrinks with animation instead
+  // of snapping, then clear the DOM.
+  const isLastDoc = pendingAttachments.filter((a) => a && (a.type === "document" || a.type === "image")).length <= 1;
   row.classList.add("leaving");
   row.classList.remove("is-loading");
   if (isLastDoc && composerAttachBox) {
@@ -2699,13 +2890,47 @@ function appendDocumentCard(item, index, pos) {
   composerAttachBox.appendChild(row);
 }
 
-/* Document cards live inside the composer box. One render entry so the
-   strip above (images/video/text) and the composer box never drift apart. */
+/* Image tile INSIDE the composer box (above writing, same strip as docs):
+   Manus-style 54px tile, image covers it, X top-end, click = fullscreen. */
+function appendImageTile(item, index, pos) {
+  if (!composerAttachBox) return;
+  const tile = document.createElement("div");
+  tile.className = "attach-imgtile";
+  tile.setAttribute("data-anim", "");
+  tile.setAttribute("data-uid", item.uid);
+  if (!item._shown) {
+    tile.classList.add("anim");
+    const slot = typeof pos === "number" ? pos : 0;
+    tile.style.animationDelay = `${Math.min(slot, 5) * 70}ms`;
+    item._shown = true;
+  }
+  const img = document.createElement("img");
+  img.className = "attach-imgtile-img";
+  img.src = item.thumb;
+  img.alt = String(item.name || "image").slice(0, 200);
+  img.addEventListener("click", () => openImageLightbox(item.thumb, item.name));
+  const x = document.createElement("button");
+  x.type = "button";
+  x.className = "attach-imgtile-x";
+  x.setAttribute("aria-label", "Remove attachment");
+  x.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>';
+  x.addEventListener("click", (e) => {
+    e.stopPropagation();
+    removeAttachmentAt(index);
+  });
+  tile.appendChild(img);
+  tile.appendChild(x);
+  tile.title = String(item.name || "");
+  composerAttachBox.appendChild(tile);
+}
+
+/* Document + image cards live inside the composer box. One render entry so the
+   strip above (video/text only) and the composer box never drift apart. */
 function renderComposerDocuments() {
   if (!composerAttachBox) return;
   composerAttachBox.innerHTML = "";
-  const docs = pendingAttachments.filter((a) => a.type === "document");
-  if (!docs.length) {
+  const inside = pendingAttachments.filter((a) => a && (a.type === "document" || (a.type === "image" && a.thumb)));
+  if (!inside.length) {
     composerAttachBox.classList.remove("visible");
     return;
   }
@@ -2713,26 +2938,81 @@ function renderComposerDocuments() {
     composerAttachBox.classList.remove("collapsing");
   } catch (_) {}
   composerAttachBox.classList.add("visible");
-  docs.forEach((item, pos) => {
-    appendDocumentCard(item, pendingAttachments.indexOf(item), pos);
+  inside.forEach((item, pos) => {
+    if (item.type === "document") appendDocumentCard(item, pendingAttachments.indexOf(item), pos);
+    else appendImageTile(item, pendingAttachments.indexOf(item), pos);
   });
 }
 
+/* Image-tile helpers (Manus-style 54px preview above the composer). */
+const CHAT_IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
+function isChatImageName(name) {
+  return CHAT_IMG_EXT.test(String(name || ""));
+}
+function isSafePreviewSrc(src) {
+  const s = String(src || "");
+  return s.startsWith("blob:") || s.startsWith("data:image") || s.startsWith("/api/workspace/download?path=");
+}
+function openImageLightbox(src, name) {
+  if (!isSafePreviewSrc(src)) return;
+  try {
+    document.querySelector(".x5-img-lightbox")?.remove();
+    const box = document.createElement("div");
+    box.className = "x5-img-lightbox";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    const img = document.createElement("img");
+    img.className = "x5-img-lightbox-img";
+    img.src = src;
+    img.alt = String(name || "image preview").slice(0, 200);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "x5-img-lightbox-x";
+    close.setAttribute("aria-label", "Close preview");
+    close.textContent = "×";
+    const done = () => {
+      try {
+        box.remove();
+      } catch (_) {}
+      try {
+        document.removeEventListener("keydown", onKey, true);
+      } catch (_) {}
+    };
+    const onKey = (e) => {
+      if (e && e.key === "Escape") {
+        e.stopPropagation();
+        done();
+      }
+    };
+    close.addEventListener("click", (e) => {
+      e.stopPropagation();
+      done();
+    });
+    box.addEventListener("click", (e) => {
+      if (e.target === box) done();
+    });
+    box.appendChild(img);
+    box.appendChild(close);
+    document.body.appendChild(box);
+    document.addEventListener("keydown", onKey, true);
+  } catch (_) {}
+}
+
 function renderAttachmentPreviews() {
-  // Document cards render inside the composer box, not in the strip above.
+  // Document + image cards render INSIDE the composer box, not in a
+  // separate strip above. The strip above stays for video/text only.
   renderComposerDocuments();
   if (!attachPreview) return;
   attachPreview.innerHTML = "";
-  // The strip above the composer is only for image/video/text — a lone
-  // document must not leave an empty pill floating above the box.
-  if (!pendingAttachments.some((a) => a.type !== "document")) {
+  // A lone document/image must not leave an empty pill floating above the box.
+  if (!pendingAttachments.some((a) => a && a.type !== "document" && a.type !== "image")) {
     attachPreview.classList.remove("visible");
     return;
   }
   attachPreview.classList.add("visible");
   const images = pendingImages();
   pendingAttachments.forEach((item, index) => {
-    if (item.type === "document") return;
+    if (item.type === "document" || item.type === "image") return;
     const row = document.createElement("div");
     row.className = "attach-item";
     const media =
@@ -3514,15 +3794,36 @@ function wsChip(svg, text, onClick, isCurrent) {
   return b;
 }
 
-function wsRow(svg, name, meta, onClick, iconCls) {
+function wsRow(svg, name, meta, onClick, iconCls, thumbUrl) {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "pk-row";
-  const icon = document.createElement("span");
-  icon.innerHTML = svg;
-  icon.style.display = "inline-flex";
-  if (iconCls) icon.className = iconCls;
-  b.appendChild(icon);
+  // Image files show the picture itself instead of the default icon.
+  // thumbUrl is either a blob:/data: URL (attached uploads) or the jailed
+  // /api/workspace/download?path= URL (Workspace files) — both validated.
+  if (thumbUrl && isSafePreviewSrc(thumbUrl)) {
+    const im = document.createElement("img");
+    im.className = "pk-thumb-img";
+    im.src = thumbUrl;
+    im.alt = "";
+    im.loading = "lazy";
+    im.addEventListener("error", () => {
+      try {
+        const fb = document.createElement("span");
+        fb.innerHTML = svg;
+        fb.style.display = "inline-flex";
+        if (iconCls) fb.className = iconCls;
+        im.replaceWith(fb);
+      } catch (_) {}
+    });
+    b.appendChild(im);
+  } else {
+    const icon = document.createElement("span");
+    icon.innerHTML = svg;
+    icon.style.display = "inline-flex";
+    if (iconCls) icon.className = iconCls;
+    b.appendChild(icon);
+  }
   const label = document.createElement("span");
   label.textContent = name;
   label.style.overflow = "hidden";
@@ -3572,6 +3873,146 @@ function hasToken(value, prefix, name) {
   } catch (_) {
     return String(value).includes(prefix + name);
   }
+}
+
+/* Workspace/skill picks stashed per user bubble so resends (regenerate /
+   edit-resend) inject the SAME @ ids + / skill as the original turn.
+   Uploaded files were mirrored into Workspace under their own name, so
+   their names resolve again as {name, path:name} (missing files skip
+   silently server-side). Never throws. */
+function stashBubbleRefs(userEl, uploads) {
+  try {
+    if (!userEl || !userEl.dataset) return;
+    userEl.dataset.wsrefs = JSON.stringify((pendingWsRefs || []).slice(0, 10));
+    userEl.dataset.skill = pendingSkill
+      ? JSON.stringify({ name: pendingSkill.name, instructions: String(pendingSkill.instructions || "").slice(0, 6000) })
+      : "";
+    const ups = [];
+    (uploads || []).forEach((a, i) => {
+      try {
+        if (a && a.type === "image") ups.push(imageLabelFor(i));
+        else if (a && a.name) ups.push(String(a.name));
+      } catch (_) {}
+    });
+    userEl.dataset.attnames = JSON.stringify(ups.slice(0, 4));
+  } catch (_) {}
+}
+
+function restoreBubbleRefs(userEl, text) {
+  // Re-arm the one-shot picks from the bubble's stash, keeping only tokens
+  // still present in the resent text (same hasToken rule as normal send).
+  try { pendingWsRefs = []; } catch (_) {}
+  try { pendingSkill = null; } catch (_) {}
+  const value = String(text || "");
+  try {
+    const refs = JSON.parse((userEl && userEl.dataset && userEl.dataset.wsrefs) || "[]");
+    if (Array.isArray(refs)) {
+      refs.forEach((r) => {
+        try {
+          if (r && r.name && r.path && hasToken(value, "@", String(r.name))) {
+            if (!pendingWsRefs.some((x) => x.path === r.path)) {
+              pendingWsRefs.push({ name: String(r.name).slice(0, 200), path: String(r.path).slice(0, 500) });
+            }
+          }
+        } catch (_) {}
+      });
+    }
+  } catch (_) {}
+  try {
+    const ups = JSON.parse((userEl && userEl.dataset && userEl.dataset.attnames) || "[]");
+    if (Array.isArray(ups)) {
+      ups.forEach((n) => {
+        try {
+          const nm = String(n || "");
+          if (nm && hasToken(value, "@", nm) && !pendingWsRefs.some((x) => x.name === nm)) {
+            if (pendingWsRefs.length < 10) pendingWsRefs.push({ name: nm.slice(0, 200), path: nm.slice(0, 500) });
+          }
+        } catch (_) {}
+      });
+    }
+  } catch (_) {}
+  try {
+    const s = JSON.parse((userEl && userEl.dataset && userEl.dataset.skill) || "null");
+    if (s && s.name && s.instructions && hasToken(value, "/", String(s.name))) {
+      pendingSkill = { name: String(s.name).slice(0, 100), instructions: String(s.instructions).slice(0, 6000) };
+    }
+  } catch (_) {}
+}
+
+function paintBubbleMentions(userEl) {
+  // Blue @file / /skill names inside the just-sent bubble (same blue as the
+  // composer). Text nodes only — code blocks are never touched. Never throws.
+  try {
+    if (!userEl || !userEl.dataset) return;
+    const names = [];
+    try {
+      (JSON.parse(userEl.dataset.wsrefs || "[]") || []).forEach((r) => {
+        if (r && r.name) names.push({ p: "@", n: String(r.name) });
+      });
+    } catch (_) {}
+    try {
+      (JSON.parse(userEl.dataset.attnames || "[]") || []).forEach((n) => {
+        if (n) names.push({ p: "@", n: String(n) });
+      });
+    } catch (_) {}
+    try {
+      const s = JSON.parse(userEl.dataset.skill || "null");
+      if (s && s.name) names.push({ p: "/", n: String(s.name) });
+    } catch (_) {}
+    if (!names.length) return;
+    const content = userEl.querySelector(":scope > .msg-content");
+    if (!content) return;
+    const acceptFn = (node) => {
+      try {
+        const pe = node.parentElement;
+        if (pe && pe.closest && pe.closest("pre,code")) return NodeFilter.FILTER_REJECT;
+        const v = node.nodeValue || "";
+        if (!v.includes("@") && !v.includes("/")) return NodeFilter.FILTER_REJECT;
+      } catch (_) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    };
+    names.forEach(({ p, n }) => {
+      if (!n) return;
+      let re;
+      try {
+        const extra = p === "/" ? "/" : "";
+        re = new RegExp(`(?<![\\w@${extra}])${escapeRegExp(p + n)}(?![\\w\\u0600-\\u06FF])`, "gu");
+      } catch (_) {
+        return;
+      }
+      let nodes = [];
+      try {
+        const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, { acceptNode: acceptFn });
+        while (walker.nextNode()) nodes.push(walker.currentNode);
+      } catch (_) {
+        return;
+      }
+      nodes.forEach((node) => {
+        try {
+          const t = node.nodeValue;
+          if (!t || !re.test(t)) return;
+          re.lastIndex = 0;
+          const frag = document.createDocumentFragment();
+          let last = 0;
+          let m;
+          re.lastIndex = 0;
+          while ((m = re.exec(t)) !== null) {
+            if (m.index > last) frag.appendChild(document.createTextNode(t.slice(last, m.index)));
+            const sp = document.createElement("span");
+            sp.className = "hl-tok-msg";
+            sp.textContent = m[0];
+            frag.appendChild(sp);
+            last = m.index + m[0].length;
+            if (re.lastIndex === m.index) re.lastIndex++;
+          }
+          if (last < t.length) frag.appendChild(document.createTextNode(t.slice(last)));
+          node.parentNode.replaceChild(frag, node);
+        } catch (_) {}
+      });
+    });
+  } catch (_) {}
 }
 
 function continuesActivePick(q, prefix) {
@@ -3686,19 +4127,24 @@ function renderPathbar(dir, filter, entries) {
   if (upRows.length) {
     bar.appendChild(wsSection("Attached"));
     upRows.forEach(({ item, i, label }) => {
-      bar.appendChild(wsRow(WS_FILE_SVG, label, String(item.name || ""), () => replaceTriggerToken(label)));
+      const thumb = item && item.type === "image" && item.thumb ? item.thumb : null;
+      bar.appendChild(wsRow(WS_FILE_SVG, label, String(item.name || ""), () => replaceTriggerToken(label), null, thumb));
     });
   }
   shown.slice(0, 100).forEach((e) => {
     const rel = dir ? `${dir}/${e.name}` : e.name;
+    const safeRel = !String(rel || "").split("/").includes("..");
     if (e.type === "folder") {
       // Folders only navigate (never a pick), path chips update via wsNav.
       bar.appendChild(wsRow(WS_FOLDER_SVG, e.name, `${e.items ?? 0} items`, () => wsNav(rel), "pk-ico-folder"));
     } else {
+      const thumb = safeRel && isChatImageName(e.name)
+        ? "/api/workspace/download?path=" + encodeURIComponent(rel)
+        : null;
       bar.appendChild(wsRow(WS_FILE_SVG, e.name, formatSize(e.size || 0), () => {
         pickWorkspaceFile(rel);
         closePathbar(true);
-      }));
+      }, null, thumb));
     }
   });
 }
@@ -4076,17 +4522,42 @@ function hideQuestionCard() {
   } catch (_) {}
 }
 
+function isChatLive() {
+  // A pause strip belongs to a live run only — after STOP (or a finished
+  // turn) a late/duplicate question frame must never raise the template.
+  try {
+    if (activeRun) return true;
+    if (catchupResume) return true;
+    if (activeThinking && activeThinking.isConnected) return true;
+    const t = document.getElementById("thinkingMsg");
+    if (t && t.isConnected && t.dataset.stopped !== "1") return true;
+  } catch (_) {}
+  return false;
+}
+
+function showQuestionCardUnlessStopped(q) {
+  if (!isChatLive()) {
+    try { clearPendingStored(); } catch (_) {}
+    return;
+  }
+  showQuestionCard(q);
+}
+
 function showQuestionCard(q) {
   hideQuestionCard();
   pendingQuestion = { id: q.id, kind: q.kind || "ask", selected: null };
   const wrap = document.querySelector(".composer-wrap");
   if (!wrap) return;
+  // The strip belongs to the writing template: same container, and it
+  // survives refresh until answered (or server-side expiry clears it).
+  storePendingQuestion(q);
   const card = document.createElement("div");
-  card.className = "question-card";
+  card.className = "question-card from-composer";
   card.id = "questionCard";
   if (pendingQuestion.kind === "needs_model") {
-    // Paused tool needs a model kind: Skip continues without it,
-    // Activate jumps to AI Models and auto-opens the right dialog.
+    // Paused tool needs a model kind, decided right here above the composer:
+    // Skip continues the task without it, Connect also continues and jumps
+    // to AI Models with the right dialog auto-opened.
     const kind = String(q.needs_kind || "text").toLowerCase();
     const tool = String(q.tool || "");
     card.classList.add("needs-model");
@@ -4095,11 +4566,12 @@ function showQuestionCard(q) {
       <div class="question-text"></div>
       <div class="question-options">
         <button type="button" class="glass-btn" data-decide="skip">Skip</button>
-        <button type="button" class="glass-btn accent" data-decide="activate">Activate model</button>
+        <button type="button" class="glass-btn accent" data-decide="connect">Connect</button>
       </div>`;
     card.querySelector(".question-text").textContent =
       q.text || (tool ? `Tool ${tool} needs a model that is not connected.` : "This task needs a model that is not connected.");
-    card.querySelectorAll("[data-decide]").forEach((btn) => {
+    card.querySelectorAll("[data-decide]").forEach((btn, idx) => {
+      btn.style.animationDelay = `${80 + idx * 55}ms`;
       btn.addEventListener("click", () => decideNeedsModel(q.id, btn.dataset.decide, kind));
     });
     pauseWorkingLoop();
@@ -4184,23 +4656,29 @@ async function decideApproval(qid, decision) {
   // Instant action — resumes the loop silently, no chat message.
   hideQuestionCard();
   try {
-    await postAnswer({ id: qid, decision });
+    const res = await postAnswer({ id: qid, decision });
+    if (res && res.ok) clearPendingStored();
+    else toast("Answer failed");
   } catch (_) {
     toast("Answer failed");
   }
 }
 
 async function decideNeedsModel(qid, decision, kind) {
-  // Skip resumes the loop without the tool; activate stops it and
-  // deep-links to AI Models with that dialog auto-opened.
+  // Both choices continue the loop without the tool (exit animates back
+  // into the writing template); Connect additionally deep-links to AI
+  // Models with that dialog auto-opened — it navigates even when the
+  // pause is already gone (410: the loop already continued on its own).
+  const isConnect = decision === "connect";
   hideQuestionCard();
+  try { clearPendingStored(); } catch (_) {}
   try {
-    await postAnswer({ id: qid, decision });
+    const res = await postAnswer({ id: qid, decision: isConnect ? "connect" : "skip" });
+    if (!(res && res.ok) && (!res || res.status !== 410) && !isConnect) toast("Answer failed");
   } catch (_) {
-    toast("Answer failed");
-    return;
+    if (!isConnect) toast("Answer failed");
   }
-  if (decision === "activate") openModelPage(kind);
+  if (isConnect) openModelPage(kind);
 }
 
 /* ---------------- live browser: control card + floating preview ---------------- */
@@ -5977,7 +6455,7 @@ function renderRunFrame(frame) {
         markLiveSeen();
         if (frame.view_only) showEdgeTab(frame.url, frame.id);
         else showLiveControlCard(frame);
-      } else showQuestionCard(frame);
+      } else showQuestionCardUnlessStopped(frame);
       return;
     }
     if (type === "live") {
@@ -6017,7 +6495,9 @@ async function resumeActiveRun() {
   const preview = String(st.input || "").slice(0, 200);
   if (preview) {
     // No duplicate resume bubble: reuse the tail user bubble when it already
-    // shows this pending input (double refresh of the same run).
+    // shows this pending input (double refresh of the same run). The preview
+    // is truncated, so a prefix match counts — strict equality would clone
+    // every long message into a second bubble.
     const cleaned = cleanHistoryText(preview);
     const want = String(cleaned.text || preview);
     let tail = null;
@@ -6027,8 +6507,11 @@ async function resumeActiveRun() {
     } catch (_) {
       tail = null;
     }
-    if (tail && String(tail.dataset.raw || "") === want) {
+    const tailRaw = String((tail && tail.dataset.raw) || "");
+    if (tail && want && (tailRaw === want || tailRaw.slice(0, want.length) === want)) {
       lastUserEl = tail;
+    } else if (!want) {
+      if (tail) lastUserEl = tail;
     } else {
       lastUserEl = appendUserMessage(cleaned.text || preview, []);
       attachUserBar(lastUserEl);
@@ -6071,6 +6554,7 @@ async function sendQuestionAnswer() {
   try {
     const res = await postAnswer({ id: q.id, answer });
     if (!res.ok) toast("Answer failed");
+    else clearPendingStored();
     // The loop resumes on the still-open stream; its completion event
     // carries the Q + A into the step arrow, then work continues.
   } catch (_) {
@@ -6211,28 +6695,6 @@ function openModelPage(kind) {
   } catch (_) {}
 }
 
-function appendNeedsModelButton(shell, kind) {
-  // Glass shortcut under the no-model state — message + glass button that
-  // jumps to AI Models and auto-opens the right dialog.
-  const k = String(kind || "text").toLowerCase();
-  const content = shell.querySelector(".msg-content");
-  if (!content || content.querySelector(".needs-model-wrap")) return;
-  const wrap = document.createElement("div");
-  wrap.className = "needs-model-wrap";
-  const note = document.createElement("div");
-  note.className = "needs-model-note";
-  note.textContent = "Connect a model to continue. One click opens the setup page.";
-  note.setAttribute("dir", "auto");
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = "needs-model-btn glass";
-  b.textContent = "Connect model";
-  b.addEventListener("click", () => openModelPage(k));
-  wrap.appendChild(note);
-  wrap.appendChild(b);
-  content.appendChild(wrap);
-  scrollToBottom();
-}
 
 function attachAssistantBar(shell, raw) {
   const old = shell.querySelector(":scope > .msg-actions");
@@ -6470,7 +6932,10 @@ async function saveComposerEdit(value) {
       }
       el.dataset.raw = v;
       if (el.classList.contains("assistant")) attachAssistantBar(el, v);
-      else attachUserBar(el);
+      else {
+        attachUserBar(el);
+        try { paintBubbleMentions(el); } catch (_) {}
+      }
     }
     editingTarget = null;
     composerInput.value = "";
@@ -6511,6 +6976,8 @@ async function saveComposerEdit(value) {
       // regenerate/new-send), otherwise the old turn owns activeRun and
       // this resend is silently dropped — or both persist a reply.
       await abortActiveStream();
+      // Resend carries the SAME @ ids + / skill as the original turn.
+      try { restoreBubbleRefs(el, v); } catch (_) {}
       // Single attempt only: retrying without skip_history_ids would
       // persist a duplicate user message and generate a second reply.
       try {
@@ -6667,6 +7134,9 @@ async function regenerateReply(shell) {
     }
     if (userText) lastUserText = userText;
     // Reuse the kept user bubble (no duplicate persist); only the reply is new.
+    // Same picks as the original turn: the anchor bubble's stash re-arms
+    // @ ids + / skill so the resent context injects them identically.
+    try { restoreBubbleRefs(lastUserEl, userText); } catch (_) {}
     await executeAgentTurn(userText, [], { skipHistoryIds: anchorMid ? [anchorMid] : null });
   } finally {
     if (sendBtn) {
@@ -6683,6 +7153,8 @@ async function editUserMessage(el) {
 }
 
 async function abortActiveStream() {
+  try { hideQuestionCard(); } catch (_) {}
+  try { clearPendingStored(); } catch (_) {}
   if (!activeRun) return;
   activeRun.cancelled = true;
   try {
@@ -6696,6 +7168,10 @@ async function abortActiveStream() {
 async function stopGeneration() {
   // The send button is a stop button while anything generates — including a
   // pre-refresh run this page never owned (no local stream to abort).
+  // STOP also drops any open question strip (ask/approval/needs_model) so a
+  // refresh never restores it and the stopped task never auto-resumes.
+  try { hideQuestionCard(); } catch (_) {}
+  try { clearPendingStored(); } catch (_) {}
   try {
     if (activeRun) {
       activeRun.cancelled = true;
@@ -6757,6 +7233,10 @@ export async function initChat() {
   });
   // A refresh mid-generation resumes the running state instead of losing it.
   resumeActiveRun().catch(() => {});
+  // A refresh mid-question restores the strip until it is answered/expired.
+  try {
+    restorePendingQuestion();
+  } catch (_) {}
   // Manual copy is off on agent messages (the copy button still works,
   // the composer stays fully editable).
   chatScroll.addEventListener("copy", (e) => {

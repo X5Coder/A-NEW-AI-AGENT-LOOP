@@ -48,6 +48,7 @@ _DISCOVERABLE_MAP = {
     "image_memory": "plugins.core_plugins.image_memory.tool",
     "important_memory": "plugins.core_plugins.important_memory.tool",
     "http_request": "plugins.core_plugins.http_request.tool",
+    "pdf_create": "plugins.core_plugins.pdf_create.tool",
 }
 
 _ALL = {**_CORE_MAP, **_DISCOVERABLE_MAP}

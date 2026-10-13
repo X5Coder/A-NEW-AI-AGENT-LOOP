@@ -81,7 +81,11 @@ def _count_items(folder: Path) -> tuple[int, bool]:
     return n, False
 
 
-def _list_dir(target: Path) -> dict:
+def _list_dir(target: Path, rel: str = "") -> dict:
+    """One-level listing. Every FILE carries its stable id (Workspace-relative
+    path) + full path + type + size in the SAME metadata shape the context
+    map shows, so the agent uses the exact path link as-is in any code/HTML
+    after entering any folder."""
     if not target.exists():
         raise FileNotFoundError(f"Workspace folder not found: {target.name or 'Workspace'}")
     if not target.is_dir():
@@ -90,6 +94,7 @@ def _list_dir(target: Path) -> dict:
         children = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
     except Exception as e:
         raise RuntimeError(f"Cannot list Workspace folder: {e}") from e
+    base = rel.strip().replace("\\", "/").strip("/")
     entries: list[dict] = []
     truncated = len(children) > MAX_ENTRIES
     for p in children[:MAX_ENTRIES]:
@@ -99,13 +104,20 @@ def _list_dir(target: Path) -> dict:
                 entries.append({"name": p.name, "type": "folder",
                                 "items": count, "items_truncated": trunc})
             elif p.is_file():
+                fid = f"{base}/{p.name}" if base else p.name
+                try:
+                    full = str(p.resolve()).replace("\\", "/")
+                except Exception:
+                    full = fid
                 try:
                     st = p.stat()
-                    entries.append({"name": p.name, "type": "file",
+                    entries.append({"name": p.name, "type": "file", "id": fid,
+                                    "path": full,
                                     "size": st.st_size,
                                     "mtime": int(st.st_mtime)})
                 except Exception:
-                    entries.append({"name": p.name, "type": "file"})
+                    entries.append({"name": p.name, "type": "file", "id": fid,
+                                    "path": full})
         except Exception:
             continue
     return {"entries": entries, "truncated": truncated}
@@ -177,7 +189,7 @@ def execute(action: str = "list", path: str | None = None, name: str | None = No
             out = list_downloads_virtual(split_downloads_rel(rel) or [])
             return {"event": event, "action": act,
                     "path": rel or "/", "success": True, **out}
-        out = _list_dir(target)
+        out = _list_dir(target, rel)
         _purge_document_orphans()
         if not rel:
             # Root only: merge the virtual downloads folder (hidden on
