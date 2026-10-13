@@ -9,6 +9,11 @@
  * bundle -> everything else. Each section carries a server hash: the client
  * keeps the last hash per section and re-renders a section ONLY when its
  * hash broke (data changed) — otherwise the cached render stays.
+ *
+ * Funnel note: Tailscale Funnel resets long SSE streams (502 / connection
+ * reset) while the session is still valid. A closed stream is therefore NOT
+ * proof of logout: login redirect happens ONLY after /api/auth/status
+ * provably answers 401, otherwise the single stream redials with backoff.
  */
 "use strict";
 
@@ -18,6 +23,8 @@ const lastHash = new Map(); // section -> last seen server hash
 const STATE_TYPES = new Set(["browser", "live", "chat", "dashboard", "workspace", "scheduler", "gateway", "chat_last50"]);
 let started = false;
 let sseSource = null; // the ONE stream: created once, never duplicated
+let reconnectTimer = null;
+let reconnectAttempt = 0;
 
 export function onPush(type, fn) {
   if (typeof type !== "string" || typeof fn !== "function") return;
@@ -110,35 +117,101 @@ function onServerPush(channel, data) {
   emit(channel, data);
 }
 
+function reconnectDelay() {
+  // Capped backoff: 1s -> 2s -> 5s -> 15s steady. This is a persistent
+  // subscription (same as native EventSource redial), not an operation
+  // retry, so it keeps redialling instead of giving up on the dashboard.
+  reconnectAttempt += 1;
+  if (reconnectAttempt <= 1) return 1000;
+  if (reconnectAttempt === 2) return 2000;
+  if (reconnectAttempt === 3) return 5000;
+  return 15000;
+}
+
+function closeStream() {
+  try {
+    if (sseSource) sseSource.close();
+  } catch (_) {}
+  sseSource = null;
+}
+
+function scheduleReconnect() {
+  // Never stack timers: one pending redial at most (single-stream rule).
+  if (reconnectTimer) return;
+  const wait = reconnectDelay();
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    sseSource = null;
+    connectStream();
+  }, wait);
+}
+
+async function handleStreamError() {
+  // A closed stream is NOT proof of logout: Tailscale Funnel answers 502 /
+  // resets long SSE streams while the session is still valid. Redirect to
+  // login ONLY when the session is provably dead; otherwise redial.
+  try {
+    const res = await fetch("/api/auth/status", { cache: "no-store" });
+    if (res.status === 401) {
+      try {
+        location.replace("/login.html");
+      } catch (_) {}
+      return;
+    }
+    if (res.ok) {
+      reconnectAttempt = 0; // session alive: fast redial on funnel blip
+      closeStream();
+      connectStream();
+      return;
+    }
+  } catch (_) {
+    // Status itself unreachable (funnel 502 / offline): never redirect.
+  }
+  closeStream();
+  scheduleReconnect();
+}
+
+function connectStream() {
+  if (sseSource) return;
+  let src;
+  try {
+    src = new EventSource("/api/events");
+  } catch (_) {
+    scheduleReconnect();
+    return;
+  }
+  sseSource = src;
+  src.onmessage = (e) => {
+    let frame;
+    try {
+      frame = JSON.parse(e.data);
+    } catch (_) {
+      return;
+    }
+    if (!frame || typeof frame !== "object") return;
+    reconnectAttempt = 0; // healthy stream: reset the redial backoff
+    if (frame.type === "hello" && frame.data) {
+      onHello(frame.data);
+      return;
+    }
+    if (typeof frame.type === "string") onServerPush(frame.type, frame.data || {});
+  };
+  src.onerror = () => {
+    // Native EventSource redials by itself while CONNECTING/OPEN; act only
+    // when it gave up (CLOSED, e.g. funnel 502): verify session, then redial.
+    try {
+      if (src.readyState !== 2) return;
+    } catch (_) {}
+    handleStreamError();
+  };
+}
+
 export function startEvents() {
   // Single stream: second calls are no-ops, so multi-module init can never
   // open a second SSE connection.
   if (started) return;
   started = true;
   try {
-    if (sseSource) return;
-    const src = new EventSource("/api/events");
-    sseSource = src;
-    src.onmessage = (e) => {
-      let frame;
-      try {
-        frame = JSON.parse(e.data);
-      } catch (_) {
-        return;
-      }
-      if (!frame || typeof frame !== "object") return;
-      if (frame.type === "hello" && frame.data) {
-        onHello(frame.data);
-        return;
-      }
-      if (typeof frame.type === "string") onServerPush(frame.type, frame.data || {});
-    };
-    src.onerror = () => {
-      // EventSource retries natively on the SAME single stream.
-      // A dead session (401) sends the tab one-way to login.
-      try {
-        if (src.readyState === 2) location.replace("/login.html");
-      } catch (_) {}
-    };
+    connectStream();
   } catch (_) {}
 }

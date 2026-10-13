@@ -2566,7 +2566,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         One stream per open tab: a `hello` snapshot first, then one frame per
         state change (browser/live/chat/chat_done/dashboard/workspace) plus a
-        25s heartbeat. EventSource reconnects natively; every reconnect gets
+        15s heartbeat (keeps Tailscale Funnel / NAT idle timeouts alive).
+        EventSource reconnects natively; every reconnect gets
         a fresh hello, so no last-event-id bookkeeping is needed.
         Server cost is O(1): singleton watchers broadcast only on change no
         matter how many tabs listen — the SaaS-safe shape.
@@ -2585,10 +2586,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Connection", "keep-alive")
                 self.end_headers()
+            except Exception:
+                return
+            # Funnel/proxy-safe preamble: the retry hint tells the browser
+            # when to redial, the comment forces intermediaries (funnel,
+            # nginx) to flush headers now instead of buffering the hello.
+            try:
+                self.wfile.write(b"retry: 3000\n: connected\n\n")
+                self.wfile.flush()
             except Exception:
                 return
 
@@ -2609,7 +2620,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 return
             while True:
                 try:
-                    frame = q.get(timeout=25)
+                    frame = q.get(timeout=15)
                 except Exception:
                     if not _send({"type": "ping"}):
                         break

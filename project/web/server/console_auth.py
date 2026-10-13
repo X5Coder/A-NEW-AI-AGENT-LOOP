@@ -6,8 +6,10 @@ by `python install.py` is honored here immediately (and vice versa):
   hash = pbkdf2_hmac(sha256, password, salt, 200_000).hex()
 
 Sessions are in-memory random tokens (30 days); a server restart logs
-everyone out (fail-closed, documented). Cookie: HttpOnly + SameSite=None +
-Secure (HTTPS-safe for the funnel; ignored on plain-HTTP loopback).
+everyone out (fail-closed, documented). Cookie: HttpOnly + SameSite=Lax,
+no Secure (the console is plain HTTP on 127.0.0.1, so a Secure cookie is
+never stored by the browser; the funnel serves the same host, so the
+first-party Lax session survives there too — see server._session_cookie).
 Secrets are never logged and never returned (reads expose email only).
 """
 
