@@ -1,13 +1,9 @@
-"""Event for terminal"""
+"""Event for terminal: fixed English title, details live under the arrow."""
 
 SHOW_ARROW = True
 
 
 def format_event(command: str = "", **_) -> str:
-    cmd = command.strip() if isinstance(command, str) else ""
-    # Truncate to safe UI length
-    if len(cmd) > 40:
-        cmd = cmd[:37] + "..."
-    if not cmd:
-        cmd = "command"
-    return f"Running · {cmd}"
+    # Fixed title: the full command + output render under the arrow
+    # (see engine._summarize_output), never in the title.
+    return "Terminal Command"

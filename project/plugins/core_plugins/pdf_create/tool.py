@@ -25,6 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from .events import format_event
 
@@ -399,17 +400,33 @@ def _check_assets(task_rel: str, slides: list[dict]) -> None:
                 "file_id from [Attached files] or the image_id from context.")
         for font in slide["fonts"]:
             name = font["file"]
+            # Fonts are copied into the deck exactly like images: @font-face
+            # uses the bare file name, so a root-only font would 404 when
+            # Chrome prints the standalone slide file.
             try:
-                _ft = _jail(f"{task_rel}/{name}")
-                _ft_ok = _ft.is_file()
+                task_target = _jail(f"{task_rel}/{name}")
             except ValueError:
-                _ft_ok = False
+                task_target = None
             try:
-                _fw_ok = _jail(name).is_file()
+                ws_target = _jail(name)
             except ValueError:
-                _fw_ok = False
-            if not (_ft_ok or _fw_ok):
+                ws_target = None
+            task_ok = task_target is not None and task_target.is_file()
+            ws_ok = ws_target is not None and ws_target.is_file()
+            if not (task_ok or ws_ok):
                 raise FileNotFoundError(f"slide {no}: file not found in Workspace: {name}")
+            if not task_ok:
+                try:
+                    assert task_target is not None and ws_target is not None and ws_target.is_file()
+                    data = ws_target.read_bytes()
+                    if len(data) > MAX_IMAGE_BYTES:
+                        raise ValueError(f"slide {no}: font too large (max 25MB): {name}")
+                    task_target.parent.mkdir(parents=True, exist_ok=True)
+                    task_target.write_bytes(data)
+                except ValueError:
+                    raise
+                except Exception as e:
+                    raise RuntimeError(f"slide {no}: cannot copy font: {name} ({e})") from e
 
 
 # --------------------------------------------------------------------------
@@ -591,11 +608,130 @@ def _slide_user_prompt(pdf_name: str, folder_rel: str, slides: list[dict], slide
     return "\n\n".join(parts)
 
 
-def _run_slide(system: str, user: str, slide_no: int) -> str:
+class _UserCancelled(RuntimeError):
+    """Raised when STOP is pressed mid-deck: aborts before the next slide."""
+
+
+def _is_cancelled_flag(flag: Any) -> bool:
+    """Whether the loop's cancel event is set. Duck-typed, never raises."""
+    try:
+        return bool(flag is not None and flag.is_set())
+    except Exception:
+        return False
+
+
+def _check_cancelled(flag: Any) -> None:
+    if _is_cancelled_flag(flag):
+        raise _UserCancelled("cancelled by user (STOP) — stopping before the next slide.")
+
+
+def _ensure_deck_file(task_rel: str, base: str) -> str | None:
+    """Copy a real Workspace file into the deck (self-containment net).
+
+    The slide HTML sometimes references a genuine Workspace file the model
+    forgot to declare (typically a font). When the bare name exists at the
+    Workspace root it is copied next to the HTML and accepted; invented
+    names still fail. Bare names only, jail-resolved, size-capped.
+    Returns the bare name, else None. Never raises.
+    """
+    try:
+        if not base or "/" in base or "\\" in base or base in (".", ".."):
+            return None
+        _bootstrap()
+        from core.paths import resolve_inside_workspace as _jail
+
+        target = _jail(f"{task_rel}/{base}")
+        if target.is_file():
+            return base
+        src = _jail(base)
+        if not src.is_file():
+            return None
+        data = src.read_bytes()
+        if len(data) > MAX_IMAGE_BYTES:
+            return None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return base
+    except Exception:
+        return None
+
+
+def _normalize_image_srcs(html: str, slide: dict, task_rel: str) -> str:
+    """Rewrite every <img src> and CSS url() to the verified deck-relative id.
+
+    The slide model sometimes writes an absolute path, an API URL or an
+    invented name instead of the exact file id — Chrome then prints a
+    silently missing image. Each reference is matched (basename,
+    URL-decoded) against the slide's declared images and replaced with the
+    exact declared id, whose file the tool already placed next to the HTML.
+    A reference matching neither the declaration nor a real deck file fails
+    clearly instead of rendering a broken image. Never touches data-URLs
+    or fragment-only refs (e.g. url(#gradient)).
+    """
+    declared: dict[str, str] = {}
+    for img in slide.get("images") or []:
+        if isinstance(img, dict) and img.get("file"):
+            ref = str(img["file"])
+            declared[ref.split("/")[-1].lower()] = ref
+    if not declared:
+        return html
+    no = slide.get("slide_no")
+
+    def _candidates(raw: str) -> list[str]:
+        """Basename guesses for one src: path tail plus ?path=/file=/id= values."""
+        s = raw.strip().strip("'\"").replace("\\", "/")
+        head, _, query = s.partition("?")
+        head = head.split("#")[0]
+        out: list[str] = []
+        base = unquote(head.rsplit("/", 1)[-1]).strip()
+        if base:
+            out.append(base)
+        if query:
+            for part in query.split("&"):
+                k, _, v = part.partition("=")
+                if k.strip().lower() in ("path", "file", "src", "id", "name", "image") and v.strip():
+                    b = unquote(v.strip().split("#")[0].replace("\\", "/").rsplit("/", 1)[-1]).strip()
+                    if b and b not in out:
+                        out.append(b)
+        return out
+
+    def _resolve_ref(raw: str) -> str:
+        s = raw.strip().strip("'\"")
+        if not s or s.lower().startswith("data:"):
+            return raw
+        cands = _candidates(raw)
+        if not cands:
+            return raw
+        for cand in cands:
+            hit = declared.get(cand.lower())
+            if hit:
+                return hit
+        for cand in cands:
+            if _ensure_deck_file(task_rel, cand):
+                return cand
+        raise ValueError(f"slide {no}: image not found: {raw[:80]}")
+
+    def _img_re(m: Any) -> str:
+        return m.group(1) + _resolve_ref(m.group(2)) + m.group(3)
+
+    out = re.sub(r'(<img\b[^>]*?\bsrc\s*=\s*")([^"]*)(")', _img_re, html, flags=re.IGNORECASE)
+    out = re.sub(r"(<img\b[^>]*?\bsrc\s*=\s*')([^']*)(')", _img_re, out, flags=re.IGNORECASE)
+
+    def _url_re(m: Any) -> str:
+        return m.group(1) + _resolve_ref(m.group(2)) + m.group(3)
+
+    out = re.sub(r'(url\(\s*")([^"]*)("\s*\))', _url_re, out, flags=re.IGNORECASE)
+    out = re.sub(r"(url\(\s*')([^']*)('\s*\))", _url_re, out, flags=re.IGNORECASE)
+    out = re.sub(r'(url\(\s*)([^"\'()\s][^()]*?)(\s*\))', _url_re, out, flags=re.IGNORECASE)
+    return out
+
+
+def _run_slide(system: str, user: str, slide_no: int, cancel_flag: Any = None) -> str:
     """Single slide with bounded retries. Returns sanitized valid HTML."""
     last_error = "unknown error"
     prompt = user
     for _ in range(MAX_RETRIES_PER_SLIDE):
+        _check_cancelled(cancel_flag)
         try:
             raw = _llm_html(system, prompt)
             return _validate_html(_sanitize_html(_extract_html(raw)), slide_no)
@@ -608,9 +744,14 @@ def _run_slide(system: str, user: str, slide_no: int) -> str:
 
 def _progress_line(slide: dict, first: bool = False) -> str:
     title = slide["title"][:80]
-    if first and slide["slide_no"] == 1:
-        return f"First slide of your file created: {title}"
-    return f"Slide {slide['slide_no']} created: {title}"
+    no = slide["slide_no"]
+    if first and no == 1:
+        return f"خلصت سلايد رقم 1: {title}"
+    return f"خلصت سلايد رقم {no}: {title}"
+
+
+def _merge_line(count: int) -> str:
+    return f"تم تجميع {count} سلايدات في PDF"
 
 
 def _extract_styles(html: str) -> list[str]:
@@ -785,6 +926,46 @@ def _shape_ar(text: str) -> str:
         return text
 
 
+def _printable_copy(html: str) -> str:
+    """Temp-print variant of one slide/combined document (originals untouched).
+
+    Headless Chrome --print-to-pdf drops every raster image when the ROOT
+    <html> carries dir=rtl (or body gets CSS direction:rtl) — verified
+    experimentally — while inner-container direction prints fine and looks
+    identical. So the print copy drops the root dir attribute; when the root
+    was rtl and no CSS direction exists anywhere, top-level children keep
+    their alignment via body>*{direction:rtl} (inner containers print
+    correctly). Pure string transform, deterministic. Never raises.
+    """
+    try:
+        text = html if isinstance(html, str) else ""
+        if not text:
+            return html
+        m = re.search(r"<html\b[^>]*>", text, re.IGNORECASE)
+        if not m:
+            return html
+        tag = m.group(0)
+        dm = re.search(r"""\sdir\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", tag, re.IGNORECASE)
+        root_rtl = bool(dm) and dm.group(1).strip("\"'").strip().lower() == "rtl"
+        if dm:
+            text = text[:m.start()] + tag[:dm.start()] + tag[dm.end():] + text[m.end():]
+        elif not root_rtl:
+            return html
+        if root_rtl:
+            styles = "".join(
+                bl for bl in re.findall(r"<style[^>]*>([\s\S]*?)</style\s*>", text, re.IGNORECASE))
+            if "direction" not in styles.lower():
+                inject = "<style>body>*{direction:rtl;unicode-bidi:isolate;}</style>"
+                hm = re.search(r"<head[^>]*>", text, re.IGNORECASE)
+                if hm:
+                    text = text[:hm.end()] + inject + text[hm.end():]
+                else:
+                    text = inject + text
+        return text
+    except Exception:
+        return html
+
+
 def _chrome_binary() -> str | None:
     """Local Chrome/Chromium binary for headless HTML printing. Never raises.
 
@@ -833,25 +1014,45 @@ def _build_pdf_chrome(combined_path: Path, pdf_path: Path) -> None:
         raise RuntimeError("no local Chrome/Chromium binary found")
     import subprocess as _sp
 
-    url = combined_path.resolve().as_uri()
+    # Same root-rtl print bug as per-slide printing: print a printable
+    # sibling copy (relative image/font refs keep resolving), never the
+    # stored file itself. Removed afterwards.
+    print_src: Path = combined_path
+    print_tmp: Path | None = None
+    try:
+        fixed = _printable_copy(combined_path.read_text(encoding="utf-8"))
+        if fixed != combined_path.read_text(encoding="utf-8"):
+            print_tmp = combined_path.with_name(combined_path.stem + ".print.html")
+            print_tmp.write_text(fixed, encoding="utf-8")
+            print_src = print_tmp
+    except Exception:
+        print_src = combined_path
+    url = print_src.resolve().as_uri()
     cmd = [binary, "--headless", "--disable-gpu", "--no-sandbox",
            "--hide-scrollbars", "--print-to-pdf-no-header",
            f"--print-to-pdf={str(pdf_path.resolve())}", url]
     try:
-        proc = _sp.run(cmd, capture_output=True, text=True, timeout=120)
-    except FileNotFoundError as e:
-        raise RuntimeError("Chrome binary not executable") from e
-    except _sp.TimeoutExpired as e:
-        raise RuntimeError("Chrome print timed out") from e
-    if proc.returncode != 0:
-        raise RuntimeError(f"Chrome print failed: {(proc.stderr or '')[:200]}")
-    try:
-        if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
-            raise RuntimeError("Chrome print produced an empty file.")
-    except RuntimeError:
-        raise
-    except Exception as e:
-        raise RuntimeError(f"Chrome print failed: {e}") from e
+        try:
+            proc = _sp.run(cmd, capture_output=True, text=True, timeout=120)
+        except FileNotFoundError as e:
+            raise RuntimeError("Chrome binary not executable") from e
+        except _sp.TimeoutExpired as e:
+            raise RuntimeError("Chrome print timed out") from e
+        if proc.returncode != 0:
+            raise RuntimeError(f"Chrome print failed: {(proc.stderr or '')[:200]}")
+        try:
+            if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
+                raise RuntimeError("Chrome print produced an empty file.")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Chrome print failed: {e}") from e
+    finally:
+        try:
+            if print_tmp is not None and print_tmp.is_file():
+                print_tmp.unlink()
+        except Exception:
+            pass
 
 
 def _build_pdf_fpdf(items: list[tuple[dict, str]], task_rel: str, pdf_path: Path,
@@ -875,19 +1076,37 @@ def _build_pdf_fpdf(items: list[tuple[dict, str]], task_rel: str, pdf_path: Path
         pdf = FPDF(orientation=str(page["orientation"]), unit="mm", format=page["format"])
         pdf.set_auto_page_break(False)
         pdf.set_margins(0, 0, 0)
-        # Base Unicode font (bundled Amiri Regular, OFL 1.1): renders Latin +
-        # Arabic on Windows and Linux with zero system dependencies. Slide
-        # TTFs below may override it per usage. Falls back to Helvetica
-        # (Latin-only) only when the bundle is missing.
-        base_family = "Helvetica"
+        # Base Unicode fonts (bundled, OFL): Amiri renders Arabic + Latin,
+        # Cairo renders Latin-first text. Each slide picks by its own script;
+        # missing bundles fall back to Helvetica (Latin-only). Slide TTFs
+        # below may override per usage.
+        has_ar_base = False
+        has_en_base = False
         try:
-            _bundle = _project_root() / "plugins" / "core_plugins" / "pdf_create" / "fonts" / "Amiri-Regular.ttf"
-            if _bundle.is_file():
-                pdf.add_font("pdfbase", "", str(_bundle))
-                base_family = "pdfbase"
+            _ar_bundle = _bundled_font(DEFAULT_AR_FONT)
+            if _ar_bundle is not None:
+                pdf.add_font("pdfbase", "", str(_ar_bundle))
+                has_ar_base = True
         except Exception:
-            base_family = "Helvetica"
+            has_ar_base = False
+        try:
+            _en_bundle = _bundled_font(DEFAULT_EN_FONT)
+            if _en_bundle is not None:
+                pdf.add_font("pdfbase-en", "", str(_en_bundle))
+                has_en_base = True
+        except Exception:
+            has_en_base = False
         for slide, _html in items:
+            try:
+                _slide_text = f"{slide.get('title') or ''}\n{slide.get('body') or ''}"
+                if not _has_arabic(_slide_text) and has_en_base:
+                    base_family = "pdfbase-en"
+                elif has_ar_base:
+                    base_family = "pdfbase"
+                else:
+                    base_family = "pdfbase-en" if has_en_base else "Helvetica"
+            except Exception:
+                base_family = "pdfbase" if has_ar_base else ("pdfbase-en" if has_en_base else "Helvetica")
             colors = slide.get("colors") or {}
             gradient = colors.get("gradient") or {}
             bg_hex = gradient.get("from") or colors.get("secondary") or "#FFFFFF"
@@ -1049,16 +1268,60 @@ def _render_pdf(items: list[tuple[dict, str]], task_rel: str, combined_path: Pat
             page = PAGE_SIZES.get(size) or PAGE_SIZES[DEFAULT_SIZE]
             tmpdir = _resolve(f"{task_rel}/.print_tmp")
             tmpdir.mkdir(parents=True, exist_ok=True)
+
+            def _stage_asset(name: str) -> None:
+                """Copy one declared image/font next to the temp print copies.
+
+                The temp slides live in .print_tmp/, so their relative refs
+                would otherwise resolve inside .print_tmp/ (missing) instead
+                of the deck folder. Bounded, jailed, never raises.
+                """
+                try:
+                    base = str(name or "").strip().replace("\\", "/").strip("/")
+                    if not base or base.startswith("/") or ".." in base.split("/"):
+                        return
+                    for cand in (f"{task_rel}/{base}", base):
+                        try:
+                            src = _resolve(cand)
+                        except Exception:
+                            continue
+                        if src.is_file():
+                            try:
+                                dst = tmpdir / base
+                                if not dst.is_file():
+                                    dst.parent.mkdir(parents=True, exist_ok=True)
+                                    data = src.read_bytes()
+                                    if len(data) > MAX_IMAGE_BYTES:
+                                        return
+                                    dst.write_bytes(data)
+                            except Exception:
+                                pass
+                            return
+                except Exception:
+                    pass
+
             parts: list[Path] = []
             for idx, rel in enumerate(slide_rels):
                 src = _resolve(rel)
                 if not src.is_file():
                     raise RuntimeError(f"slide file missing for print: {rel}")
+                try:
+                    _slide = items[idx][0] if idx < len(items) else {}
+                except Exception:
+                    _slide = {}
+                if isinstance(_slide, dict):
+                    for _img in (_slide.get("images") or []):
+                        if isinstance(_img, dict):
+                            _stage_asset(_img.get("file"))
+                    for _font in (_slide.get("fonts") or []):
+                        if isinstance(_font, dict):
+                            _stage_asset(_font.get("file"))
                 # Print a temp copy with the task @page injected: standalone
                 # slide files carry their own design CSS but no @page rule,
                 # and Chrome would otherwise default to Letter portrait.
-                # Originals are never modified.
-                html = src.read_text(encoding="utf-8")
+                # _printable_copy also drops the root dir (an RTL root makes
+                # Chrome print zero images). Originals are never modified.
+                html = _printable_copy(src.read_text(encoding="utf-8"))
                 inject = f"<style>@page {{ size: {page['css']}; margin: 0; }}</style>"
                 if re.search(r"<head[^>]*>", html, re.IGNORECASE):
                     html = re.sub(r"<head[^>]*>", lambda m: m.group(0) + inject, html,
@@ -1074,8 +1337,8 @@ def _render_pdf(items: list[tuple[dict, str]], task_rel: str, combined_path: Pat
                 raise RuntimeError("no slides to print")
             _merge_pdfs(parts, pdf_path)
             return "chrome"
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[pdf_create] chrome per-slide print failed, trying fallback: {str(e)[:200]}")
         finally:
             try:
                 if tmpdir is not None:
@@ -1088,10 +1351,134 @@ def _render_pdf(items: list[tuple[dict, str]], task_rel: str, combined_path: Pat
         try:
             _build_pdf_chrome(combined_path, pdf_path)
             return "chrome"
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[pdf_create] chrome combined print failed, trying fallback: {str(e)[:200]}")
     _build_pdf_fpdf(items, task_rel, pdf_path, size)
     return "fpdf"
+
+
+# --------------------------------------------------------------------------
+# Bundled default fonts (inside the tool, never in Workspace)
+# --------------------------------------------------------------------------
+
+FONTS_DIR = Path(__file__).resolve().parent / "fonts"
+DEFAULT_AR_FONT = "Amiri-Regular.ttf"  # Arabic + Latin serif (headings/Arabic)
+DEFAULT_EN_FONT = "Cairo-Variable.ttf"  # Arabic + Latin sans (Latin-first text)
+_AR_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
+
+
+def _bundled_font(name: str) -> Path | None:
+    """One bundled font file, or None when it is not shipped. Never raises."""
+    try:
+        cand = FONTS_DIR / name
+        return cand if cand.is_file() else None
+    except Exception:
+        return None
+
+
+def _has_arabic(text: str) -> bool:
+    try:
+        return bool(_AR_RE.search(text or ""))
+    except Exception:
+        return False
+
+
+def _default_font_name(slide: dict) -> str | None:
+    """Bundled default for a slide: Amiri when Arabic, else Cairo.
+    Each falls back to the other when its file is missing. None when
+    neither is shipped. Never raises."""
+    try:
+        text = f"{slide.get('title') or ''}\n{slide.get('body') or ''}"
+        first, second = (DEFAULT_AR_FONT, DEFAULT_EN_FONT) if _has_arabic(text) else (DEFAULT_EN_FONT, DEFAULT_AR_FONT)
+        return first if _bundled_font(first) is not None else (second if _bundled_font(second) is not None else None)
+    except Exception:
+        return None
+
+
+def _ensure_default_fonts(task_rel: str, slides: list[dict]) -> dict[str, str]:
+    """Copy needed bundled defaults into the deck (fontless slides only).
+
+    Returns {font_file_name: deck_relative_copy}. A slide that declares
+    its own fonts keeps them — defaults never override user fonts.
+    Missing bundle files are skipped silently. Never raises."""
+    copied: dict[str, str] = {}
+    try:
+        needed: set[str] = set()
+        for slide in slides:
+            if isinstance(slide, dict) and not slide.get("fonts"):
+                name = _default_font_name(slide)
+                if name:
+                    needed.add(name)
+        if not needed:
+            return copied
+        _bootstrap()
+        from core.paths import resolve_inside_workspace as _jail
+
+        for name in sorted(needed):
+            src = _bundled_font(name)
+            if src is None:
+                continue
+            try:
+                target = _jail(f"{task_rel}/{name}")
+            except ValueError:
+                continue
+            try:
+                if not target.is_file():
+                    data = src.read_bytes()
+                    if len(data) > MAX_IMAGE_BYTES:
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+                copied[name] = f"{task_rel}/{name}"
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return copied
+
+
+def _apply_default_font(html: str, slide: dict, task_rel: str) -> str:
+    """Inject the bundled default @font-face into a fontless slide document.
+
+    Slides with declared fonts are untouched. Pure string transform,
+    deterministic. Never raises."""
+    try:
+        if not isinstance(html, str) or not html:
+            return html
+        if isinstance(slide, dict) and slide.get("fonts"):
+            return html
+        name = _default_font_name(slide if isinstance(slide, dict) else {})
+        if not name:
+            return html
+        _bootstrap()
+        from core.paths import resolve_inside_workspace as _jail
+
+        try:
+            if not _jail(f"{task_rel}/{name}").is_file():
+                return html
+        except ValueError:
+            return html
+        style = (f"<style>@font-face{{font-family:'pdfdefault';src:url('{name}');}}"
+                 f"body{{font-family:'pdfdefault',Arial,sans-serif;}}</style>")
+        if re.search(r"<head[^>]*>", html, re.IGNORECASE):
+            return re.sub(r"<head[^>]*>", lambda m: m.group(0) + style, html,
+                           count=1, flags=re.IGNORECASE)
+        return style + html
+    except Exception:
+        return html
+
+
+def _defaults_note() -> str:
+    """One context line telling the slide session which defaults exist."""
+    try:
+        have = [n for n in (DEFAULT_AR_FONT, DEFAULT_EN_FONT) if _bundled_font(n) is not None]
+        if not have:
+            return ""
+        return ("Bundled default fonts (already copied into the deck folder when "
+                "a slide declares no fonts — reference by bare name only if you "
+                "need them explicitly): " + ", ".join(have) + ".")
+    except Exception:
+        return ""
 
 
 def _existing_slide_file(task_rel: str, slide_no: int) -> str | None:
@@ -1124,7 +1511,7 @@ def _find_task(task_id: str) -> tuple[list[dict], dict | None]:
 
 def execute(action: str = "create", pdf_name: str | None = None,
             slides: list | None = None, task_id: str | None = None,
-            size: str | None = None) -> dict:
+            size: str | None = None, cancel_flag: Any = None) -> dict:
     act = _validate_action(action)
 
     if act == "get":
@@ -1133,6 +1520,14 @@ def execute(action: str = "create", pdf_name: str | None = None,
         _, entry = _find_task(tid)
         if entry is None:
             raise FileNotFoundError(f"task_id not found: {tid}")
+        pdf_rel = str(entry.get("pdf_path") or "")
+        _bootstrap()
+        from core.paths import resolve_inside_workspace as _resolve_get
+
+        if not pdf_rel or not _resolve_get(pdf_rel).is_file():
+            raise FileNotFoundError(
+                f"PDF file is missing from Workspace: {pdf_rel or '(no path)'} "
+                f"(task {tid}) — rebuild it with action=update or action=create.")
         event = format_event(action=act, pdf_name=str(entry.get("pdf_name") or ""), task_id=tid)
         return {
             "event": event,
@@ -1156,7 +1551,11 @@ def execute(action: str = "create", pdf_name: str | None = None,
         tid = str(uuid.uuid4())[:8]
         task_rel = name
         ws = _workspace_root()
-        if (ws / task_rel).exists():
+        # A deleted folder still leaves a task entry pointing at this path:
+        # reusing the bare name would make two tasks share one file, so a
+        # recorded folder collides exactly like an existing one on disk.
+        if (ws / task_rel).exists() or any(
+                isinstance(t, dict) and t.get("folder") == task_rel for t in _load_tasks()):
             task_rel = f"{name}_{tid}"
         folder = (ws / task_rel).resolve()
         try:
@@ -1165,19 +1564,26 @@ def execute(action: str = "create", pdf_name: str | None = None,
             raise ValueError("Blocked: PDF folder must stay inside Workspace") from None
         folder.mkdir(parents=True, exist_ok=False)
         _check_assets(task_rel, clean_slides)
+        _ensure_default_fonts(task_rel, clean_slides)
         _ctx = _internal_context()
+        _note = _defaults_note()
+        if _note:
+            _ctx = (_ctx + "\n\n" + _note) if _ctx else _note
         system = _system_prompt()
         items: list[tuple[dict, str]] = []
         progress: list[str] = []
         first = True
         for slide in clean_slides:
+            _check_cancelled(cancel_flag)
             user = _slide_user_prompt(name, task_rel, clean_slides, slide, size=page_size, context=_ctx)
-            html = _run_slide(system, user, slide["slide_no"])
+            html = _run_slide(system, user, slide["slide_no"], cancel_flag)
+            html = _validate_html(_apply_default_font(_normalize_image_srcs(html, slide, task_rel), slide, task_rel), slide["slide_no"])
             rel = f"{task_rel}/{_slide_filename(slide)}"
             _write_workspace_file(rel, html)
             items.append((slide, html))
             progress.append(_progress_line(slide, first=first))
             first = False
+        progress.append(_merge_line(len(clean_slides)))
         combined = _combine_html(items, page_size)
         combined_rel = f"{task_rel}/combined.html"
         _write_workspace_file(combined_rel, combined)
@@ -1234,6 +1640,7 @@ def execute(action: str = "create", pdf_name: str | None = None,
     task_rel = str(entry.get("folder") or entry.get("pdf_name") or tid)
     name = str(entry.get("pdf_name") or task_rel)
     _check_assets(task_rel, clean_slides)
+    _ensure_default_fonts(task_rel, clean_slides)
     old_hashes = entry.get("hashes") or {}
     if not isinstance(old_hashes, dict):
         old_hashes = {}
@@ -1262,24 +1669,31 @@ def execute(action: str = "create", pdf_name: str | None = None,
         }
     system = _system_prompt()
     _ctx = _internal_context()
+    _note = _defaults_note()
+    if _note:
+        _ctx = (_ctx + "\n\n" + _note) if _ctx else _note
     progress: list[str] = []
     current_files: dict[str, str] = {}
     for slide in clean_slides:
         no = slide["slide_no"]
         key = str(no)
-        if old_hashes.get(key) == _slide_hash(slide) and old_files.get(key):
+        if (old_hashes.get(key) == _slide_hash(slide) and old_files.get(key)
+                and _read_workspace_file(str(old_files[key]))):
             current_files[key] = str(old_files[key])
             continue
+        _check_cancelled(cancel_flag)
         old_html = None
         old_rel = old_files.get(key) or _existing_slide_file(task_rel, no)
         if old_rel:
             old_html = _read_workspace_file(str(old_rel))
         user = _slide_user_prompt(name, task_rel, clean_slides, slide, old_html=old_html, size=new_size, context=_ctx)
-        html = _run_slide(system, user, no)
+        html = _run_slide(system, user, no, cancel_flag)
+        html = _validate_html(_apply_default_font(_normalize_image_srcs(html, slide, task_rel), slide, task_rel), no)
         rel = str(old_rel) if old_rel else f"{task_rel}/{_slide_filename(slide)}"
         _write_workspace_file(rel, html)
         current_files[key] = rel
         progress.append(_progress_line(slide))
+    progress.append(_merge_line(len(clean_slides)))
     for no in removed:
         rel = str(old_files.get(str(no)) or "")
         if rel:

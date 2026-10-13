@@ -1081,6 +1081,92 @@ _PQ_LOCK = threading.Lock()
 # Active chat loop cancel flag (single conversation): set by /api/chat_cancel
 _ACTIVE_RUN: dict = {}
 _RUN_LOCK = threading.Lock()
+# Every live run thread registers its own cancel event here (a resend while
+# a run is stuck orphans the old thread and _ACTIVE_RUN only keeps the
+# latest). STOP sets ALL of them so no orphaned generation keeps running
+# — and a refresh can no longer show a "still generating" ghost.
+_CANCEL_EVENTS: set = set()
+
+
+def _chat_status() -> tuple:
+    """Whether a refreshed page should reconnect to the running loop.
+
+    STOP marks cancelled immediately: the loop thread may still be winding
+    down, but chat_active / chat_frames must report inactive so the page
+    never rebuilds a live Working block for a stopped task.
+    """
+    try:
+        with _RUN_LOCK:
+            live = "event" in _ACTIVE_RUN and not _ACTIVE_RUN.get("cancelled")
+            preview = str(_ACTIVE_RUN.get("input") or "")[:200] if live else ""
+            return bool(live), preview
+    except Exception:
+        return False, ""
+
+
+def _chat_thread_busy() -> bool:
+    """Whether a loop thread still owns _ACTIVE_RUN (even while stopping)."""
+    try:
+        with _RUN_LOCK:
+            return "event" in _ACTIVE_RUN
+    except Exception:
+        return False
+
+
+def _mark_chat_cancelled() -> None:
+    """STOP: abort the loop and hide it from refresh reconnect. Never raises."""
+    try:
+        with _RUN_LOCK:
+            ev = _ACTIVE_RUN.get("event")
+            orphans = list(_CANCEL_EVENTS)
+            if "event" in _ACTIVE_RUN:
+                _ACTIVE_RUN["cancelled"] = True
+        for _ev in [ev] + orphans:
+            if _ev is not None:
+                try:
+                    _ev.set()
+                except Exception:
+                    pass
+        try:
+            with _PQ_LOCK:
+                _qs = list(_PENDING_QUESTIONS.values())
+            for _q in _qs:
+                try:
+                    _q.put({"decision": "stop"})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            _live_pause_clear()
+        except Exception:
+            pass
+        try:
+            _run_frames_clear()
+        except Exception:
+            pass
+        try:
+            _events_emit_chat()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _release_chat_run(run_id) -> bool:
+    """Clear _ACTIVE_RUN only if this thread still owns it. True when owned."""
+    owned = False
+    try:
+        with _RUN_LOCK:
+            owned = _ACTIVE_RUN.get("id") == run_id
+            if owned:
+                _ACTIVE_RUN.pop("event", None)
+                _ACTIVE_RUN.pop("input", None)
+                _ACTIVE_RUN.pop("cancelled", None)
+                _ACTIVE_RUN.pop("id", None)
+    except Exception:
+        owned = False
+    return owned
 
 
 def _live_snapshot() -> dict:
@@ -1170,12 +1256,22 @@ _RUN_FRAME_CAP = 300
 
 
 def _run_frame_remember(frame: dict) -> None:
-    """Append one progress frame (bounded) + fan it out to re-attached tabs."""
+    """Append one progress frame (bounded) + fan it out to re-attached tabs.
+
+    A STOP already marked cancelled must not buffer or fan frames: a
+    refreshed page would otherwise rebuild a live Working block.
+    """
     if not isinstance(frame, dict):
         return
     if frame.get("type") not in ("event_start", "event", "question",
                                  "live", "live_end"):
         return
+    try:
+        with _RUN_LOCK:
+            if _ACTIVE_RUN.get("cancelled"):
+                return
+    except Exception:
+        pass
     try:
         with _RUN_FRAMES_LOCK:
             _RUN_FRAMES.append(frame)
@@ -1379,9 +1475,7 @@ def _events_snapshot() -> dict:
         stream = {"mode": active.get("mode"), "tool": active.get("tool"),
                   "url": active["url"][:2000], "view_only": True}
     try:
-        with _RUN_LOCK:
-            chat_active = "event" in _ACTIVE_RUN
-            chat_input = str(_ACTIVE_RUN.get("input") or "")[:200]
+        chat_active, chat_input = _chat_status()
     except Exception:
         chat_active, chat_input = False, ""
     try:
@@ -1527,9 +1621,7 @@ def _events_emit_chat(gateway: bool = False) -> None:
     visitor bubble + live steps without a refresh, then reload once.
     """
     try:
-        with _RUN_LOCK:
-            active = "event" in _ACTIVE_RUN
-            preview = str(_ACTIVE_RUN.get("input") or "")[:200]
+        active, preview = _chat_status()
         payload = {"active": bool(active), "input": preview}
         if gateway:
             payload["gateway"] = True
@@ -1783,6 +1875,84 @@ def _audio_root() -> Path:
         return data_subdir("files", "audio")
     except Exception:
         return PROJECT_ROOT.parents[0] / "X5Agent" / "Data" / "files" / "audio"
+
+
+_PREVIEW_MAX_HTML = 2 * 1024 * 1024
+
+
+def _rewrite_preview_asset_urls(target: Path, norm_rel: str) -> bytes | None:
+    """Inline sibling assets for HTML preview (dashboard iframe).
+
+    A previewed slide references its images/fonts relatively
+    (src="cloud.png"), but the preview iframe lives at
+    /api/workspace/download, so those refs resolve to a missing route and
+    the preview shows no pictures. Rewrites bare relative refs to absolute
+    same-folder download URLs (preview=1) when the file really exists next
+    to the HTML. Absolute URLs, data-URLs, fragments and anything escaping
+    the Workspace stay untouched. Only used for preview responses —
+    real downloads stream the file byte-identical.
+    Returns the rewritten body, or None to serve the file untouched.
+    Never raises.
+    """
+    try:
+        raw = target.read_bytes()
+        if len(raw) > _PREVIEW_MAX_HTML:
+            return None
+        try:
+            html = raw.decode("utf-8")
+        except Exception:
+            return None
+        if "<" not in html:
+            return None
+        folder = (norm_rel or "").strip().replace("\\", "/")
+        folder = folder.rsplit("/", 1)[0] if "/" in folder else ""
+        if not folder:
+            return None
+        import sys as _sys2
+        from urllib.parse import quote as _q2
+        if str(PROJECT_ROOT) not in _sys2.path:
+            _sys2.path.insert(0, str(PROJECT_ROOT))
+        from core.paths import resolve_inside_workspace as _jail2
+
+        def _abs_url(rel: str) -> str | None:
+            try:
+                s = (rel or "").strip().strip("'\"")
+                if not s or s.lower().startswith("data:"):
+                    return None
+                low = s.lower()
+                if low.startswith(("http://", "https://", "/", "blob:")):
+                    return None
+                head = s.split("?")[0].split("#")[0].replace("\\", "/").strip()
+                if not head or head.startswith("/") or ".." in head.split("/"):
+                    return None
+                full = f"{folder}/{head}"
+                if not _jail2(full).is_file():
+                    return None
+                return "/api/workspace/download?path=" + _q2(full) + "&preview=1"
+            except Exception:
+                return None
+
+        import re as _re2
+
+        def _img_re(m):
+            url = _abs_url(m.group(2))
+            return m.group(1) + (url if url else m.group(2)) + m.group(3)
+
+        out = _re2.sub(r'(<img\b[^>]*?\bsrc\s*=\s*")([^"]*)(")', _img_re, html, flags=_re2.IGNORECASE)
+        out = _re2.sub(r"(<img\b[^>]*?\bsrc\s*=\s*')([^']*)(')", _img_re, out, flags=_re2.IGNORECASE)
+
+        def _url_re(m):
+            url = _abs_url(m.group(2))
+            return m.group(1) + (url if url else m.group(2)) + m.group(3)
+
+        out = _re2.sub(r'(url\(\s*")([^"]*)("\s*\))', _url_re, out, flags=_re2.IGNORECASE)
+        out = _re2.sub(r"(url\(\s*')([^']*)('\s*\))", _url_re, out, flags=_re2.IGNORECASE)
+        out = _re2.sub(r'(url\(\s*)([^"\'()\s][^()]*?)(\s*\))', _url_re, out, flags=_re2.IGNORECASE)
+        if out == html:
+            return None
+        return out.encode("utf-8")
+    except Exception:
+        return None
 
 
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
@@ -2144,13 +2314,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 # first (same as chat cancel), then mint the CONTROL live URL
                 # and remember it so refresh restores the big in-chat card.
                 try:
-                    with _RUN_LOCK:
-                        _ev = _ACTIVE_RUN.get("event")
-                    if _ev is not None:
-                        try:
-                            _ev.set()
-                        except Exception:
-                            pass
+                    _mark_chat_cancelled()
                 except Exception:
                     pass
                 res = execute_tool("human_control", {"reason": "Manual take-over from preview"})
@@ -3310,6 +3474,32 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             _ascii = (target.name.encode("ascii", "ignore").decode() or "file")
             _ascii = _ascii.replace('"', "").replace("\\", "")[:100] or "file"
             _disp = f'{"inline" if _inline else "attachment"}; filename="{_ascii}"; filename*=UTF-8\'\'{_quote(target.name)}'
+            # HTML preview: sibling images/fonts are referenced relatively
+            # (src="cloud.png") but the iframe URL is /api/workspace/download,
+            # so they 404 and the preview shows no pictures. Serve a rewritten
+            # copy with absolute same-folder download URLs; real downloads
+            # below still stream the file byte-identical. Skipped for Range
+            # requests, virtual library paths and large files.
+            if (_inline and _ext in ("html", "htm") and ext_target is None
+                    and not (self.headers.get("Range") or "").strip()
+                    and 0 < size <= _PREVIEW_MAX_HTML):
+                _body = _rewrite_preview_asset_urls(target, norm)
+                if _body is not None:
+                    self.send_response(200)
+                    self.send_header("Content-Type", mime)
+                    self.send_header("Content-Length", str(len(_body)))
+                    self.send_header("Content-Disposition", _disp)
+                    self.send_header("X-Frame-Options", "SAMEORIGIN")
+                    # Preview bytes must never go stale (regenerated decks).
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(_body)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
             # Single Range support (bytes=start-end / start- / -tail): the
             # built-in PDF viewer requests ranges; answer 206 for them.
             _start, _end = 0, size - 1
@@ -3344,8 +3534,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Disposition", _disp)
             if _inline:
                 # Same-origin iframe embedding allowed (Workspace preview),
-                # other sites cannot frame it.
+                # other sites cannot frame it. Previews are never cached so
+                # regenerated decks/slides show fresh bytes immediately.
                 self.send_header("X-Frame-Options", "SAMEORIGIN")
+                self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
@@ -4144,8 +4336,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     _ref_ids.append((_nm, _fid, _full))
         except Exception:
             _ref_ids = []
-        if not msg and not raw_attachments and not _sinstr and not _ref_ids:
-            raise _ChatError("message required")
         try:
             skip_ids = payload.get("skip_history_ids") or []
             skip_ids = [str(i)[:16] for i in skip_ids if isinstance(i, str) and i.strip()][:4]
@@ -4156,6 +4346,30 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._skip_history_ids = list(skip_ids)
             except Exception:
                 pass
+        # Seamless resume (Continue pill): no new message exists — the loop
+        # reuses the stopped task's user id and the internal instruction
+        # reaches NEITHER the UI NOR the model (run_loop resume_stopped).
+        # The pill path never sends text/attachments/skills/refs; anything
+        # present is ignored and nothing new is persisted.
+        _resume = False
+        try:
+            _resume = payload.get("resume") is True
+        except Exception:
+            _resume = False
+        try:
+            self._resume_task = False
+        except Exception:
+            pass
+        if _resume:
+            if not skip_ids:
+                raise _ChatError("resume needs skip_history_ids of the stopped task")
+            try:
+                self._resume_task = True
+            except Exception:
+                pass
+            return "", []
+        if not msg and not raw_attachments and not _sinstr and not _ref_ids:
+            raise _ChatError("message required")
 
         if str(PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(PROJECT_ROOT))
@@ -4390,9 +4604,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         Lets a refreshed page resume the running state instead of losing it."""
         try:
-            with _RUN_LOCK:
-                active = "event" in _ACTIVE_RUN
-                preview = str(_ACTIVE_RUN.get("input") or "")[:200]
+            active, preview = _chat_status()
             self._send_json({"active": bool(active), "input": preview})
         except Exception as e:
             self._send_json({"error": "failed to load chat state", "detail": str(e)}, status=500)
@@ -4401,41 +4613,27 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         """Progress frames of the running loop, for a page that just refreshed.
 
         Returns the steps/questions already streamed so the UI can rebuild the
-        Working block + its steps, then keep following live run pushes."""
+        Working block + its steps, then keep following live run pushes.
+        A STOP already marked cancelled returns active=false and no frames —
+        refresh must not reconstruct a live Working block."""
         try:
-            with _RUN_LOCK:
-                active = "event" in _ACTIVE_RUN
-                preview = str(_ACTIVE_RUN.get("input") or "")[:200]
-            with _RUN_FRAMES_LOCK:
-                frames = [dict(f) for f in _RUN_FRAMES]
+            active, preview = _chat_status()
+            frames = []
+            if active:
+                with _RUN_FRAMES_LOCK:
+                    frames = [dict(f) for f in _RUN_FRAMES]
             self._send_json({"active": bool(active), "input": preview,
                              "frames": frames})
         except Exception as e:
             self._send_json({"error": "failed to load run frames", "detail": str(e)}, status=500)
 
     def _handle_chat_cancel_post(self):
-        """Cancel the active chat loop (edit-during-generation). Best-effort."""
+        """Cancel the active chat loop (STOP / edit-during-generation).
+
+        Marks the run not-live immediately so a refresh cannot reconnect,
+        then sets every cancel event and wakes any pause. Best-effort."""
         try:
-            with _RUN_LOCK:
-                ev = _ACTIVE_RUN.get("event")
-            if ev is not None:
-                try:
-                    ev.set()
-                except Exception:
-                    pass
-            # A STOP during a pause (ask/approval/needs_model/live) must wake
-            # the loop so it sees the cancel and never resumes on its own —
-            # not after 600s expiry, not after a page refresh. Best-effort.
-            try:
-                with _PQ_LOCK:
-                    _qs = list(_PENDING_QUESTIONS.values())
-                for _q in _qs:
-                    try:
-                        _q.put({"decision": "stop"})
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            _mark_chat_cancelled()
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"error": "cancel failed", "detail": str(e)[:200]}, status=500)
@@ -4530,6 +4728,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             pass
         return None
 
+    def _resume_requested(self) -> bool:
+        """Whether this turn is a seamless Continue resume.
+
+        Set by _build_loop_input from resume:true. Consumed once per chat
+        turn so a later message is never mistaken for a resume.
+        """
+        try:
+            r = bool(getattr(self, "_resume_task", False))
+            self._resume_task = False
+            return r
+        except Exception:
+            return False
+
     def _handle_chat_post(self):
         try:
             try:
@@ -4554,7 +4765,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
                 chat_model, chat_key = _resolve_chat_model()
                 _reuse = self._reuse_user_id()
-                result = run_loop(loop_input, max_steps=CHAT_LOOP_STEPS, verbose=False, model=chat_model, api_key=chat_key, reuse_user_id=_reuse, chat_limit=20 if _reuse else 30)
+                _resume = self._resume_requested()
+                result = run_loop(loop_input, max_steps=CHAT_LOOP_STEPS, verbose=False, model=chat_model, api_key=chat_key, reuse_user_id=_reuse, chat_limit=20 if _reuse else 30, resume_stopped=_resume)
             except (ValueError, RuntimeError) as e:
                 self._send_json(
                     {"error": "LLM request failed — connect a model in AI Models", "detail": str(e)[:200]},
@@ -4627,8 +4839,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"error": "login required"}, status=401)
                 return
             try:
-                with _RUN_LOCK:
-                    busy = "event" in _ACTIVE_RUN
+                busy = _chat_thread_busy()
             except Exception:
                 busy = False
             if busy:
@@ -4687,7 +4898,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             Recording happens HERE (the run thread), never in _emit, so a
             refreshed/disconnected page never stops the progress buffer; the
             queue is bounded and drops the oldest frame instead of growing.
+            A STOP or a newer run must not write into the live buffer.
             """
+            try:
+                rid = box.get("run_id")
+                with _RUN_LOCK:
+                    stale = (rid is not None and _ACTIVE_RUN.get("id") != rid) or (
+                        rid is not None and _ACTIVE_RUN.get("id") == rid
+                        and _ACTIVE_RUN.get("cancelled"))
+                if stale:
+                    return
+            except Exception:
+                pass
             frame = _build_stream_frame(kind, val, out)
             if frame is not None:
                 _run_frame_remember(frame)
@@ -4727,7 +4949,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     _t = str(qpayload.get("tool") or "")
                     frame["needs_kind"] = _k
                     frame["tool"] = _t[:40]
-                    frame["text"] = f"Needs {_TITLES.get(_k, _k)} (used by {_t or 'this task'})."
+                    frame["text"] = f"الأداة {_t or 'المهمة'} تحتاج إلى {_TITLES.get(_k, _k)} غير متوصل."
                 except Exception:
                     frame["needs_kind"] = str(qpayload.get("kind") or "text")
                     frame["tool"] = str(qpayload.get("tool") or "")[:40]
@@ -4816,16 +5038,21 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         def _run():
             cancel_event = threading.Event()
+            run_id = id(cancel_event)
             _run_frames_clear()
             with _RUN_LOCK:
                 _ACTIVE_RUN["event"] = cancel_event
                 _ACTIVE_RUN["input"] = loop_input[:200]
+                _ACTIVE_RUN["id"] = run_id
+                _ACTIVE_RUN.pop("cancelled", None)
+                _CANCEL_EVENTS.add(cancel_event)
             _events_emit_chat(gateway=gw)
             try:
                 from core.agent.loop.engine import run_loop
 
                 chat_model, chat_key = _resolve_chat_model()
                 _reuse_stream = self._reuse_user_id()
+                _resume_stream = self._resume_requested()
                 box["res"] = run_loop(
                     loop_input,
                     max_steps=CHAT_LOOP_STEPS,
@@ -4841,25 +5068,29 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     cancel_flag=cancel_event,
                     reuse_user_id=_reuse_stream,
                     chat_limit=20 if _reuse_stream else 30,
+                    resume_stopped=_resume_stream,
                 )
             except Exception as e:
                 box["err"] = e
             finally:
-                with _RUN_LOCK:
-                    if _ACTIVE_RUN.get("event") is cancel_event:
-                        _ACTIVE_RUN.pop("event", None)
-                    _ACTIVE_RUN.pop("input", None)
-                _run_frames_clear()
-                _events_emit_chat(gateway=gw)
-                # Run persisted new messages: last-50 hash breaks, refresh + rehash.
-                _hello_invalidate("chat_last50")
-                _hello_invalidate("dashboard")
-                _hello_invalidate("rest")
-                _events_broadcast("chat_done", {"gateway": True} if gw else {})
                 try:
-                    _events_emit_scheduler(force=True)
+                    with _RUN_LOCK:
+                        _CANCEL_EVENTS.discard(cancel_event)
                 except Exception:
                     pass
+                owned = _release_chat_run(run_id)
+                if owned:
+                    _run_frames_clear()
+                    _events_emit_chat(gateway=gw)
+                    # Run persisted new messages: last-50 hash breaks, refresh + rehash.
+                    _hello_invalidate("chat_last50")
+                    _hello_invalidate("dashboard")
+                    _hello_invalidate("rest")
+                    _events_broadcast("chat_done", {"gateway": True} if gw else {})
+                    try:
+                        _events_emit_scheduler(force=True)
+                    except Exception:
+                        pass
                 events_q.put(("stop", None, None))
 
         threading.Thread(target=_run, daemon=True).start()

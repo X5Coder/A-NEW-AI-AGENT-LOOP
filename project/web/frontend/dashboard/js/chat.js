@@ -667,6 +667,7 @@ function appendFinalFiles(el, files) {
       name: String(f.name || "file").slice(0, 100),
       path: String(f.path).slice(0, 300),
       size: Number(f.size) || 0,
+      pages: Number(f.pages) || 0,
       images: Array.isArray(f.images) ? f.images.slice(0, 20) : [],
     })));
     content.appendChild(wrap);
@@ -839,6 +840,99 @@ function formatRich(text) {
   // leftover inline placeholders (rare) restore as-is
   html = html.replace(/%%X5CODE(\d+)%%/g, (m, i) => chunks[Number(i)] || "");
   return html;
+}
+
+/* ---------- clickable Workspace paths in assistant replies ----------
+   The model writes plain paths like folder/file.pdf — linkify turns each
+   into a blue button that jumps to the Workspace page with the file
+   revealed exactly at its path (same reveal flow as @file tokens). */
+function normalizeWsPath(raw) {
+  // Validated Workspace-relative path or null. Never throws.
+  try {
+    let rel = String(raw || "").replace(/\\/g, "/").trim();
+    if (!rel) return null;
+    rel = rel.replace(/^\/+/, "");
+    // The map shows absolute paths — keep only what follows Workspace/.
+    const wx = rel.search(/X5Agent\/Workspace\//i);
+    if (wx >= 0) rel = rel.slice(wx + "X5Agent/Workspace/".length);
+    rel = rel.replace(/^\/+/, "");
+    if (!rel || rel.length > 500) return null;
+    const parts = rel.split("/").filter(Boolean);
+    if (parts.length < 2) return null; // a bare name is not a path
+    if (parts.some((p) => p === ".." || p === ".")) return null;
+    if (parts.some((p) => p.length > 100)) return null;
+    if (/[<>:"|?*\x00-\x1f]/.test(rel)) return null;
+    if (rel.includes("://") || rel.includes("@")) return null; // URLs, emails
+    if (parts.every((p) => /^\d+$/.test(p))) return null; // dates, not paths
+    return parts.join("/");
+  } catch (_) {
+    return null;
+  }
+}
+
+function linkifyWorkspacePaths(root) {
+  // Wraps plain Workspace-relative paths (folder/file, a/b/c.pdf) in blue
+  // jump buttons. Text nodes only — code blocks, links and buttons untouched.
+  try {
+    if (!root || !root.querySelectorAll) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        try {
+          const pe = node.parentElement;
+          if (pe && pe.closest && pe.closest("pre,code,a,button,.codeblock,.ws-path-link")) return NodeFilter.FILTER_REJECT;
+          const v = node.nodeValue || "";
+          if (!v.includes("/") && !v.includes("\\")) return NodeFilter.FILTER_REJECT;
+        } catch (_) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    const PATH_RE = /[^<>"'`\s|?*:\\/]+(?:[/\\][^<>"'`\s|?*:\\/]+)+/g;
+    nodes.forEach((node) => {
+      try {
+        const text = node.nodeValue || "";
+        PATH_RE.lastIndex = 0;
+        let m;
+        let last = 0;
+        let hit = false;
+        const frag = document.createDocumentFragment();
+        while ((m = PATH_RE.exec(text)) !== null) {
+          let s = m[0];
+          let start = m.index;
+          let end = m.index + m[0].length;
+          const lead = /^[{[(«"'“”‘’]+/.exec(s);
+          if (lead) {
+            s = s.slice(lead[0].length);
+            start += lead[0].length;
+          }
+          const trail = /[ .,:;!؟?،)\]}'"»…—–-]+$/.exec(s);
+          if (trail) {
+            s = s.slice(0, s.length - trail[0].length);
+            end -= trail[0].length;
+          }
+          const norm = normalizeWsPath(s);
+          if (!norm || !s) continue;
+          if (start > last) frag.appendChild(document.createTextNode(text.slice(last, start)));
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "ws-path-link";
+          btn.setAttribute("data-ws-path", norm);
+          btn.setAttribute("dir", "ltr");
+          btn.title = "Open in Workspace";
+          btn.textContent = s;
+          frag.appendChild(btn);
+          last = end;
+          hit = true;
+        }
+        if (!hit) return;
+        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+        node.parentNode.replaceChild(frag, node);
+      } catch (_) {}
+    });
+  } catch (_) {}
 }
 
 function hideWelcome() {
@@ -1125,6 +1219,30 @@ function settleThinkingBlock(block, elapsedSec) {
   block.classList.remove("open");
 }
 
+function resumeThinkingBlock(block) {
+  // Continue-after-STOP: the SAME frozen Working block comes back to life —
+  // wave restarts, block reopens, elapsed timer restarts from zero. Steps
+  // stay exactly as they were; new steps append below in the same list.
+  // Never throws.
+  try {
+    if (!block || !block.isConnected) return;
+    try { delete block.dataset.settled; } catch (_) {}
+    try { delete block.dataset.stopped; } catch (_) {}
+    block.classList.remove("done");
+    block.classList.add("open");
+    try {
+      block.querySelectorAll(":scope > .thinking-header > .working-time").forEach((t) => {
+        try { t.remove(); } catch (_) {}
+      });
+    } catch (_) {}
+    try {
+      if (block._dotSquare) startSquareAnimation(block._dotSquare);
+    } catch (_) {}
+    try { block._t0 = Date.now(); } catch (_) {}
+    ensureHeaderArrow(block);
+  } catch (_) {}
+}
+
 function settleThinkingStopped(thinkingEl) {
   // STOP mid-task: freeze everything in place — the Working block stays
   // visible (stops animating, shows elapsed seconds, stays expandable via
@@ -1361,6 +1479,9 @@ function typeRich(container, fullText) {
   return new Promise((resolve) => {
     const template = document.createElement("div");
     template.innerHTML = formatRich(fullText);
+    try {
+      linkifyWorkspacePaths(template);
+    } catch (_) {}
     const live = template.cloneNode(true);
     const jobs = [];
     const walker = document.createTreeWalker(live, NodeFilter.SHOW_TEXT);
@@ -1558,6 +1679,107 @@ async function loadOlderHistory() {
   }
 }
 
+// Internal STOP note (engine _STOPPED_NOTE): kept in context for the model,
+// never shown as a reply. Matches old markers persisted before the flag.
+const STOPPED_NOTE_TEXT = "The user stopped this task before it finished (STOP). Do not continue it unless the user asks again.";
+function isStoppedMarker(m) {
+  try {
+    if (!m || m.role !== "assistant") return false;
+    if (m.stopped === true) return true;
+    return String(m.content || "").trim() === STOPPED_NOTE_TEXT;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Stopped-task Continue state: a STOP mid-task arms a Continue pill on the
+// send button (empty composer only). Survives refresh two ways: the persisted
+// history (last assistant message is the stopped marker) re-arms it on load,
+// and localStorage covers the live beat before any reload lands. The stored
+// value is the stopped task's user message id (or "1" when not persisted yet)
+// so Continue resumes in place via skip_history_ids — no new user bubble.
+// Never throws.
+const STOPPED_TASK_KEY = "x5:stopped-task";
+const CONTINUE_INPUT = "Continue the stopped task from where it stopped.";
+const CONTINUE_LABEL = "Continue";
+function readStoppedUserId() {
+  try {
+    const v = localStorage.getItem(STOPPED_TASK_KEY);
+    if (typeof v === "string" && v) return v.slice(0, 16);
+  } catch (_) {}
+  return "";
+}
+function setStoppedTask(userId) {
+  try {
+    localStorage.setItem(STOPPED_TASK_KEY, String(userId || "1").slice(0, 16) || "1");
+  } catch (_) {}
+  try { updateSendEnabled(); } catch (_) {}
+}
+function clearStoppedTask() {
+  try { localStorage.removeItem(STOPPED_TASK_KEY); } catch (_) {}
+  try { updateSendEnabled(); } catch (_) {}
+}
+function syncStoppedFromHistory(msgs) {
+  // The last assistant message decides: stopped marker → arm Continue (with
+  // the preceding user id for an idempotent resume); a normal reply → disarm
+  // (the task finished or a newer request superseded it). A trailing user
+  // bubble keeps whatever the live session set. Never throws.
+  try {
+    if (!Array.isArray(msgs) || !msgs.length) return;
+    const valid = msgs.filter((m) => m && (m.role === "user" || m.role === "assistant") && String(m.content || "").trim());
+    if (!valid.length) {
+      // Emptied chat (e.g. Delete chat history): no task exists anymore —
+      // disarm Continue so the button falls back to normal send.
+      try { clearStoppedTask(); } catch (_) {}
+      return;
+    }
+    const last = valid[valid.length - 1];
+    if (last.role === "assistant" && isStoppedMarker(last)) {
+      let uid = "";
+      for (let i = valid.length - 2; i >= 0; i--) {
+        if (valid[i].role === "user" && valid[i].id) { uid = String(valid[i].id).slice(0, 16); break; }
+      }
+      setStoppedTask(uid || readStoppedUserId() || "1");
+    } else if (last.role === "assistant") {
+      clearStoppedTask();
+    }
+  } catch (_) {}
+}
+function stoppedStepsBlock(m) {
+  // Frozen Working block for a STOP marker from persisted steps (or null).
+  // Never throws.
+  try {
+    const histSteps = Array.isArray(m.steps) ? m.steps.slice(0, 12) : [];
+    const seenHist = new Set();
+    const histItems = [];
+    histSteps.forEach((s, i) => {
+      const key = typeof s === "string" ? `str:${i}:${s}` : (s?.key || `idx:${i}:${s?.event || ""}`);
+      if (!key || seenHist.has(key)) return;
+      seenHist.add(key);
+      try {
+        const item = createStepItem(s);
+        completeStepItem(item, {});
+        histItems.push(item);
+      } catch (_) {}
+    });
+    if (histItems.length) {
+      const block = createThinkingBlock();
+      histItems.forEach((item) => block._stepsInner.appendChild(item));
+      settleThinkingBlock(block, m.elapsed);
+      return block;
+    }
+  } catch (_) {}
+  return null;
+}
+function appendStoppedLine(host) {
+  // --- Stopped --- divider (same marker as the live STOP path). Never throws.
+  try {
+    const line = document.createElement("div");
+    line.className = "stopped-line";
+    line.textContent = "Stopped";
+    host.appendChild(line);
+  } catch (_) {}
+}
 function buildHistoryNode(m) {
   // Builds (but does not attach) one persisted history bubble. Returns null
   // when the message carries nothing displayable. Never throws.
@@ -1594,6 +1816,23 @@ function buildHistoryNode(m) {
     const rawText = String(m.content || "");
     const el = document.createElement("div");
     el.className = "msg assistant";
+    if (isStoppedMarker(m)) {
+      // STOP marker, not a reply: frozen Working (when steps exist) + the
+      // Stopped divider only — unless the task was continued (resumed),
+      // in which case the divider is gone but the steps stay. The note
+      // text never renders.
+      applyMsgDir(el, "", "ltr");
+      const content = document.createElement("div");
+      content.className = "msg-content";
+      try {
+        const blk = stoppedStepsBlock(m);
+        if (blk) content.appendChild(blk);
+      } catch (_) {}
+      if (m.resumed !== true) appendStoppedLine(content);
+      el.appendChild(content);
+      if (m.id) el.dataset.mid = String(m.id);
+      return el;
+    }
     applyMsgDir(el, rawText, "ltr");
     const content = document.createElement("div");
     content.className = "msg-content";
@@ -1624,6 +1863,9 @@ function buildHistoryNode(m) {
     } catch (_) {}
     const rich = document.createElement("div");
     rich.innerHTML = formatRich(rawText);
+    try {
+      linkifyWorkspacePaths(rich);
+    } catch (_) {}
     p.replaceWith(rich);
     appendFinalImages(el, m.images);
     appendFinalVoice(el, m.audio);
@@ -1655,8 +1897,12 @@ function onHelloChatLast50(msgs) {
   // hello section 1 (most important first): last-50 render immediately,
   // but never wipe an in-flight run — same keep-rules as loadHistory.
   try {
-    if (!Array.isArray(msgs) || !msgs.length) return;
     if (activeRun || activeThinking) return; // a run owns the UI right now
+    if (!Array.isArray(msgs) || !msgs.length) {
+      // Emptied chat: no task exists — disarm Continue.
+      try { clearStoppedTask(); } catch (_) {}
+      return;
+    }
     renderHistoryMessages(msgs);
   } catch (_) {}
 }
@@ -1666,6 +1912,10 @@ function renderHistoryMessages(msgs) {
     const valid = msgs.filter(
       (m) => m && (m.role === "user" || m.role === "assistant") && String(m.content || "").trim()
     );
+    // State-aware button on EVERY render, including the empty one: an
+    // emptied chat disarms Continue (normal send), a trailing stopped
+    // marker re-arms it. Runs before the empty early-return below.
+    try { syncStoppedFromHistory(msgs); } catch (_) {}
     if (valid.length === 0) return;
     hideWelcome();
     // Refresh mid-run must never wipe in-flight UI: keep the thinking bubble
@@ -1731,6 +1981,20 @@ function renderHistoryMessages(msgs) {
         chatInner.appendChild(el);
       } else {
         const { el, p } = appendAssistantShell();
+        if (isStoppedMarker(m)) {
+          // STOP marker, not a reply: frozen Working (when steps exist) +
+          // the Stopped divider only — unless continued (resumed): steps
+          // stay, divider gone. The note text never renders.
+          try {
+            const host = (p && p.parentNode) || el;
+            try { if (p) p.remove(); } catch (_) {}
+            const blk = stoppedStepsBlock(m);
+            if (blk) host.appendChild(blk);
+            if (m.resumed !== true) appendStoppedLine(host);
+          } catch (_) {}
+          if (m.id) el.dataset.mid = String(m.id);
+          return;
+        }
         const rawText = String(m.content).slice(0, MAX_MESSAGE);
         applyMsgDir(el, rawText, "ltr");
         // After refresh: settled Working (stopped, collapsed) + reply below.
@@ -1759,6 +2023,9 @@ function renderHistoryMessages(msgs) {
         // Screenshots of the screenshot tool are part of the final reply, so they stay.
         const rich = document.createElement("div");
         rich.innerHTML = formatRich(rawText);
+        try {
+          linkifyWorkspacePaths(rich);
+        } catch (_) {}
         p.replaceWith(rich);
         appendFinalImages(el, m.images);
         appendFinalVoice(el, m.audio);
@@ -1964,17 +2231,21 @@ function openShotLightbox(src) {
   document.body.classList.add("shotbox-open");
 }
 
-async function sendStream(value, attachments, thinking, skipHistoryIds) {
+async function sendStream(value, attachments, thinking, skipHistoryIds, isResume) {
   // Chat request: POST /api/chat_stream, progress streams back as SSE
   // frames in the response body (server -> browser SSE, browser -> server
   // POST — no WebSocket). Returns true when fully handled, false to fall
   // back to the blocking endpoint.
+  // isResume (seamless Continue): the message body is intentionally EMPTY —
+  // the internal instruction never leaves the browser (the server resumes
+  // the stopped task by id and the model never sees it either).
   activeThinking = thinking;
   const myGen = ++runGen;
   const ctl = new AbortController();
   activeRun = { cancelled: false, gen: myGen, thinking, abort: () => { try { ctl.abort(); } catch (_) {} } };
   let res;
-  const streamBody = { message: value, attachments, mode: agentMode };
+  const streamBody = { message: isResume ? "" : value, attachments, mode: agentMode };
+  if (isResume) streamBody.resume = true;
   if (pendingSkill) streamBody.skill = pendingSkill;
   if (pendingWsRefs.length) streamBody.workspace_refs = pendingWsRefs.map((r) => ({ name: r.name, path: r.path }));
   if (skipHistoryIds && skipHistoryIds.length) streamBody.skip_history_ids = skipHistoryIds;
@@ -2197,6 +2468,7 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
           if (pendingQuestion && pendingQuestion.id === msg2.id) {
             hideQuestionCard();
             clearPendingStored();
+            try { pendingModelConnect = null; } catch (_) {}
             toast("Question expired — continued without answer");
           }
         } else if (msg2?.type === "cancelled") {
@@ -2212,6 +2484,12 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
           try {
             settleThinkingStopped(thinking);
           } catch (_) {}
+          // The task stopped mid-way: arm the Continue pill (empty composer
+          // only). The user id lets Continue resume in place with no bubble.
+          try {
+            const _mid = (lastUserEl && lastUserEl.dataset && lastUserEl.dataset.mid) || "";
+            setStoppedTask(_mid || readStoppedUserId() || "1");
+          } catch (_) {}
           activeThinking = null;
           activeRun = null;
           turnResult = true;
@@ -2224,6 +2502,9 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
           // via /api/chat, persisting a second duplicate reply.
           doneReceived = true;
           turnResult = true;
+          // The turn finished (including a continued task): no stopped task
+          // remains, so the Continue pill goes away immediately.
+          try { clearStoppedTask(); } catch (_) {}
           (async () => {
             try {
           // Push beat the stream: chat_done fired first and the history
@@ -2304,7 +2585,9 @@ async function sendStream(value, attachments, thinking, skipHistoryIds) {
           if (lastUserEl && ids && ids.user) lastUserEl.dataset.mid = ids.user;
           if (ids && ids.assistant) finalEl.dataset.mid = ids.assistant;
           finalEl.dataset.raw = replyText;
-          finalEl.dataset.userText = value;
+          // A resumed turn stores NO prompt: regenerate falls back to the
+          // original request bubble, never the internal instruction.
+          finalEl.dataset.userText = isResume ? "" : value;
           attachAssistantBar(finalEl, replyText);
           doneReceived = true;
           activeThinking = null;
@@ -2411,6 +2694,8 @@ const STOP_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6"
 function setSending(sending) {
   if (!sendBtn) return;
   sendBtn.classList.toggle("stop", sending);
+  // Generating owns the button as STOP — a Continue pill never survives it.
+  if (sending) sendBtn.classList.remove("continue");
   sendBtn.innerHTML = sending ? STOP_SVG : SEND_SVG;
   sendBtn.setAttribute("aria-label", sending ? "Stop generation" : "Send message");
   sendBtn.title = sending ? "Stop generation" : "Send message";
@@ -2421,9 +2706,10 @@ function setSending(sending) {
   }
 }
 
-async function sendBlocking(value, attachments, thinking, skipHistoryIds) {
+async function sendBlocking(value, attachments, thinking, skipHistoryIds, isResume) {
   try {
-    const blockBody = { message: value, attachments, mode: agentMode };
+    const blockBody = { message: isResume ? "" : value, attachments, mode: agentMode };
+    if (isResume) blockBody.resume = true;
     if (pendingSkill) blockBody.skill = pendingSkill;
     if (pendingWsRefs.length) blockBody.workspace_refs = pendingWsRefs.map((r) => ({ name: r.name, path: r.path }));
     if (skipHistoryIds && skipHistoryIds.length) blockBody.skip_history_ids = skipHistoryIds;
@@ -2448,6 +2734,8 @@ async function sendBlocking(value, attachments, thinking, skipHistoryIds) {
     activeThinking = null;
     const replyText = String(data?.reply || "");
     const finalEl = await typeMessage(replyText, data?.events, data?.elapsed);
+    // Blocking-path completion ends any stopped task, same as the stream.
+    try { clearStoppedTask(); } catch (_) {}
     appendFinalImages(finalEl, data?.images);
     appendFinalVoice(finalEl, data?.audio);
     appendFinalFiles(finalEl, data?.files);
@@ -2455,7 +2743,8 @@ async function sendBlocking(value, attachments, thinking, skipHistoryIds) {
     if (lastUserEl && ids && ids.user) lastUserEl.dataset.mid = ids.user;
     if (ids && ids.assistant) finalEl.dataset.mid = ids.assistant;
     finalEl.dataset.raw = replyText;
-    finalEl.dataset.userText = value;
+    // A resumed turn stores NO prompt (regenerate uses the original bubble).
+    finalEl.dataset.userText = isResume ? "" : value;
     attachAssistantBar(finalEl, replyText);
   } catch (err) {
     thinking.remove();
@@ -2499,6 +2788,10 @@ async function handleSend() {
 
   // A new request supersedes any running generation.
   await abortActiveStream();
+
+  // A typed message is a brand-new request: a previously stopped task is
+  // superseded and its Continue pill goes away with it.
+  clearStoppedTask();
 
   lastUserEl = appendUserMessage(value, pending);
   attachUserBar(lastUserEl);
@@ -2544,6 +2837,93 @@ async function handleSend() {
   pendingWsRefs = [];
 }
 
+async function resolveStoppedUserId() {
+  // The stored stopped-task user id, resolved against persisted history
+  // when it was never captured live ("1": STOP pressed before the first
+  // persist). Without the real id Continue would persist a stray "Continue"
+  // user bubble and the old Stopped divider could never clear. Never throws.
+  try {
+    const stored = readStoppedUserId();
+    if (stored && stored !== "1") return stored;
+    const res = await fetch("/api/conversation", { cache: "no-store" });
+    if (!res.ok) return stored;
+    const data = await res.json().catch(() => ({}));
+    const msgs = Array.isArray(data?.messages) ? data.messages : [];
+    const valid = msgs.filter((m) => m && (m.role === "user" || m.role === "assistant") && String(m.content || "").trim());
+    for (let i = valid.length - 1; i >= 0; i--) {
+      const m = valid[i];
+      if (m.role === "assistant" && isStoppedMarker(m) && m.resumed !== true) {
+        for (let j = i - 1; j >= 0; j--) {
+          if (valid[j].role === "user" && valid[j].id) {
+            const uid = String(valid[j].id).slice(0, 16);
+            try { setStoppedTask(uid); } catch (_) {}
+            return uid;
+          }
+        }
+      }
+    }
+    return stored;
+  } catch (_) {
+    try { return readStoppedUserId(); } catch (_) { return ""; }
+  }
+}
+
+async function handleContinue() {
+  // Seamless resume of the stopped task: no user bubble, nothing sent — the
+  // server resumes the original task by id (skip_history_ids + resume:true)
+  // and the model continues as if the task never stopped (no instruction,
+  // no stopped note in its context). Typed text never reaches here (that
+  // path is a brand-new request via handleSend). Never throws outward.
+  try {
+    let stoppedId = readStoppedUserId();
+    if (stoppedId === "1") stoppedId = await resolveStoppedUserId();
+    if (!stoppedId || activeRun) {
+      if (!stoppedId && !activeRun) toast("Stopped task expired — send as a new message");
+      return;
+    }
+    if (editingTarget || pendingQuestion) return;
+    if ((composerInput.value || "").trim()) return;
+    if (pendingAttachments.length || pendingSkill || pendingWsRefs.length) return;
+    hideMentionMenu();
+    // Adopt the stopped Working block so the continuation lands in the SAME
+    // block and step list: unstarted steps start there, an unfinished step
+    // completes there, finished steps are followed by the next ones. Prefers
+    // the live frozen bubble, else the history-rendered stopped marker.
+    // The block is only adopted when it is still attached with a step list.
+    let adopted = null;
+    try {
+      const live = document.getElementById("thinkingMsg");
+      if (live && live.dataset && live.dataset.stopped === "1") adopted = live;
+      else {
+        const all = chatInner ? Array.from(chatInner.querySelectorAll(".msg.assistant")) : [];
+        for (let i = all.length - 1; i >= 0; i--) {
+          try {
+            if (all[i].querySelector(":scope .stopped-line")) { adopted = all[i]; break; }
+          } catch (_) {}
+        }
+      }
+      if (adopted) {
+        if (!adopted._block) {
+          try { adopted._block = adopted.querySelector(".thinking-block") || null; } catch (_) { adopted._block = null; }
+        }
+        if (!adopted._block || !adopted._block._stepsInner) adopted = null;
+      }
+      if (typeof lastUserEl !== "undefined" && lastUserEl && lastUserEl.dataset) {
+        delete lastUserEl.dataset.stopped;
+      }
+    } catch (_) { adopted = null; }
+    composerInput.value = "";
+    autoResize();
+    // resume:true travels with the reused id; the message body itself goes
+    // out EMPTY so the internal instruction can never surface anywhere.
+    let opts = { resume: true, skipHistoryIds: [stoppedId] };
+    if (adopted) {
+      opts.reuseThinking = adopted;
+    }
+    await executeAgentTurn(CONTINUE_INPUT, [], opts);
+  } catch (_) {}
+}
+
 async function executeAgentTurn(value, attachments, opts) {
   // Runs one agent request WITHOUT appending a new user bubble.
   // Used by normal send (bubble already appended) and by resend/regenerate.
@@ -2551,6 +2931,11 @@ async function executeAgentTurn(value, attachments, opts) {
   // is ignored (that was the double-reply bug: edit/regenerate racing send).
   // opts.skipHistoryIds: when re-sending an EDITED message, the server reuses
   // the existing persisted user bubble instead of appending a duplicate.
+  // opts.reuseThinking: Continue adopts the stopped Working element so the
+  // run resumes the SAME block/step list instead of opening a new bubble.
+  // opts.resume: seamless Continue — nothing is sent (empty message +
+  // resume:true); the server resumes the stopped task by id and the model
+  // never sees the internal instruction either.
   if (activeRun) return;
   // The composer stays enabled so the user can type during generation
   // (pressing SEND while generating stops the loop, typed text is kept).
@@ -2559,12 +2944,15 @@ async function executeAgentTurn(value, attachments, opts) {
   catchupResume = false;
   // A new agent turn may legitimately start the browser again.
   clearBrowserClosedFlag();
+  const adopted = opts && opts.reuseThinking && opts.reuseThinking.isConnected && opts.reuseThinking._block
+    ? opts.reuseThinking : null;
   // A stopped task stays on screen (settled Working + Stopped line) — only
   // a live bubble is dropped; a stopped one is demoted (id stripped) and
   // kept, and the next history reload replaces it with its persisted copy.
+  // An adopted block is never demoted: it becomes the live run again.
   try {
     const prev = document.getElementById("thinkingMsg");
-    if (prev) {
+    if (prev && prev !== adopted) {
       if (prev.dataset.stopped === "1") prev.removeAttribute("id");
       else prev.remove();
     }
@@ -2572,17 +2960,36 @@ async function executeAgentTurn(value, attachments, opts) {
   activeThinking = null;
   setSending(true);
 
-  const thinking = addThinking(value);
+  let thinking;
+  if (adopted) {
+    // Same-block resume: own the frozen bubble again, drop THIS task's
+    // Stopped divider(s), and wake its Working wave — steps continue below.
+    thinking = adopted;
+    try {
+      adopted.id = "thinkingMsg";
+      try { adopted.querySelectorAll(".stopped-line").forEach((n) => { try { n.remove(); } catch (_) {} }); } catch (_) {}
+      try {
+        const nx = adopted.nextElementSibling;
+        if (nx && nx.classList && nx.classList.contains("stopped-line")) nx.remove();
+      } catch (_) {}
+      try { delete adopted.dataset.stopped; } catch (_) {}
+      resumeThinkingBlock(adopted._block);
+      scrollToBottom();
+    } catch (_) {}
+  } else {
+    thinking = addThinking(value);
+  }
   const skipIds = opts && Array.isArray(opts.skipHistoryIds) ? opts.skipHistoryIds : null;
+  const isResume = !!(opts && opts.resume);
   try {
     let handled = false;
     try {
-      handled = await sendStream(value, attachments, thinking, skipIds);
+      handled = await sendStream(value, attachments, thinking, skipIds, isResume);
     } catch (e) {
       if (e && e.aborted) return;
       handled = false;
     }
-    if (!handled) await sendBlocking(value, attachments, thinking, skipIds);
+    if (!handled) await sendBlocking(value, attachments, thinking, skipIds, isResume);
   } finally {
     // Only clear state this turn still owns — a newer turn may have taken
     // over while this one was winding down.
@@ -2688,13 +3095,67 @@ function hasFailedFiles() {
   return pendingAttachments.some((a) => a && a.type === "document" && a._done && !a.dataUrl);
 }
 
+function isContinueMode() {
+  // The send button is a Continue pill only when: idle, a task is stopped
+  // mid-way, and the composer is completely empty. Any typed text, pick, or
+  // attachment means a brand-new request instead (normal SEND). Never throws.
+  try {
+    if (!sendBtn || sendBtn.classList.contains("stop")) return false;
+    if (activeRun) return false;
+    if (editingTarget || pendingQuestion) return false;
+    if (pendingAttachments.length || pendingSkill || pendingWsRefs.length) return false;
+    if (isUploadingFiles() || hasFailedFiles()) return false;
+    if ((composerInput.value || "").trim()) return false;
+    return !!readStoppedUserId();
+  } catch (_) { return false; }
+}
+function refreshContinueButton() {
+  // Returns true while the Continue pill owns the button. Adding the class
+  // restarts the CSS entrance animation. Never throws.
+  try {
+    if (!sendBtn || sendBtn.classList.contains("stop")) return false;
+    const on = isContinueMode();
+    const was = sendBtn.classList.contains("continue");
+    if (on) {
+      sendBtn.classList.add("continue");
+      // Enforced on EVERY refresh, not just on arming: a late
+      // setSending(false) rewrites innerHTML (arrow) after the pill was
+      // armed, which used to leave an oval+arrow mix with no label.
+      // The label always wins while Continue owns the button.
+      if (sendBtn.textContent !== CONTINUE_LABEL) sendBtn.textContent = CONTINUE_LABEL;
+      sendBtn.setAttribute("aria-label", "Continue stopped task");
+      sendBtn.title = "Continue stopped task";
+      sendBtn.disabled = false;
+      return true;
+    }
+    if (was) {
+      sendBtn.classList.remove("continue");
+      sendBtn.innerHTML = SEND_SVG;
+      sendBtn.setAttribute("aria-label", "Send message");
+      sendBtn.title = "Send message";
+    }
+    return false;
+  } catch (_) { return false; }
+}
 function updateSendEnabled() {
   if (!sendBtn) return;
   // While generating the button is STOP and must stay clickable.
   if (sendBtn.classList.contains("stop")) return;
-  // Send is enabled only when every attached file succeeded.
+  // A stopped task with an empty composer owns the button as Continue.
+  if (refreshContinueButton()) return;
+  // Send is enabled only when every attached file succeeded — and an
+  // empty composer with nothing pending stays disabled (a normal send
+  // with nothing to send). Question strips are exempt: chip choices go
+  // through SEND with an empty composer. Edit mode is exempt too: its own
+  // updater owns the disabled state right after this.
   const blocked = isUploadingFiles() || hasFailedFiles();
-  sendBtn.disabled = blocked;
+  let idleEmpty = false;
+  try {
+    idleEmpty = !(composerInput.value || "").trim()
+      && !pendingAttachments.length && !pendingSkill && !pendingWsRefs.length
+      && !pendingQuestion && !editingTarget;
+  } catch (_) { idleEmpty = false; }
+  sendBtn.disabled = blocked || idleEmpty;
   sendBtn.classList.toggle("is-waiting", blocked);
   try {
     if (composerInput) {
@@ -4569,7 +5030,7 @@ function showQuestionCard(q) {
         <button type="button" class="glass-btn accent" data-decide="connect">Connect</button>
       </div>`;
     card.querySelector(".question-text").textContent =
-      q.text || (tool ? `Tool ${tool} needs a model that is not connected.` : "This task needs a model that is not connected.");
+      q.text || (tool ? `الأداة ${tool} تحتاج إلى موديل غير متوصل.` : "هذه المهمة تحتاج إلى موديل غير متوصل.");
     card.querySelectorAll("[data-decide]").forEach((btn, idx) => {
       btn.style.animationDelay = `${80 + idx * 55}ms`;
       btn.addEventListener("click", () => decideNeedsModel(q.id, btn.dataset.decide, kind));
@@ -4665,21 +5126,48 @@ async function decideApproval(qid, decision) {
 }
 
 async function decideNeedsModel(qid, decision, kind) {
-  // Both choices continue the loop without the tool (exit animates back
-  // into the writing template); Connect additionally deep-links to AI
-  // Models with that dialog auto-opened — it navigates even when the
-  // pause is already gone (410: the loop already continued on its own).
+  // Skip answers at once and the loop continues without the tool.
+  // Connect does NOT answer yet: the strip stays above the composer
+  // (refresh-safe via the stored pending question) while the AI Models
+  // dialog opens; saving the model auto-answers and the SAME tool reruns.
   const isConnect = decision === "connect";
+  if (isConnect) {
+    pendingModelConnect = { id: qid, kind: String(kind || "text").toLowerCase() };
+    pauseWorkingLoop();
+    openModelPage(kind);
+    return;
+  }
   hideQuestionCard();
   try { clearPendingStored(); } catch (_) {}
   try {
-    const res = await postAnswer({ id: qid, decision: isConnect ? "connect" : "skip" });
-    if (!(res && res.ok) && (!res || res.status !== 410) && !isConnect) toast("Answer failed");
+    const res = await postAnswer({ id: qid, decision: "skip" });
+    if (!(res && res.ok) && (!res || res.status !== 410)) toast("Answer failed");
   } catch (_) {
-    if (!isConnect) toast("Answer failed");
+    toast("Answer failed");
   }
-  if (isConnect) openModelPage(kind);
 }
+
+// A model saved on the AI Models page resumes the paused tool in place:
+// the pending Connect answers now, the loop reruns the SAME tool, and the
+// agent page shows it continue. STOP or expiry before that drops the wait.
+let pendingModelConnect = null;
+window.addEventListener("x5:models-changed", async () => {
+  if (!pendingModelConnect) return;
+  const { id } = pendingModelConnect;
+  pendingModelConnect = null;
+  try {
+    const res = await postAnswer({ id, decision: "connect" });
+    if (res && res.ok) {
+      try { clearPendingStored(); } catch (_) {}
+      hideQuestionCard();
+      try { navigate("agent"); } catch (_) {}
+    } else if (!res || res.status !== 410) {
+      toast("Resume failed");
+    }
+  } catch (_) {
+    toast("Resume failed");
+  }
+});
 
 /* ---------------- live browser: control card + floating preview ---------------- */
 function liveFrame(url) {
@@ -6480,19 +6968,36 @@ function onRunPush(frame) {
   renderRunFrame(frame);
 }
 
+function lastStoppedAssistant() {
+  // The on-screen stopped Working bubble (live or history-rendered), or null.
+  try {
+    const live = document.getElementById("thinkingMsg");
+    if (live && live.dataset && live.dataset.stopped === "1") return live;
+    const all = chatInner ? Array.from(chatInner.querySelectorAll(".msg.assistant")) : [];
+    for (let i = all.length - 1; i >= 0; i--) {
+      const m = all[i];
+      try {
+        if ((m.dataset && m.dataset.stopped === "1") || m.querySelector(":scope .stopped-line")) return m;
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return null;
+}
+
 async function resumeActiveRun() {
   // Refresh while the agent runs: re-show the pending request as running and
-  // pick up its reply when it lands. Never wipes anything (no history reload
-  // while busy — the running message is not persisted yet).
-  let st = null;
+  // pick up its reply when it lands. A STOP already marked cancelled reports
+  // active=false — never rebuild a live Working block (that was the duplicate
+  // steps-after-refresh bug). Continue mid-run adopts the frozen block.
+  let fd = null;
   try {
-    st = await fetch("/api/chat_active", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    fd = await fetch("/api/chat_frames", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
   } catch (_) {
     return;
   }
-  if (!st || !st.active) return;
+  if (!fd || !fd.active) return;
   hideWelcome();
-  const preview = String(st.input || "").slice(0, 200);
+  const preview = String(fd.input || "").slice(0, 200);
   if (preview) {
     // No duplicate resume bubble: reuse the tail user bubble when it already
     // shows this pending input (double refresh of the same run). The preview
@@ -6518,17 +7023,39 @@ async function resumeActiveRun() {
     }
     if (cleaned.text) lastUserText = cleaned.text;
   }
-  activeThinking = addThinking(preview);
+  let thinking = null;
+  try {
+    const frozen = lastStoppedAssistant();
+    if (frozen) {
+      if (!frozen._block) {
+        try { frozen._block = frozen.querySelector(".thinking-block") || null; } catch (_) { frozen._block = null; }
+      }
+      if (frozen._block && frozen._block._stepsInner) {
+        thinking = frozen;
+        try {
+          frozen.id = "thinkingMsg";
+          try { frozen.querySelectorAll(".stopped-line").forEach((n) => { try { n.remove(); } catch (_) {} }); } catch (_) {}
+          try {
+            const nx = frozen.nextElementSibling;
+            if (nx && nx.classList && nx.classList.contains("stopped-line")) nx.remove();
+          } catch (_) {}
+          try { delete frozen.dataset.stopped; } catch (_) {}
+          resumeThinkingBlock(frozen._block);
+        } catch (_) {}
+      }
+    }
+  } catch (_) {
+    thinking = null;
+  }
+  if (!thinking) thinking = addThinking(preview);
+  activeThinking = thinking;
   // The button shows STOP while the resumed run lives — even though this
   // page owns no stream for it. Completion (or death) arrives via push
   // (chat_done / chat events) — no polling.
   setSending(true);
   catchupResume = true;
-  // Rebuild the steps already streamed for this run (they are not in the
-  // persisted history until the loop ends), then keep following live pushes.
   try {
-    const fd = await fetch("/api/chat_frames", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-    if (fd && Array.isArray(fd.frames)) replayRunFrames(fd.frames);
+    if (Array.isArray(fd.frames)) replayRunFrames(fd.frames);
   } catch (_) {}
 }
 
@@ -6853,6 +7380,9 @@ function startComposerEdit(el) {
   composerInput.value = raw;
   autoResize();
   showEditBanner();
+  // Edit mode is a send intent, never Continue: drop the pill (if armed)
+  // back to the normal send arrow.
+  try { updateSendEnabled(); } catch (_) {}
   updateEditSendState();
   composerInput.focus();
 }
@@ -6863,6 +7393,9 @@ function cancelComposerEdit() {
   autoResize();
   hideEditBanner();
   if (sendBtn) sendBtn.disabled = false;
+  // Leaving edit mode re-evaluates the button (a stopped task re-arms
+  // Continue on the empty composer, otherwise normal send).
+  try { updateSendEnabled(); } catch (_) {}
   composerInput.focus();
 }
 
@@ -6928,6 +7461,9 @@ async function saveComposerEdit(value) {
         content.innerHTML = "";
         const div = document.createElement("div");
         div.innerHTML = formatRich(v);
+        try {
+          if (el.classList.contains("assistant")) linkifyWorkspacePaths(div);
+        } catch (_) {}
         content.appendChild(div);
       }
       el.dataset.raw = v;
@@ -6992,8 +7528,10 @@ async function saveComposerEdit(value) {
   } finally {
     if (sendBtn) {
       try {
-        sendBtn.disabled = false;
         sendBtn.classList.remove("loading");
+        // Recompute instead of blindly enabling: an empty composer with
+        // no task stays a disabled normal send.
+        updateSendEnabled();
       } catch (_) {}
     }
   }
@@ -7141,8 +7679,10 @@ async function regenerateReply(shell) {
   } finally {
     if (sendBtn) {
       try {
-        sendBtn.disabled = false;
         sendBtn.classList.remove("loading");
+        // Recompute instead of blindly enabling: an empty composer with
+        // no task stays a disabled normal send.
+        updateSendEnabled();
       } catch (_) {}
     }
   }
@@ -7155,6 +7695,7 @@ async function editUserMessage(el) {
 async function abortActiveStream() {
   try { hideQuestionCard(); } catch (_) {}
   try { clearPendingStored(); } catch (_) {}
+  try { pendingModelConnect = null; } catch (_) {}
   if (!activeRun) return;
   activeRun.cancelled = true;
   try {
@@ -7172,6 +7713,7 @@ async function stopGeneration() {
   // refresh never restores it and the stopped task never auto-resumes.
   try { hideQuestionCard(); } catch (_) {}
   try { clearPendingStored(); } catch (_) {}
+  try { pendingModelConnect = null; } catch (_) {}
   try {
     if (activeRun) {
       activeRun.cancelled = true;
@@ -7189,6 +7731,12 @@ async function stopGeneration() {
   try {
     const thinkingEl = document.getElementById("thinkingMsg");
     if (thinkingEl) settleThinkingStopped(thinkingEl);
+  } catch (_) {}
+  // Arm the Continue pill: the stopped task resumes in place on tap (empty
+  // composer only — any typed text is a brand-new request instead).
+  try {
+    const _mid = (typeof lastUserEl !== "undefined" && lastUserEl && lastUserEl.dataset && lastUserEl.dataset.mid) || "";
+    setStoppedTask(_mid || readStoppedUserId() || "1");
   } catch (_) {}
   activeThinking = null;
   setSending(false);
@@ -7268,6 +7816,18 @@ export async function initChat() {
       copyCodeBlock(btn);
     } catch (_) {}
   });
+  // Workspace path links (model-written folder/file paths): one delegated
+  // listener — links are rendered dynamically by linkifyWorkspacePaths and
+  // reuse the same reveal flow as @file tokens (never throws).
+  chatScroll.addEventListener("click", (e) => {
+    try {
+      const link = e.target && e.target.closest ? e.target.closest(".ws-path-link") : null;
+      if (!link || !chatScroll.contains(link)) return;
+      e.stopPropagation();
+      e.preventDefault();
+      revealWorkspaceFile(link.getAttribute("data-ws-path") || "");
+    } catch (_) {}
+  });
 
   setSending(false);
   sendBtn.addEventListener("click", (e) => {
@@ -7278,6 +7838,14 @@ export async function initChat() {
       e.stopPropagation();
       stopGeneration();
       toast("Stopped");
+      return;
+    }
+    // Stopped task + empty composer: the pill resumes it in place (nothing
+    // is sent — any typed text would be a brand-new request instead).
+    if (sendBtn.classList.contains("continue")) {
+      e.preventDefault();
+      e.stopPropagation();
+      handleContinue();
     }
   }, true);
   composer.addEventListener("submit", (e) => {
@@ -7286,9 +7854,14 @@ export async function initChat() {
       stopGeneration();
       return;
     }
+    if (sendBtn.classList.contains("continue")) {
+      handleContinue();
+      return;
+    }
     handleSend();
   });
   composerInput.addEventListener("input", autoResize);
+  composerInput.addEventListener("input", updateSendEnabled);
   composerInput.addEventListener("input", checkMention);
   composerInput.addEventListener("input", updateEditSendState);
   composerInput.addEventListener("paste", (e) => {
@@ -7333,6 +7906,11 @@ export async function initChat() {
     }
   });
   window.addEventListener("x5:agent-open", () => scrollToBottom(false));
+  // Settings → Delete chat history wiped everything: no task exists, so
+  // Continue disarms and the button falls back to a disabled normal send.
+  window.addEventListener("x5:chat-cleared", () => {
+    try { clearStoppedTask(); } catch (_) {}
+  });
 
   // Scroll-up pagination: reaching the top auto-loads the 50 older messages.
   // Scroll-to-latest glass button: appears when the user scrolls up.

@@ -1114,9 +1114,9 @@ def normalize_error(e: Exception) -> dict:
 # Execution (Black Box entry points — canonical in, canonical out)
 # --------------------------------------------------------------------------
 
-def _send_once(url: str, method: str, headers: dict, body: bytes) -> tuple[int, str]:
+def _send_once(url: str, method: str, headers: dict, body: bytes, cancel_event=None) -> tuple[int, str]:
     from core.ai_models import engine as _eng
-    status, raw = _eng._send(url, method, headers, body, 60.0, None)
+    status, raw = _eng._send(url, method, headers, body, 60.0, cancel_event)
     return status, raw.decode("utf-8", errors="replace")
 
 
@@ -1124,16 +1124,23 @@ def _retryable(status: int, category: str) -> bool:
     return category in ("network_error", "timeout", "rate_limit") or status in (429,) or 500 <= status < 600
 
 
-def execute_compiled(compiled: dict, canonical: dict) -> dict:
+def execute_compiled(compiled: dict, canonical: dict, cancel_event=None) -> dict:
     """Fast path: compiled plan in, canonical response out. The parser is NOT
     re-validated here (done once by compile_model); input validation, the
-    async-workflow refusal, and response normalization still run every time."""
+    async-workflow refusal, and response normalization still run every time.
+    cancel_event (optional threading.Event): STOP aborts the request between
+    read chunks and skips retries/backoff instead of blocking up to 3 min."""
     url, method, headers, body = _build_from_compiled(compiled, canonical)
     parser = compiled["parser"]
     last: AipError | None = None
     for attempt in range(MAX_RETRIES):
+        if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+            from core.ai_models import engine as _eng0
+            raise _eng0.EngineError("timeout", "Cancelled.",
+                                    technical="cancelled before send",
+                                    copyable="Cancelled.")
         try:
-            status, text = _send_once(url, method, headers, body)
+            status, text = _send_once(url, method, headers, body, cancel_event)
             if status in (401, 403):
                 raise AipError("auth", "Service refused the key (401/403).", "authentication_failure",
                                http_status=status)
@@ -1162,15 +1169,28 @@ def execute_compiled(compiled: dict, canonical: dict) -> dict:
             if not e.retryable and not _retryable(e.http_status or 0, e.category):
                 raise
             if attempt < MAX_RETRIES - 1:
-                time.sleep(1.0 * (attempt + 1))
+                _backoff = 1.0 * (attempt + 1)
+                if cancel_event is not None:
+                    # Interruptible backoff so STOP lands during retries too.
+                    _end = time.time() + _backoff
+                    while time.time() < _end:
+                        if getattr(cancel_event, "is_set", lambda: False)():
+                            from core.ai_models import engine as _eng2
+                            raise _eng2.EngineError("timeout", "Cancelled.",
+                                                    technical="cancelled during retry backoff",
+                                                    copyable="Cancelled.")
+                        time.sleep(0.25)
+                else:
+                    time.sleep(_backoff)
     raise last or AipError("network", "Request failed.", "network_error", retryable=True)
 
 
-def execute(model_record: dict, canonical: dict, model_id: str | None = None) -> dict:
+def execute(model_record: dict, canonical: dict, model_id: str | None = None, cancel_event=None) -> dict:
     """model_id set -> compiled plan reused (interpreter ran once);
-    None -> fresh compile (old behavior, e.g. one-off tests)."""
+    None -> fresh compile (old behavior, e.g. one-off tests).
+    cancel_event is forwarded to the request layer (STOP aborts it)."""
     compiled = get_compiled(model_record, model_id) if model_id else compile_model(model_record)
-    return execute_compiled(compiled, canonical)
+    return execute_compiled(compiled, canonical, cancel_event)
 
 
 def test_connection(model_record: dict, model_id: str | None = None) -> dict:

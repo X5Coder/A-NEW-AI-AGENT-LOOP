@@ -1,6 +1,6 @@
 {
-  "version": "0.37.0",
-  "description": "Every Workspace file now shows one metadata shape everywhere (map, @ lines, uploads, folder listings): id + full path + type + size. The map teaches the agent to paste exact path links as-is into any code/HTML and to copy files into its working folder; PDF decks accept sub-path file ids.",
+  "version": "0.41.0",
+  "description": "Stopping a task mid-way now arms a plain oval white Continue pill (black text, no glow) on the send button (empty composer only, animated entrance, survives refresh): one tap resumes the same task in place with nothing sent, while any typed text sends as a brand-new request instead.",
   "features": [
     "Typing @ mid-word in Arabic opens the file picker; emails like mail@x never trigger it.",
     "@file and /skill boundaries match between editor paint and server injection, including Arabic adjacency.",
@@ -63,6 +63,19 @@
     "Every file line (Workspace map, uploads, folder listings) carries id + full path + type + size; @ mentions send @<file-id> + full path in place (the map holds the rest) while the picked name stays blue in the message.",
     "The Workspace map instructs the agent to use exact path links and to copy any file into its working folder so everything lives in one folder.",
     "pdf_create accepts Workspace-relative sub-path file ids (jailed, traversal rejected) and copies them into the deck preserving the relative path the slide HTML references.",
-    "WhatsApp/Telegram uploads use the same unified file logic: original-name Workspace mirror plus full id/path/type/size hints with analyze/search pointers."
+    "WhatsApp/Telegram uploads use the same unified file logic: original-name Workspace mirror plus full id/path/type/size hints with analyze/search pointers.",
+    "Terminal steps now show a fixed Terminal Command title; the full command plus exit code and output tail live under the arrow.",
+    "PDF builds narrate each finished slide in Arabic under the arrow (finished slide N) plus a final line merging all slides into the PDF.",
+    "pdf_create ships two bundled default fonts (Amiri for Arabic, Cairo for Latin) applied automatically when the user uploads no font.",
+    "A tool that needs an unconnected model keeps its strip above the composer (refresh-safe, STOP drops it): Connect opens the model dialog and reruns the same tool once saved, Skip continues with an Arabic skip note to the model.",
+    "File and folder paths the model writes in chat replies now render blue: one click opens the Workspace page with that file revealed at its path.",
+    "Stopping mid-task turns the send button into a plain oval white Continue pill (black text, no glow; empty composer only, animated pop-in, refresh-safe): tapping it resumes the stopped task in place with no new bubble, and typing anything flips it back to normal send as a brand-new request.",
+    "Resuming a stopped task removes its Stopped divider (live and after refresh) while every step stays, so the continuation lands right after the previous steps.",
+    "Continue resumes inside the SAME Working block: the frozen block wakes (wave restarts) and new steps append to its existing step list instead of opening a new bubble.",
+    "STOP is real from the first press: model requests abort mid-read, retry backoff is interruptible, provider errors break at once on cancel, and the wait tool stops immediately — the frozen Working steps always stay visible.",
+    "Stopping and continuing repeatedly never stacks Stopped dividers: a re-stop refreshes the same marker in place.",
+    "The send button is state-aware: with an empty composer and no task it is a disabled normal send (question choices still send normally); deleting the whole chat disarms Continue; editing a message forces normal send.",
+    "Continue is now seamless: no internal message appears in the UI or in the agent's context (no L8, no stopped note on resume) — the model continues as if the task never stopped, while a new message after a stop still tells it the task was stopped.",
+    "New svg_maker tool behind tool_search: describe the wanted icon and it returns raw SVG code only plus the saved .svg file in Workspace (same text model, dedicated icon session, validated and sanitized)."
   ]
 }

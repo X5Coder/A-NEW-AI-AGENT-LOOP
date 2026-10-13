@@ -499,13 +499,6 @@ function downloadFile(full, name) {
    images render large. Footer holds the full-file download — PDF pages
    are not separate files, so per-page download buttons are intentionally
    not offered; the whole file downloads with one tap. */
-function isTouchDevice() {
-  try {
-    return window.matchMedia("(pointer: coarse)").matches;
-  } catch (_) {
-    return false;
-  }
-}
 function openPreviewDialog(file) {
   const url = previewUrl(file.full);
   const size = Number(file.size) || 0;
@@ -515,15 +508,19 @@ function openPreviewDialog(file) {
       ? `<p class="ws-preview-note">This PDF is too large for preview — download it to view.</p>`
       : `<iframe class="ws-preview-frame ws-preview-dialog-pdf" src="${url}" title="PDF preview"></iframe>`;
   } else if (isHtmlName(file.name)) {
-    // sandbox="allow-scripts" WITHOUT allow-same-origin: the deck's own
-    // scripts run (slide navigation works), but the frame stays an opaque
-    // origin — no access to the console page, cookies, or storage.
-    // Desktop keeps scrolling="no" (no ugly scrollbar strips); touch
-    // phones stay scrollable so the content moves with a finger swipe
-    // (mobile OS hides scrollbars on its own).
+    // sandbox="allow-same-origin" WITHOUT allow-scripts: the frame keeps
+    // the console origin so its images/fonts load WITH the owner cookie
+    // (opaque-origin frames send no cookies, so every authenticated
+    // subresource 401s and previews show no pictures). Scripts stay fully
+    // blocked (no allow-scripts), as do forms, popups and top navigation —
+    // deck slides are static by contract (no scripts, see pdf_slide_system),
+    // so nothing real loses functionality.
+    // Scrolling stays enabled (no scrolling="no"): the dialog CSS gives the
+    // frame overflow:auto, so wheel on desktop and finger swipes on phones
+    // pan the content; when everything fits no scrollbar appears anyway.
     body = size > HTML_PREVIEW_MAX
       ? `<p class="ws-preview-note">This HTML file is too large for preview — download it to view.</p>`
-      : `<iframe class="ws-preview-frame ws-preview-dialog-html" src="${url}" title="HTML preview" sandbox="allow-scripts"${isTouchDevice() ? "" : ' scrolling="no"'}></iframe>`;
+      : `<iframe class="ws-preview-frame ws-preview-dialog-html" src="${url}" title="HTML preview" sandbox="allow-same-origin"></iframe>`;
   } else {
     body = size > IMG_PREVIEW_MAX
       ? `<p class="ws-preview-note">This image is too large for preview — download it to view.</p>`

@@ -1,0 +1,84 @@
+"""STOP then refresh must not reconnect a cancelled run."""
+from __future__ import annotations
+
+import sys
+import threading
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from web.server import server as S  # noqa: E402
+
+
+def _reset() -> None:
+    with S._RUN_LOCK:
+        S._ACTIVE_RUN.clear()
+        S._CANCEL_EVENTS.clear()
+    S._run_frames_clear()
+
+
+def test_stop_reports_inactive_while_thread_still_busy():
+    _reset()
+    ev = threading.Event()
+    with S._RUN_LOCK:
+        S._ACTIVE_RUN["event"] = ev
+        S._ACTIVE_RUN["input"] = "do the task"
+        S._ACTIVE_RUN["id"] = id(ev)
+        S._CANCEL_EVENTS.add(ev)
+    S._run_frame_remember({"type": "event_start", "event": "Planning task", "key": "k1"})
+    live, preview = S._chat_status()
+    assert live is True
+    assert preview == "do the task"
+    S._mark_chat_cancelled()
+    live2, preview2 = S._chat_status()
+    assert live2 is False
+    assert preview2 == ""
+    assert S._chat_thread_busy() is True
+    assert ev.is_set()
+    with S._RUN_FRAMES_LOCK:
+        assert S._RUN_FRAMES == []
+    _reset()
+
+
+def test_old_thread_finally_does_not_wipe_new_run():
+    _reset()
+    old = threading.Event()
+    new = threading.Event()
+    old_id = id(old)
+    new_id = id(new)
+    with S._RUN_LOCK:
+        S._ACTIVE_RUN["event"] = old
+        S._ACTIVE_RUN["input"] = "old"
+        S._ACTIVE_RUN["id"] = old_id
+        S._CANCEL_EVENTS.add(old)
+    S._mark_chat_cancelled()
+    with S._RUN_LOCK:
+        S._ACTIVE_RUN["event"] = new
+        S._ACTIVE_RUN["input"] = "new"
+        S._ACTIVE_RUN["id"] = new_id
+        S._ACTIVE_RUN.pop("cancelled", None)
+        S._CANCEL_EVENTS.add(new)
+    S._run_frame_remember({"type": "event_start", "event": "Writing · a.txt", "key": "n1"})
+    assert S._release_chat_run(old_id) is False
+    live, preview = S._chat_status()
+    assert live is True
+    assert preview == "new"
+    with S._RUN_FRAMES_LOCK:
+        assert len(S._RUN_FRAMES) == 1
+    assert S._release_chat_run(new_id) is True
+    live2, _ = S._chat_status()
+    assert live2 is False
+    _reset()
+
+
+def test_is_cancelled_never_raises():
+    from core.agent.loop.engine import _is_cancelled
+
+    assert _is_cancelled(None) is False
+    ev = threading.Event()
+    assert _is_cancelled(ev) is False
+    ev.set()
+    assert _is_cancelled(ev) is True
+    assert _is_cancelled(object()) is False

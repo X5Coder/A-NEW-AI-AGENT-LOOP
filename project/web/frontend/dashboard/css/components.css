@@ -1549,6 +1549,42 @@
   width: 14px;
   height: 14px;
 }
+/* Continue pill: armed after a mid-task STOP, shown only while the composer
+   is completely empty. A tap resumes the stopped task in place — nothing is
+   sent. Plain oval: white background, black text, no glow. */
+.send-btn.continue {
+  width: auto;
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 18px;
+  border-radius: var(--r-full);
+  background: #fff;
+  color: #000;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: none;
+  animation: continue-pop 320ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+.send-btn.continue:hover {
+  opacity: 1;
+  transform: translateY(-1px);
+  box-shadow: none;
+}
+.send-btn.continue:active {
+  transform: scale(0.94);
+  box-shadow: none;
+}
+@keyframes continue-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
 /* SEND working state (edit prune / regenerate): spinner ring in place. */
 .send-btn.loading {
   pointer-events: none;
@@ -2150,13 +2186,26 @@
   border: none;
   border-radius: 0;
   box-shadow: none;
+  /* overflow:auto (not hidden): a non-visible overflow value on an <iframe>
+     element disables scrolling of the framed document per spec — that is
+     what froze the PDF viewer on page 1 and the slides on phones/desktops.
+     Corners are square here (radius 0) so no clipping is lost. */
+  overflow: auto;
 }
 .ws-preview-dialog-img {
   object-fit: contain;
 }
-.ws-preview-dialog-html {
-  /* Finger swipes pan the slide content instead of the page behind it. */
+.ws-preview-dialog-html,
+.ws-preview-dialog-pdf,
+.pdf-preview-frame {
+  /* Finger swipes pan the preview content instead of the page behind it:
+     without an explicit pan gesture the touch goes to the outer sheet and
+     the PDF/HTML looks frozen on phones. Desktop mouse/scrollbar behavior
+     is unchanged. overscroll keeps the swipe inside the viewer (the page
+     behind never moves) + momentum scrolling on iOS. */
   touch-action: pan-x pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 /* Desktop: exactly 4 cards per row. */
 @media (min-width: 1025px) {
@@ -6444,6 +6493,32 @@ h4,
    composer highlight (color only, never weight — layout must not shift). */
 .msg-content .hl-tok-msg {
   color: var(--text-blue);
+}
+/* Model-written Workspace paths (folder/file.pdf) inside assistant replies:
+   same blue (color only, never weight — layout must not shift). A click
+   jumps to the Workspace page with the file revealed exactly at its path. */
+.msg-content .ws-path-link {
+  color: var(--text-blue);
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  line-height: inherit;
+  letter-spacing: 0;
+  cursor: pointer;
+  direction: ltr;
+  unicode-bidi: isolate;
+  overflow-wrap: anywhere;
+  text-align: inherit;
+}
+.msg-content .ws-path-link:hover {
+  text-decoration: underline;
+}
+.msg-content .ws-path-link:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 /* ---------- step toggle pop ---------- */

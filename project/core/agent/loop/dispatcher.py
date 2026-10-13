@@ -49,6 +49,7 @@ _DISCOVERABLE_MAP = {
     "important_memory": "plugins.core_plugins.important_memory.tool",
     "http_request": "plugins.core_plugins.http_request.tool",
     "pdf_create": "plugins.core_plugins.pdf_create.tool",
+    "svg_maker": "plugins.core_plugins.svg_maker.tool",
 }
 
 _ALL = {**_CORE_MAP, **_DISCOVERABLE_MAP}
@@ -99,10 +100,13 @@ def _load_module(dotted: str):
         return mod
 
 
-def execute_tool(name: str, arguments: dict | str | None) -> dict:
+def execute_tool(name: str, arguments: dict | str | None, cancel_flag: Any = None) -> dict:
     """
     Execute tool by name with validated arguments.
     Returns dict with tool output (or error) - never raises unhandled, loop continues.
+    cancel_flag (optional threading.Event): forwarded ONLY to tools whose
+    execute() accepts it (long-running tools abort on STOP); all other
+    tools are called exactly as before.
     """
     if not isinstance(name, str) or not name.strip():
         return {"error": "tool name missing", "tool": name}
@@ -202,6 +206,23 @@ def execute_tool(name: str, arguments: dict | str | None) -> dict:
                 _ok = False
             if not _ok:
                 call_args = {k: v for k, v in args.items() if k != "reason"}
+        # STOP must reach long-running tools mid-execution: forward the
+        # loop's cancel event only when the tool accepts it, otherwise
+        # call exactly as before so old tools keep working.
+        if cancel_flag is not None:
+            try:
+                import inspect as _inspect2
+                _params2 = _inspect2.signature(mod.execute).parameters
+                _ok2 = ("cancel_flag" in _params2) or any(
+                    p.kind == _inspect2.Parameter.VAR_KEYWORD for p in _params2.values())
+            except Exception:
+                _ok2 = False
+            if _ok2 and not (isinstance(call_args, dict) and "cancel_flag" in call_args):
+                try:
+                    call_args = {**(call_args if isinstance(call_args, dict) else {}),
+                                 "cancel_flag": cancel_flag}
+                except Exception:
+                    pass
         # execute with unpacked args - validates inside tool
         result = mod.execute(**call_args)  # type: ignore
         # Truncate large outputs

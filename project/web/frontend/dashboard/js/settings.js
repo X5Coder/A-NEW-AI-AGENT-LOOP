@@ -275,6 +275,10 @@ export function initSettings() {
           }
         } catch (_) {}
         _refreshChatCount();
+        // No task exists anymore: disarm a stale Continue pill (same key
+        // the chat uses) and tell the Agent view to recompute its button.
+        try { localStorage.removeItem("x5:stopped-task"); } catch (_) {}
+        try { window.dispatchEvent(new CustomEvent("x5:chat-cleared")); } catch (_) {}
         toast(data && typeof data.removed === "number" && data.removed
           ? `Chat + search index deleted (${data.removed} messages)`
           : "Chat + search index deleted");

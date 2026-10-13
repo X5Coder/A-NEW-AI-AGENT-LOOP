@@ -316,12 +316,31 @@ def _memories_block() -> str:
     return "\n\n".join(parts)
 
 
-def _chat_block(limit: int = 30) -> str:
+def _chat_block(limit: int = 30, exclude_trailing_stopped: bool = False) -> str:
     # L6a: last N messages - explicit layer, never skipped except isolated mode.
     # Default 30; edit-resend passes 20 (the edited message + the 20 before it).
+    # exclude_trailing_stopped (seamless resume only): the model continues the
+    # task as if it never stopped, so trailing stopped markers are dropped
+    # from the CONTEXT ONLY — persisted history keeps them (UI + future turns
+    # that are NOT resumes still see that the task was stopped). Never touches
+    # the file (works on the loaded list).
+    # NOTE: STOPPED_NOTE_TEXT must stay identical to _STOPPED_NOTE in
+    # core/agent/loop/engine.py (legacy markers have no stopped flag).
+    STOPPED_NOTE_TEXT = ("The user stopped this task before it finished (STOP). "
+                         "Do not continue it unless the user asks again.")
     for cand in [X5AGENT_DATA_DB / "conversation.json", STORAGE_DB / "conversation.json", STORAGE_DB / "chat.json", STORAGE_DB / "conversation_history.json"]:
         data = _load_json(cand, None)
         if isinstance(data, list) and data:
+            if exclude_trailing_stopped:
+                try:
+                    while data and isinstance(data[-1], dict) and (
+                            data[-1].get("stopped") is True
+                            or str(data[-1].get("content") or "").strip() == STOPPED_NOTE_TEXT):
+                        data.pop()
+                except Exception:
+                    pass
+                if not data:
+                    return ""
             last = data[-limit:]
             lines = []
             for m in last:
@@ -537,7 +556,7 @@ def _core_tools_block() -> list[dict]:
     return tools
 
 
-def build_context(user_input: str, include_todo: bool = True, isolated: bool = False, todo_snapshot: dict | None = None, session_history: str | None = None, chat_limit: int = 30) -> tuple[str, str, list[dict]]:
+def build_context(user_input: str, include_todo: bool = True, isolated: bool = False, todo_snapshot: dict | None = None, session_history: str | None = None, chat_limit: int = 30, resume_stopped: bool = False) -> tuple[str, str, list[dict]]:
     """
     8-layer context order (fixed):
       L1 core_identity.md + L2 general_mission.md + L3 policy.md -> system role
@@ -553,6 +572,11 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
       task follow-up chat answers like a separate normal chat with the same
       full context (each scheduled job keeps its session, main chat untouched).
     chat_limit: L6 history depth (default 30; edit-resend uses 20).
+    resume_stopped: seamless Continue — the model resumes the stopped task as
+      if it never stopped: the L8 current-input block is omitted (there is no
+      new message) and trailing stopped markers are excluded from L6 (context
+      only; persisted history keeps them, so a LATER non-resume turn still
+      sees the task was stopped).
     """
     if not isinstance(user_input, str):
         raise TypeError("user_input must be string")
@@ -576,7 +600,8 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
         else:
             todo = _todo_block() if include_todo else ""
     else:
-        chat = _chat_block(limit=chat_limit if isinstance(chat_limit, int) and 1 <= chat_limit <= 100 else 30)
+        chat = _chat_block(limit=chat_limit if isinstance(chat_limit, int) and 1 <= chat_limit <= 100 else 30,
+                           exclude_trailing_stopped=resume_stopped)
         todo = _todo_block() if include_todo else ""
     parts = []
     parts.append(env)
@@ -621,8 +646,11 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
                      + " | Discoverable behind tool_search: workspace + all other browser/plugin tools]")
     else:
         parts.append("[Available CORE tools L7: tool_search, terminal]")
-    # L8 ALWAYS last (with bridge: re-anchor attention after the long L4-L7 context)
-    parts.append(f"[Bridge] Based on all layers above, execute this task.\n\n[Current User Input - L8]\n{user_input.strip()}")
+    # L8 ALWAYS last (with bridge: re-anchor attention after the long L4-L7 context).
+    # Omitted for a seamless resume: there is no new message, and the agent
+    # must never see an internal continue instruction.
+    if not resume_stopped:
+        parts.append(f"[Bridge] Based on all layers above, execute this task.\n\n[Current User Input - L8]\n{user_input.strip()}")
     if isolated:
         parts.append("[Mode: ISOLATED SCHEDULED EXECUTION - execute exactly as in snapshot, do not ask for clarification, complete the workflow]")
     user_content = "\n\n".join(parts)

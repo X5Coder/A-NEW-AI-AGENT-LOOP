@@ -83,7 +83,7 @@ def append_session(job_id: str, role: str, content: str, extra: dict | None = No
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         entry: dict = {"id": mid, "role": role, "content": text, "ts": ts}
         if isinstance(extra, dict):
-            for k in ("steps", "elapsed", "images", "audio"):
+            for k in ("steps", "elapsed", "images", "audio", "stopped"):
                 if k in extra:
                     entry[k] = extra[k]
         msgs.append(entry)

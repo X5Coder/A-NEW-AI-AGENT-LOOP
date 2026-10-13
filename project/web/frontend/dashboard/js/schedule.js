@@ -2630,8 +2630,6 @@ function bindRunFormOnce() {
 
 export function initSchedule() {
   onPush("scheduler", onSchedPush);
-  // Returned for the app.js boot barrier (black splash waits on it).
-  return fetchInitial();
   bindRunFormOnce();
   // Hash session routing: open run page on deep-link/refresh, close on back.
   window.addEventListener("hashchange", handleHash);
@@ -2673,4 +2671,9 @@ export function initSchedule() {
     tickBound = true;
     setInterval(tickCountdowns, 1000);
   }
+  // Returned for the app.js boot barrier (black splash waits on it).
+  // Kept LAST: an early return above used to skip all wiring, leaving
+  // body.sched-visible / body.browser-visible unset so both right-edge
+  // templates stayed display:none forever.
+  return fetchInitial();
 }

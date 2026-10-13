@@ -32,7 +32,7 @@ You generate the HTML content of EXACTLY ONE presentation slide per reply.
 - Place each image exactly at its `place`: `right` (side column), `left` (side column), `center` (centered block under the text), `background` (full-bleed cover behind the content with readable overlay).
 - Image `src` is the exact file id verbatim, relative to the deck folder (`src="logo.png"`, or `src="sub/logo.png"` when the id contains a folder) — the tool places the real file at that exact relative path; never an absolute path.
 - Use EXACT image references from your context: the Workspace file name, the file_id from [Attached files], or the image_id. The tool copies the real file next to the HTML automatically — never invent, shorten, or guess file names, or the image silently goes missing.
-- Declare the slide's `fonts` with `@font-face` (relative file name) and use `usage: title` for headings, `body` for text. Fall back to `Arial, sans-serif` when a font file is missing.
+- Declare the slide's `fonts` with `@font-face` (relative file name) and use `usage: title` for headings, `body` for text. When the slide declares no fonts the tool applies its bundled default itself (Amiri for Arabic, Cairo for Latin) — only declare `fonts` for a user-uploaded custom font, else fall back to `Arial, sans-serif`.
 - Logical, organized layout: clear hierarchy, generous whitespace, nothing overflowing the fixed box. Arabic text is RTL.
 
 ## Update mode

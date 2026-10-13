@@ -27,17 +27,34 @@ def _validate_duration(v: Any) -> int:
     return v
 
 
-def execute(duration: int) -> dict:
+def execute(duration: int, cancel_flag=None) -> dict:
     d = _validate_duration(duration)
     event = format_event(duration=d)
-    # Actually sleep - bounded, interruptible by loop's overall timeout
+    # Bounded sleep in small slices so STOP interrupts the wait at once
+    # (the loop breaks right after). The dispatcher forwards the loop's
+    # cancel event here automatically. Never raises on cancel.
     start = time.time()
-    time.sleep(d)
+    try:
+        _evt = cancel_flag
+        _end = start + d
+        while True:
+            if _evt is not None and getattr(_evt, "is_set", lambda: False)():
+                break
+            _left = _end - time.time()
+            if _left <= 0:
+                break
+            time.sleep(min(0.25, _left))
+    except Exception:
+        pass
     elapsed = time.time() - start
+    _interrupted = bool(
+        cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)())
     return {
         "event": event,
         "duration": d,
         "elapsed": round(elapsed, 2),
         "success": True,
-        "message": f"Waited {d}s"
+        "interrupted": _interrupted,
+        "message": (f"Wait interrupted by STOP after {elapsed:.1f}s"
+                    if _interrupted else f"Waited {d}s"),
     }

@@ -7,16 +7,16 @@
 import { initModal, hideBootSplash, animateIn } from "./ui.js?v=13";
 import { initNavigation } from "./navigation.js?v=13";
 import { startEvents, whenHello } from "./events.js?v=5";
-import { initWorkspace } from "./workspace.js?v=20";
+import { initWorkspace } from "./workspace.js?v=22";
 import { initDashboard } from "./dashboard.js?v=14";
 import { initCharts } from "./charts.js?v=14";
-import { initChat } from "./chat.js?v=94";
-import { initSchedule } from "./schedule.js?v=25";
+import { initChat } from "./chat.js?v=100";
+import { initSchedule } from "./schedule.js?v=26";
 import { initPlugins } from "./plugins.js?v=9";
 import { initSkills } from "./skills.js?v=10";
 import { initGateway } from "./gateway.js?v=30";
 import { initAiModels } from "./ai_models.js?v=6";
-import { initSettings } from "./settings.js?v=12";
+import { initSettings } from "./settings.js?v=13";
 
 // Keeps .app pinned to the real visible area when the mobile keyboard
 // opens. iOS doesn't shrink window.innerHeight and 100dvh differs per

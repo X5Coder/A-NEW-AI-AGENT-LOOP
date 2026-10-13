@@ -75,18 +75,38 @@ def _is_dangerous_browser_tool(name: str) -> bool:
         return False
 
 
-def _resolve_missing_model(name: str, args: Any, kind: str, on_question) -> dict:
-    """Pause for the user's Connect/Skip choice, then continue WITHOUT the tool.
+def _resolve_missing_model(name: str, args: Any, kind: str, on_question, cancel_flag=None) -> dict:
+    """Pause for the user's Connect/Skip choice, then resume the loop.
 
-    The strip above the composer offers the choice per tool: Skip continues
-    the task without it; Connect also continues (and opens that kind's model
-    dialog so it is ready next time). Expiry or no-UI also continues — a
-    missing model pauses for a decision but never stalls the loop, it only
-    ever skips the tool. Never raises.
+    - Skip (or expiry / no-UI / STOP): continue WITHOUT the tool — the
+      Arabic skip sentence goes to the MODEL, which continues the task.
+    - Connect: the UI keeps the strip up while the user connects that
+      kind's model dialog; once saved it answers back and the SAME tool
+      runs once (a single retry, never a loop). Still missing at retry
+      time → a skip like above.
+    A missing model pauses for a decision but never stalls the loop.
+    Never raises.
     """
+    decision = None
     if on_question is not None:
         try:
-            on_question("needs_model", {"kind": kind, "tool": name})
+            answer = on_question("needs_model", {"kind": kind, "tool": name})
+            if isinstance(answer, dict):
+                decision = str(answer.get("decision") or "").strip().lower()
+        except Exception:
+            decision = None
+    if decision in ("connect", "activate", "retry", "continue"):
+        try:
+            if _is_cancelled(cancel_flag):
+                return _model_skipped_result(name, args, kind)
+            from core.ai_models.store import has_model as _has_model
+            if _has_model(kind):
+                try:
+                    retried = execute_tool(name, args, cancel_flag=cancel_flag)
+                    if isinstance(retried, dict):
+                        return retried
+                except Exception:
+                    pass
         except Exception:
             pass
     return _model_skipped_result(name, args, kind)
@@ -99,18 +119,14 @@ def _model_skipped_result(name: str, args: Any, kind: str) -> dict:
     which decides — continue the task without this tool, or present the
     message to the user. The turn's final reply carries needs_model_kind, so
     the UI renders its /ai-models link as a Connect button opening the right
-    model dialog. Never raises.
+    model dialog.     Never raises.
     """
-    try:
-        text = _missing_text(kind, name)
-    except Exception:
-        text = f"No {kind} model connected."
     return {"tool": name, "arguments": args,
             "output": {"event": f"Skipped {name} (no model)", "skipped": True,
                        "needs_model_kind": kind,
-                       "message": text + " Continue the task without this tool "
-                                  "when possible; otherwise present this message "
-                                  "to the user with its /ai-models link."},
+                       "message": f"تم تخطي الأداة {name} لعدم توفر موديل مناسب ({kind}). "
+                                  "واصل المهمة بدون هذه الأداة عندما يكون ذلك ممكناً؛ "
+                                  "وإلا اعرض هذه الرسالة على المستخدم مع رابط /ai-models."},
             "success": True}
 
 
@@ -328,14 +344,17 @@ def _summarize_output(result: dict, name: str | None = None, args: Any = None) -
     - read_file: file name(s) read (args-based, never content)
     - search_files: query + match count + up to 3 names (never content)
     - workspace: action + path/count only (never full listing)
-    - terminal: exit code + short stdout/stderr tail (bounded, never full log)
+    - terminal: full command + exit code + output tail (bounded, never full log)
     - document_search: file name + query (never chunk text)
     - vector_chat_search: query only (never message text)
     - navigate: URL only (args-based)
     - question: Q + the user's answer (the answer is shown here, never as
       a user bubble; unanswered → question only)
+    - pdf_create: one line per finished slide + a final merge line
+    - svg_maker: icon file name + size (never SVG markup)
     Failures return one short human line (machine prefix stripped), so every
     failed call gets an expandable arrow with the cause instead of a dump.
+    Model-skips return their short sentence too.
     Screenshot tools show their image via media instead of text here.
     Never raises.
     """
@@ -345,6 +364,9 @@ def _summarize_output(result: dict, name: str | None = None, args: Any = None) -
         if not result.get("success"):
             return _short_error(result.get("error"))
         out = result.get("output") if isinstance(result.get("output"), dict) else {}
+        if isinstance(out, dict) and out.get("skipped"):
+            msg = str(out.get("message") or "").strip()
+            return msg[:200] if msg else None
         safe_args = args if isinstance(args, dict) else {}
         tool = str(name or "").strip()
 
@@ -412,13 +434,17 @@ def _summarize_output(result: dict, name: str | None = None, args: Any = None) -
             return detail[:160] if detail else None
 
         if tool == "terminal":
+            cmd = str(safe_args.get("command") or out.get("command") or "").strip()[:1000]
             code = out.get("returncode")
             tail = str(out.get("stdout") or out.get("stderr") or "").strip()
-            head = f"exit {code}" if isinstance(code, int) else "done"
-            if not tail:
-                return head[:40]
-            short = tail[-240:].strip() if len(tail) > 240 else tail
-            return (head + "\n" + short)[:300]
+            tail = tail[-1500:].strip() if len(tail) > 1500 else tail
+            lines = []
+            if cmd:
+                lines.append(cmd)
+            lines.append(f"exit {code}" if isinstance(code, int) else "done")
+            if tail:
+                lines.append(tail)
+            return "\n".join(lines)[:2000] or None
 
         if tool == "document_search":
             base = _basename(safe_args.get("file_id") or safe_args.get("path"))
@@ -449,6 +475,46 @@ def _summarize_output(result: dict, name: str | None = None, args: Any = None) -
             return "\n".join(lines)[:520] or None
 
         # Default: reason-only (no output dump). Images travel via media.
+        # pdf_create: one dynamic line per finished slide + a final merge
+        # line, so the arrow shows the whole build story under the reason.
+        if tool == "pdf_create":
+            try:
+                lines: list[str] = []
+                prog = out.get("progress")
+                if isinstance(prog, list):
+                    for entry in prog[:50]:
+                        if isinstance(entry, str) and entry.strip():
+                            lines.append(entry.strip()[:140])
+                if not lines:
+                    done = out.get("slides_done")
+                    if isinstance(done, list) and done:
+                        nums = [str(n) for n in done[:50] if isinstance(n, int)]
+                        if nums:
+                            lines.append("خلصت سلايد رقم " + "، ".join(nums))
+                    changed = out.get("changed")
+                    if isinstance(changed, list) and changed:
+                        nums = [str(n) for n in changed[:50] if isinstance(n, int)]
+                        if nums:
+                            lines.append("خلصت سلايد رقم " + "، ".join(nums))
+                if isinstance(out.get("pdf_path"), str) and out.get("pdf_path"):
+                    total = out.get("slides_done")
+                    n = len(total) if isinstance(total, list) else 0
+                    if not any(line.startswith("تم تجميع") for line in lines):
+                        if n:
+                            lines.append(f"تم تجميع {n} سلايدات في PDF")
+                        else:
+                            lines.append("تم تجميع السلايدات في PDF")
+                return "\n".join(lines)[:2000] or None
+            except Exception:
+                return None
+        if tool == "svg_maker":
+            try:
+                base = _basename(safe_args.get("icon_name") or out.get("file") or out.get("icon_name"))
+                size = out.get("size") if isinstance(out.get("size"), int) else safe_args.get("size")
+                head = (base or "icon") + (f" ({size}x{size})" if isinstance(size, int) else "")
+                return head[:120]
+            except Exception:
+                return None
         return None
     except Exception:
         return None
@@ -769,9 +835,10 @@ def _collect_final_files(tool_calls_log: list) -> list[dict]:
 
 
 def _persist_conversation(user_input: str, assistant_output: str, steps: list | None = None,
-                          images: list | None = None, elapsed: int | None = None,
+                           images: list | None = None, elapsed: int | None = None,
                            audios: list | None = None, session_key: str | None = None,
-                           reuse_user_id: str | None = None, files: list | None = None):
+                           reuse_user_id: str | None = None, files: list | None = None,
+                           stopped: bool = False):
     import uuid
     if isinstance(session_key, str) and session_key.strip():
         # Branch session (one per scheduled job / trigger): NEVER touches the
@@ -802,6 +869,11 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
                 extra["audio"] = audios[:4]
             if isinstance(files, list) and files:
                 extra["files"] = files[:4]
+            if stopped:
+                # STOP marker for the UI (frozen Working + Stopped divider,
+                # never the note text). The note itself stays in content so
+                # the model keeps the full context.
+                extra["stopped"] = True
             # Edit/regenerate resend: the edited user bubble already persists
             # (server updated it in place) — append ONLY the assistant reply,
             # same contract as the main chat (fixes the duplicated-message bug).
@@ -838,6 +910,35 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
     # the double-reply bug). Otherwise append a fresh user + assistant pair.
     if isinstance(reuse_user_id, str) and reuse_user_id.strip():
         uid = reuse_user_id.strip()[:16]
+        if not stopped:
+            # Continue-after-STOP resumes in place: the trailing stopped
+            # marker now continues, so its Stopped divider goes away (the UI
+            # renders its steps only). The note text stays for model context.
+            # A re-stop (stopped=True) keeps its own fresh marker. Never
+            # fails persistence.
+            try:
+                if data and isinstance(data[-1], dict) and data[-1].get("role") == "assistant" and data[-1].get("stopped") is True:
+                    data[-1].pop("stopped", None)
+                    data[-1]["resumed"] = True
+            except Exception:
+                pass
+        else:
+            # Re-stop of the same resumed task (stop → continue → stop):
+            # refresh the trailing stopped marker in place (latest steps)
+            # instead of stacking another Stopped divider below it.
+            try:
+                _last = data[-1] if data else None
+                if (isinstance(_last, dict) and _last.get("role") == "assistant"
+                        and _last.get("stopped") is True and _last.get("id")):
+                    _last["content"] = assistant_output[:5000]
+                    if isinstance(steps, list) and steps:
+                        _last["steps"] = steps[:12]
+                    if isinstance(elapsed, int) and elapsed >= 0:
+                        _last["elapsed"] = elapsed
+                    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                    return uid, str(_last["id"])[:16]
+            except Exception:
+                pass
     else:
         uid = str(uuid.uuid4())[:8]
         data.append({"id": uid, "role": "user", "content": user_input[:2000], "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
@@ -853,6 +954,8 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
         assistant_msg["audio"] = audios[:4]
     if isinstance(files, list) and files:
         assistant_msg["files"] = files[:4]
+    if stopped:
+        assistant_msg["stopped"] = True
     data.append(assistant_msg)
     if len(data) > 1000:
         removed = data[:-1000]
@@ -971,6 +1074,7 @@ def run_loop(
     session_history: str | None = None,
     reuse_user_id: str | None = None,
     chat_limit: int = 30,
+    resume_stopped: bool = False,
 ) -> dict[str, Any]:
     """
     Run agent loop for user_input.
@@ -993,8 +1097,21 @@ def run_loop(
       appends only the assistant reply (fixes the double-reply bug on edit).
     chat_limit: L6 history depth for this run (default 30; edit-resend uses 20:
       the edited message + the 20 before it).
+    resume_stopped: seamless Continue — no new user message exists, so the
+      internal instruction must reach NEITHER the UI NOR the model: user_input
+      must be empty (server enforces), reuse_user_id is required (the reply
+      attaches to the stopped task), and the context is built with
+      resume_stopped so L8 is omitted and trailing stopped markers are
+      excluded from L6. A LATER non-resume turn still sees the persisted
+      marker and knows the task was stopped.
     """
-    if not isinstance(user_input, str) or not user_input.strip():
+    if not isinstance(user_input, str):
+        raise ValueError("user_input must be string")
+    if resume_stopped:
+        if not isinstance(reuse_user_id, str) or not reuse_user_id.strip():
+            raise ValueError("resume_stopped requires reuse_user_id")
+        user_input = ""
+    elif not user_input.strip():
         raise ValueError("user_input must be non-empty string")
     if not isinstance(max_steps, int) or max_steps < 1 or max_steps > 500:
         raise ValueError("max_steps must be 1..500")
@@ -1007,15 +1124,19 @@ def run_loop(
         _emb_ready()
     except Exception as e:
         refusal = str(e)
-        try:
-            _persist_conversation(user_input, refusal, [], 0.0)
-        except Exception:
-            pass
+        # A refused resume persists nothing: the stopped marker and the
+        # Continue pill stay intact so the user can retry after fixing the
+        # cause (the refusal itself still reaches the UI as an error frame).
+        if not resume_stopped:
+            try:
+                _persist_conversation(user_input, refusal, [], 0.0)
+            except Exception:
+                pass
         return {"steps": 0, "final_answer": refusal, "history": [],
                 "tool_calls_log": [], "success": False, "no_embedding": True}
     mdl = model.strip() if model and isinstance(model, str) and model.strip() else "deepseek/deepseek-v4.1-flash"
     # Build initial context (isolated for large scheduled tasks)
-    system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot, session_history=session_history, chat_limit=chat_limit)
+    system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot, session_history=session_history, chat_limit=chat_limit, resume_stopped=resume_stopped)
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_context},
@@ -1040,10 +1161,12 @@ def run_loop(
         except Exception:
             refusal = ("No AI Text Model connected. Open AI Models → AI Text Model (/ai-models), "
                        "press Test, then Save.")
-        try:
-            _persist_conversation(user_input, refusal, [], 0.0)
-        except Exception:
-            pass
+        # A refused resume persists nothing (stopped marker + pill stay for retry).
+        if not resume_stopped:
+            try:
+                _persist_conversation(user_input, refusal, [], 0.0)
+            except Exception:
+                pass
         return {"steps": 0, "final_answer": refusal, "history": list(messages),
                 "tool_calls_log": [], "success": False, "no_model": True}
     # AIP/1 path: the record carries a declarative parser — the interpreter
@@ -1064,10 +1187,12 @@ def run_loop(
             _compiled = _aip_pre.get_compiled(_model_record, "text")
         except Exception as e:
             refusal = f"AI Text Model configuration error: {e}"
-            try:
-                _persist_conversation(user_input, refusal, [], 0.0)
-            except Exception:
-                pass
+            # A refused resume persists nothing (stopped marker + pill stay for retry).
+            if not resume_stopped:
+                try:
+                    _persist_conversation(user_input, refusal, [], 0.0)
+                except Exception:
+                    pass
             return {"steps": 0, "final_answer": refusal, "history": list(messages),
                     "tool_calls_log": [], "success": False, "bad_parser": True}
 
@@ -1118,7 +1243,7 @@ def run_loop(
                 from core.ai_models import aip as _aip_run
                 _canonical = _aip_run.canonical_from_loop(
                     outgoing, list(core_tools) + list(dynamic_tools))
-                _res = _aip_run.execute_compiled(_compiled, _canonical)
+                _res = _aip_run.execute_compiled(_compiled, _canonical, cancel_event=cancel_flag)
                 content_text = _res.get("text") or ""
                 _emit_token(content_text)
                 response = {"content": content_text,
@@ -1133,6 +1258,11 @@ def run_loop(
             if not response.get("tool_calls") and not (response.get("content") or "").strip():
                 raise RuntimeError("model returned an empty reply with no usable tool calls")
         except Exception as e:
+            # A STOP racing the provider call must win at once: break now
+            # with no error note and no backoff sleep (the run is over).
+            if _is_cancelled(cancel_flag):
+                cancelled = True
+                break
             # Provider failed even after retries - treat as tool error and continue
             err_msg = f"Provider error at step {step}: {e}"
             tech = str(getattr(e, "technical", "") or "")[:300]
@@ -1162,6 +1292,11 @@ def run_loop(
         tool_calls = [tc for tc in (response.get("tool_calls") or [])
                       if isinstance(tc, dict) and isinstance(tc.get("name"), str)
                       and tc.get("name").strip()]
+        # STOP wins over a reply that arrived after cancel: persist the
+        # stopped marker, never execute the just-returned tools.
+        if _is_cancelled(cancel_flag):
+            cancelled = True
+            break
         if verbose:
             if content:
                 print(f"[LLM content] {str(content)[:300]}")
@@ -1243,27 +1378,30 @@ def run_loop(
                 # No cap: search as many times as needed, the loop itself is bounded by max_steps.
                 result = execute_tool(name, args)
             else:
-                result = execute_tool(name, args)
-            # Missing-model gate: never pauses, never stops the loop. A tool
-            # that needs an unconnected model kind becomes a skipped success
-            # carrying the connect sentence, so the MODEL decides: continue
-            # without this tool, or present it to the user (the turn's final
-            # reply carries the first skipped kind, and the UI renders its
-            # /ai-models link as a Connect button for the right dialog).
+                # Long tools (e.g. pdf_create) receive the cancel event so
+                # STOP aborts them mid-execution instead of after they finish.
+                result = execute_tool(name, args, cancel_flag=cancel_flag)
+            # Missing-model gate: pauses for the user's Connect/Skip choice.
+            # Skip continues without the tool (the Arabic skip sentence goes
+            # to the model); Connect retries the SAME tool once the model is
+            # connected. Only real skips flag the final reply, whose UI
+            # renders the /ai-models link as a Connect button.
             try:
                 _mkind = _missing_kind_of(result) if isinstance(result, dict) else None
             except Exception:
                 _mkind = None
             if _mkind is not None:
                 try:
-                    result = _resolve_missing_model(name, args, _mkind, on_question)
+                    result = _resolve_missing_model(name, args, _mkind, on_question, cancel_flag=cancel_flag)
                 except Exception:
                     try:
                         result = _model_skipped_result(name, args, _mkind)
                     except Exception:
                         pass
                 try:
-                    if not any(s.get("tool") == name for s in skipped_models):
+                    _rout = result.get("output") if isinstance(result, dict) else None
+                    _was_skipped = isinstance(_rout, dict) and bool(_rout.get("skipped"))
+                    if _was_skipped and not any(s.get("tool") == name for s in skipped_models):
                         skipped_models.append({"tool": str(name)[:40], "kind": str(_mkind)[:16]})
                 except Exception:
                     pass
@@ -1432,7 +1570,8 @@ def run_loop(
             persist_ids = _persist_conversation(
                 user_input, _STOPPED_NOTE, _persist_steps(tool_calls_log),
                 [], elapsed_sec, [],
-                session_key=session_key, reuse_user_id=reuse_user_id)
+                session_key=session_key, reuse_user_id=reuse_user_id,
+                stopped=True)
         except Exception:
             pass
     if not cancelled:

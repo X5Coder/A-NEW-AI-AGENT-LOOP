@@ -1,0 +1,21 @@
+{
+  "name": "svg_maker",
+  "description": "THE ONLY WAY to create SVG icons or vector logos. Call this tool DIRECTLY (via tool_search) the moment the user asks for an svg, icon, or vector logo — never hand-write SVG manually with other tools. Takes a plain description of the wanted image (what it shows, style, colors) and returns RAW SVG CODE ONLY plus the saved .svg file in Workspace. The tool owns an internal single-shot session with its own icon system prompt (simple 24x24 icon basics); the same text model draws the icon and the tool validates it. Output is the svg code as-is.",
+  "inputs": {
+    "description": {
+      "type": "string",
+      "required": true,
+      "description": "What the icon shows (subject, style, colors). 1..2000 chars, e.g. 'blue outline shopping cart icon'."
+    },
+    "icon_name": {
+      "type": "string",
+      "required": false,
+      "description": "File base name for the saved .svg in Workspace (letters, numbers, _ -; default derived from description)."
+    },
+    "size": {
+      "type": "integer",
+      "required": false,
+      "description": "Width/height in px, 16..512 (default 48). Sets width/height on the svg root."
+    }
+  }
+}
