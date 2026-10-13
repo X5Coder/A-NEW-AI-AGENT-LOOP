@@ -12,7 +12,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Cairo:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/css/tokens.css?v=13" />
-  <link rel="stylesheet" href="/css/base.css?v=12" />
+  <link rel="stylesheet" href="/css/base.css?v=13" />
   <link rel="stylesheet" href="/css/layout.css?v=21" />
   <link rel="stylesheet" href="/css/components.css?v=117" />
   <link rel="stylesheet" href="/css/responsive.css?v=22" />
@@ -25,12 +25,14 @@
        (pure CSS so they run before the JS bundle); the word reuses the
        Working wave text style. -->
   <div class="boot-splash" id="bootSplash" aria-hidden="true">
-    <div class="boot-dots" id="bootDots"></div>
+    <div class="dot-square boot-dots" id="bootDots"></div>
     <div class="working-text boot-word">X5Agent</div>
   </div>
   <script>
     /* Earliest paint (runs during parsing): lock scroll + build the 5x5
-       ring dots (same ring map as the Working dot-square in chat.js). */
+       ring dots (same ring map as the Working dot-square in chat.js) +
+       run the SAME ring-wave cycle (rings on 60/360/660ms, all off
+       1300ms, 1600ms loop). Stops forever once hideBootSplash flags done. */
     (function () {
       try {
         // Boot flag: hideBootSplash sets it when all data lands. The splash
@@ -48,6 +50,29 @@
           }
           host.innerHTML = html;
         }
+        function onAll(list, on) {
+          for (var i = 0; i < list.length; i++) {
+            if (on) list[i].classList.add("on");
+            else list[i].classList.remove("on");
+          }
+        }
+        function cycle() {
+          try {
+            if (window.__x5bootDone || !host || !host.isConnected) return;
+            var dots = host.querySelectorAll("span");
+            var rings = [[], [], []];
+            for (var i = 0; i < dots.length; i++) {
+              rings[+dots[i].dataset.ring].push(dots[i]);
+            }
+            onAll(dots, false);
+            setTimeout(function () { if (!window.__x5bootDone) onAll(rings[0], true); }, 60);
+            setTimeout(function () { if (!window.__x5bootDone) onAll(rings[1], true); }, 360);
+            setTimeout(function () { if (!window.__x5bootDone) onAll(rings[2], true); }, 660);
+            setTimeout(function () { onAll(dots, false); }, 1300);
+            setTimeout(cycle, 1600);
+          } catch (e) {}
+        }
+        cycle();
         setTimeout(function () {
           try {
             if (!window.__x5bootDone) {
@@ -60,6 +85,7 @@
         // never trap the user behind an invisible app forever.
         setTimeout(function () {
           try {
+            window.__x5bootDone = true;
             document.body.classList.remove("booting");
             var sp2 = document.getElementById("bootSplash");
             if (sp2) sp2.remove();

@@ -331,43 +331,38 @@ body.booting .app {
   visibility: hidden;
   pointer-events: none;
 }
-.boot-dots {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
+/* Splash dots reuse the Working dot-square anatomy (.dot-square grid + .on
+   glow from components.css) one size up, driven by the SAME ring-wave JS
+   cycle as the agent template (rings on at 60/360/660ms, all off 1300ms,
+   1600ms loop - see the inline driver in index.html). Higher specificity
+   wins over the 2px template default. Phone first, one step up on desktop. */
+.boot-splash .boot-dots {
+  gap: 5px;
   direction: ltr;
 }
-.boot-dots span {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #1e1e1e;
-  animation: boot-glow 1.6s linear infinite;
+.boot-splash .boot-dots span {
+  width: 4px;
+  height: 4px;
+  animation: none;
 }
-.boot-dots span[data-ring="1"] {
-  animation-delay: 0.3s;
-}
-.boot-dots span[data-ring="2"] {
-  animation-delay: 0.6s;
-}
-@keyframes boot-glow {
-  0%, 3% {
-    background: #1e1e1e;
-    box-shadow: none;
+@media (min-width: 640px) {
+  .boot-splash .boot-dots {
+    gap: 6px;
   }
-  6%, 78% {
-    background: #ffffff;
-    box-shadow:
-      0 0 6px rgba(255, 255, 255, 0.9),
-      0 0 14px rgba(255, 255, 255, 0.4);
-  }
-  84%, 100% {
-    background: #1e1e1e;
-    box-shadow: none;
+  .boot-splash .boot-dots span {
+    width: 5px;
+    height: 5px;
   }
 }
-.boot-word {
-  font-size: 1.1rem;
+/* Boot word: same wave text as Working, two sizes up - phone first, one
+   more step on desktop. Specificity beats .working-text's own size. */
+.boot-splash .boot-word {
+  font-size: 1.35rem;
+}
+@media (min-width: 640px) {
+  .boot-splash .boot-word {
+    font-size: 1.6rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
