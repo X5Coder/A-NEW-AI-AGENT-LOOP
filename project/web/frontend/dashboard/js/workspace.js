@@ -5,7 +5,7 @@
  */
 "use strict";
 
-import { toast, openModal, closeModal, modalShell, animateIn } from "./ui.js?v=9";
+import { toast, openModal, closeModal, modalShell } from "./ui.js?v=10";
 import { onPush } from "./events.js?v=4";
 
 let wsPath = "";
@@ -298,13 +298,15 @@ async function loadWorkspace() {
         wsReveal = null;
       }
     }
-    // Folder-enter transition: cards cascade in with one staggered rise.
-    animateIn(list);
+    // Silent swap: the entrance played once on the skeletons — folder
+    // contents (and folder-enter) replace them with no re-animation.
   } catch (_) {
     // Invalidate the signature so the next successful poll always re-renders
     // (otherwise a stale error could stick when data is unchanged).
     lastSig = "";
-    if (!list.children.length) {
+    // A boot skeleton is not real content: a failed first load must still
+    // surface the retry box instead of shimmering forever.
+    if (!list.children.length || list.querySelector(".skel-rowbox")) {
       list.innerHTML = `<div class="grid-empty" data-ws-error><span>Could not load Workspace.</span><button type="button" class="ws-retry-btn" id="wsRetryBtn">Retry</button></div>`;
       document.getElementById("wsRetryBtn")?.addEventListener("click", () => {
         lastSig = "";
@@ -502,7 +504,6 @@ function renderFileView(list, file) {
   view.querySelector("#wsFileDelete")?.addEventListener("click", () => {
     openDeleteModal(file.full, file.name, false);
   });
-  animateIn(list);
 }
 
 /* Delete confirmation: folders warn that everything inside goes too. */

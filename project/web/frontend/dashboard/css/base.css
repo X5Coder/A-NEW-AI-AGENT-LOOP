@@ -293,6 +293,92 @@ pre,
   animation: a-fade var(--dur) var(--ease) both;
 }
 
+/* ---------- skeleton loading (shimmer) ----------
+   Page templates animate ONCE via navigate()'s animateIn; while data loads,
+   skeleton blocks shimmer in place, then real content swaps in with NO
+   re-animation. Static under prefers-reduced-motion (global rule below). */
+@keyframes a-shimmer {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+.skel {
+  position: relative;
+  overflow: hidden;
+}
+.skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.1) 50%, transparent 70%);
+  background-size: 200% 100%;
+  animation: a-shimmer 1.4s linear infinite;
+  pointer-events: none;
+}
+/* Base fill for skeleton bars (the sweep above glides over them). */
+.skel-line,
+.skel-ic,
+.skel-badge,
+.skel-chartbox,
+.skel-rowbox,
+.skel-bubble {
+  background: var(--fill-tsp-white-light);
+}
+.skel-line {
+  height: 12px;
+  border-radius: 6px;
+}
+.skel-ic {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 10px;
+}
+.skel-badge {
+  height: 22px;
+  width: 88px;
+  border-radius: var(--r-full);
+}
+.skel-chartbox {
+  height: 190px;
+  border-radius: 12px;
+}
+.skel-rowbox {
+  height: 76px;
+  border-radius: 14px;
+}
+.skel-w40 { width: 40%; }
+.skel-w55 { width: 55%; }
+.skel-w70 { width: 70%; }
+.skel-w85 { width: 85%; }
+/* Skeleton cards reuse the real card box but never interact. */
+.skel-card {
+  pointer-events: none;
+  cursor: default;
+}
+.skel-card:hover {
+  transform: none;
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-hi), var(--glass-lo), var(--glass-sh);
+}
+/* Chat history placeholders: plain bubbles, alternating sides. */
+.skel-bubble {
+  max-width: 75%;
+  padding: var(--sp-4);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: var(--sp-3);
+}
+.skel-bubble:nth-child(even) {
+  margin-inline-start: auto;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

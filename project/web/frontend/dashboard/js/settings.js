@@ -9,7 +9,7 @@
  */
 "use strict";
 
-import { closeModal, modalShell, openModal, toast } from "./ui.js?v=9";
+import { closeModal, modalShell, openModal, toast } from "./ui.js?v=10";
 
 async function _getJson(url, opts) {
   const r = await fetch(url, opts);
@@ -192,6 +192,8 @@ async function _refreshChatCount() {
       : `${msgs.length} message${msgs.length === 1 ? "" : "s"}`;
   } catch (_) {
     badge.textContent = "—";
+  } finally {
+    badge.classList.remove("skel");
   }
 }
 
@@ -199,7 +201,9 @@ export function initSettings() {
   fetch("/api/dashboard").then((r) => r.json()).then((d) => {
     const el = document.getElementById("projVersion");
     if (el && d && d.version) el.textContent = "v" + d.version;
-  }).catch(() => {});
+  }).catch(() => {}).finally(() => {
+    document.getElementById("projVersion")?.classList.remove("skel");
+  });
 
   _refreshChatCount();
 

@@ -6,7 +6,7 @@
  */
 "use strict";
 
-import { animateIn, hideChartTip } from "./ui.js?v=8";
+import { animateIn, hideChartTip } from "./ui.js?v=10";
 
 const BP_MOBILE = 1024;
 const COLLAPSE_KEY = "x5_sidebar";
@@ -43,6 +43,9 @@ let content = null;
 let pageTitle = null;
 let pageSub = null;
 let currentPage = null;
+// Entrance plays ONCE per page: templates (incl. skeletons) animate on first
+// open, data swaps in silently later — revisits never replay the animation.
+const seenPages = new Set();
 
 function isMobile() {
   return window.innerWidth <= BP_MOBILE;
@@ -90,14 +93,20 @@ export function navigate(name, opts) {
   if (content) content.scrollTop = 0;
 
   const active = document.querySelector(`.page[data-page="${name}"]`);
-  // Agent page animates as one block (chat + composer) on every open.
-  if (active && name !== "agent") animateIn(active);
+  // Agent page animates as one block (chat + composer) on first open only.
+  if (active && name !== "agent" && !seenPages.has(name)) {
+    seenPages.add(name);
+    animateIn(active);
+  }
   if (name === "agent") {
-    const chat = active?.querySelector(".chat");
-    if (chat) {
-      chat.classList.remove("chat-enter");
-      void chat.offsetWidth;
-      chat.classList.add("chat-enter");
+    if (!seenPages.has(name)) {
+      seenPages.add(name);
+      const chat = active?.querySelector(".chat");
+      if (chat) {
+        chat.classList.remove("chat-enter");
+        void chat.offsetWidth;
+        chat.classList.add("chat-enter");
+      }
     }
     requestAnimationFrame(() => {
       window.dispatchEvent(new CustomEvent("x5:agent-open"));

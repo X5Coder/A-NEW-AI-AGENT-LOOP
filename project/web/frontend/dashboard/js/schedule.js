@@ -14,7 +14,7 @@
 "use strict";
 
 import { onPush } from "./events.js?v=4";
-import { openModal, closeModal, toast } from "./ui.js?v=9";
+import { openModal, closeModal, toast } from "./ui.js?v=10";
 
 let jobs = []; // summarized jobs from the server (executing flag included)
 let miniOpen = false;

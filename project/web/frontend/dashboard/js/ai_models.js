@@ -8,7 +8,7 @@
  */
 "use strict";
 
-import { modalShell, openModal, closeModal, toast, animateIn } from "./ui.js?v=9";
+import { modalShell, openModal, closeModal, toast } from "./ui.js?v=10";
 
 const CLAUDE_URL = "https://claude.ai";
 
@@ -478,6 +478,18 @@ function openTemplateDialog(tpl, saved) {
 
 /* ---------------- cards grid ---------------- */
 
+/* Short fingerprint of what the cards show — rebuild only on real change. */
+function sigOf(state) {
+  if (!state) return "null";
+  return TEMPLATES.map((t) => {
+    const s = state[t.kind] || {};
+    return `${t.kind}:${s.configured ? 1 : 0}:${s.model_name || ""}`;
+  }).join("|");
+}
+
+let lastSig = "";
+let inFlight = null;
+
 async function loadState() {
   try {
     const { res, data } = await fetchJson("/api/ai_models", { cache: "no-store" });
@@ -489,23 +501,35 @@ async function loadState() {
 }
 
 async function refresh() {
-  const grid = document.getElementById("aiModelsGrid");
-  if (!grid) return;
-  const state = await loadState();
-  grid.innerHTML = "";
-  if (state === null) {
-    grid.innerHTML = `<div class="grid-empty">AI Models unavailable — check the server is running.</div>`;
+  // One fetch at a time: navigate() fires x5:page-open while an initial
+  // refresh may still be in flight — joining it beats rebuilding twice.
+  if (inFlight) {
+    await inFlight.catch(() => {});
     return;
   }
-  for (const t of TEMPLATES) {
-    const saved = state[t.kind] || null;
-    const on = !!saved?.configured;
-    const badge = on ? "Connected" : "Not configured";
-    const el = document.createElement("button");
-    el.className = "mini-card";
-    el.type = "button";
-    el.setAttribute("data-anim", "");
-    el.innerHTML = `
+  const grid = document.getElementById("aiModelsGrid");
+  if (!grid) return;
+  const job = (async () => {
+    const state = await loadState();
+    const sig = sigOf(state);
+    // Same data + cards already on screen: leave the DOM alone so the
+    // entrance animation started by navigate() is never torn down mid-flight.
+    if (state !== null && sig === lastSig && grid.querySelector(".mini-card")) return;
+    lastSig = sig;
+    grid.innerHTML = "";
+    if (state === null) {
+      grid.innerHTML = `<div class="grid-empty">AI Models unavailable — check the server is running.</div>`;
+      return;
+    }
+    for (const t of TEMPLATES) {
+      const saved = state[t.kind] || null;
+      const on = !!saved?.configured;
+      const badge = on ? "Connected" : "Not configured";
+      const el = document.createElement("button");
+      el.className = "mini-card";
+      el.type = "button";
+      el.setAttribute("data-anim", "");
+      el.innerHTML = `
       <div class="mini-top">
         <div class="mini-icon">${esc(t.tag)}</div>
         <svg class="mini-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -518,26 +542,25 @@ async function refresh() {
         <span class="badge glass ${on ? "green" : "muted"}">${esc(badge)}</span>
         <span class="mini-ver">${esc(on && saved?.model_name ? saved.model_name.slice(0, 24) : on ? "ready" : "setup needed")}</span>
       </div>`;
-    el.addEventListener("click", () => openTemplateDialog(t, saved));
-    grid.appendChild(el);
+      el.addEventListener("click", () => openTemplateDialog(t, saved));
+      grid.appendChild(el);
+    }
+    // Silent swap: the entrance already played once on the skeletons —
+    // data appears with no re-animation. (Fresh cards carry data-anim but
+    // never get .anim, so they render statically.)
+  })();
+  inFlight = job;
+  try {
+    await job;
+  } finally {
+    if (inFlight === job) inFlight = null;
   }
-  // Cards are built async AFTER navigation's animateIn ran on an empty grid,
-  // so they never received .anim. Animate them here with a tidy cascade
-  // (base + i*40ms inside animateIn) on every refresh: first open, revisit, save.
-  animateIn(grid, 0);
-  // Entrance uses fill "both", whose forwards frame would pin
-  // transform and block .mini-card:hover lift — drop .anim once it lands.
-  grid.querySelectorAll("[data-anim].anim").forEach((el) => {
-    el.addEventListener("animationend", () => {
-      el.classList.remove("anim");
-      el.style.animationDelay = "";
-    }, { once: true });
-  });
 }
 
 export async function initAiModels() {
   if (!document.getElementById("aiModelsGrid")) return;
   window.addEventListener("x5:page-open", (e) => {
+    // Data refreshes silently — the entrance played once, never replayed.
     if (e.detail === "ai-models") refresh().catch(() => {});
   });
   // Deep-link from chat: {kind} opens that template dialog automatically.

@@ -6,7 +6,7 @@
  */
 "use strict";
 
-import { attachChartTooltip, animateIn, pinChartTip } from "./ui.js?v=9";
+import { attachChartTooltip, pinChartTip } from "./ui.js?v=10";
 import { onPush } from "./events.js?v=4";
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -88,7 +88,7 @@ function smoothLine(pts) {
 
 let flowUid = 0;
 
-function renderChart(el, labels, values, unit, animate) {
+function renderChart(el, labels, values, unit) {
   if (!el) return;
   const n = Math.max(labels.length, values.length);
   const vals = Array.from({ length: n }, (_, i) => Number(values[i]) || 0);
@@ -108,7 +108,6 @@ function renderChart(el, labels, values, unit, animate) {
         </svg>
         <div class="chart-empty">No activity in this range — send a message to the agent.</div>
       </div>`;
-    if (animate) animateIn(el);
     return;
   }
 
@@ -167,7 +166,6 @@ function renderChart(el, labels, values, unit, animate) {
     el.querySelector(".flow-line")?.setAttribute("stroke", `url(#x5FlowStroke-${uid})`);
   } catch (_) {}
 
-  if (animate) animateIn(el);
   attachChartTooltip(el);
   // Touch screens have no hover: tapping a point pins the day info instead.
   try {
@@ -197,8 +195,9 @@ export async function initCharts() {
   if (!tokensEl || !reqEl) return;
 
   // Silent background refresh: skip DOM updates when data is unchanged
-  // (no flicker, open tooltips stay), animate only on first paint,
-  // and keep the last good chart if a tick fails instead of wiping it.
+  // (no flicker, open tooltips stay), and keep the last good chart if a tick
+  // fails instead of wiping it. The entrance played once on the skeletons —
+  // data swaps in with no re-animation.
   const seen = { tokens: null, req: null };
   let firstPaint = true;
   let range = "7d";
@@ -208,19 +207,19 @@ export async function initCharts() {
     return r + "|" + labels.join("|") + "#" + values.join(",");
   }
 
-  function paint(animate) {
+  function paint() {
     if (!cached) return;
     const { labels, counts, tokens } = sliceRange(cached, range);
 
     const sTok = sig(range, labels, tokens);
     const sReq = sig(range, labels, counts);
-    if (animate || sTok !== seen.tokens) {
+    if (sTok !== seen.tokens) {
       seen.tokens = sTok;
-      renderChart(tokensEl, labels, tokens, "", animate);
+      renderChart(tokensEl, labels, tokens, "");
     }
-    if (animate || sReq !== seen.req) {
+    if (sReq !== seen.req) {
       seen.req = sReq;
-      renderChart(reqEl, labels, counts, "", animate);
+      renderChart(reqEl, labels, counts, "");
     }
     firstPaint = false;
 
@@ -233,8 +232,8 @@ export async function initCharts() {
   }
 
   function paintEmpty() {
-    renderChart(tokensEl, [], [], "", true);
-    renderChart(reqEl, [], [], "", true);
+    renderChart(tokensEl, [], [], "");
+    renderChart(reqEl, [], [], "");
     setBadge("tokensBadge", "unavailable");
     setBadge("requestsBadge", "unavailable");
     firstPaint = false;
@@ -255,7 +254,7 @@ export async function initCharts() {
       return;
     }
     cached = data;
-    paint(firstPaint);
+    paint();
   }
 
   document.querySelectorAll("[data-chart-range]").forEach((box) => {
@@ -266,7 +265,7 @@ export async function initCharts() {
       document.querySelectorAll("[data-chart-range] button").forEach((b) => {
         b.classList.toggle("active", b.dataset.range === range);
       });
-      paint(true);
+      paint();
     });
   });
 

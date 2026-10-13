@@ -4,19 +4,19 @@
  */
 "use strict";
 
-import { initModal } from "./ui.js?v=9";
-import { initNavigation } from "./navigation.js?v=11";
+import { initModal, paintSkeletons } from "./ui.js?v=10";
+import { initNavigation } from "./navigation.js?v=12";
 import { startEvents } from "./events.js?v=4";
-import { initWorkspace } from "./workspace.js?v=15";
-import { initDashboard } from "./dashboard.js?v=10";
-import { initCharts } from "./charts.js?v=12";
-import { initChat } from "./chat.js?v=84";
+import { initWorkspace } from "./workspace.js?v=16";
+import { initDashboard } from "./dashboard.js?v=11";
+import { initCharts } from "./charts.js?v=13";
+import { initChat } from "./chat.js?v=85";
 import { initSchedule } from "./schedule.js?v=24";
 import { initPlugins } from "./plugins.js?v=8";
 import { initSkills } from "./skills.js?v=9";
-import { initGateway } from "./gateway.js?v=28";
-import { initAiModels } from "./ai_models.js?v=3";
-import { initSettings } from "./settings.js?v=9";
+import { initGateway } from "./gateway.js?v=29";
+import { initAiModels } from "./ai_models.js?v=5";
+import { initSettings } from "./settings.js?v=10";
 
 // Keeps .app pinned to the real visible area when the mobile keyboard
 // opens. iOS doesn't shrink window.innerHeight and 100dvh differs per
@@ -73,6 +73,10 @@ function initKeyboardViewport() {
 
 function init() {
   initModal();
+  // Skeletons first: templates (with shimmer) exist before the first
+  // navigate(), so the entrance animation plays on them exactly once —
+  // every module then swaps real data in with no re-animation.
+  paintSkeletons();
   initKeyboardViewport();
   initNavigation();
   startEvents();

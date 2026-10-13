@@ -30,6 +30,10 @@ async function fetchJson(url) {
 }
 
 function populateStats(dash, cost, models, balance) {
+  // Data landed: settle the skeleton shimmer on the stat cards (once).
+  try {
+    document.querySelectorAll(".stat.skel").forEach((c) => c.classList.remove("skel"));
+  } catch (_) {}
   // Measured totals from /api/cost (usage_log). No per-message estimates.
   const totals = cost?.totals && typeof cost.totals === "object" ? cost.totals : null;
   const totalRequests = totals && isFinite(Number(totals.requests)) ? Number(totals.requests) : 0;
@@ -123,5 +127,7 @@ export async function refreshDashboard() {
     fetchJson("/api/models"),
     fetchJson("/api/balance"),
   ]);
-  if (dash || cost || models || balance) populateStats(dash, cost, models, balance);
+  // Always settle (even on partial failure): honest empty states replace the
+  // skeleton shimmer instead of leaving it spinning forever.
+  populateStats(dash, cost, models, balance);
 }
