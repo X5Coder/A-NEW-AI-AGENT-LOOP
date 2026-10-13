@@ -1,11 +1,13 @@
 """The `x5agent` command (installed on PATH via pip install -e .).
 
-Starts the console directly: no update check, no prompts, no install steps.
+Persistent serve (survives SSH close): no update check, no prompts.
 Public link on by default (like install --run); pass --no-public for local only.
 Restart semantics: the console port is always freed first (ANY stale holder
 is stopped graceful-then-forced, suspended ones resumed first), so exactly
-one server ends up running.
-Usage from anywhere:  x5agent [--no-public] [--port 7777]
+one server ends up running on the same port. The server is launched detached
+(new session + log file), so closing the terminal/SSH never stops it.
+Stop everything with:  x5agent --off
+Usage from anywhere:  x5agent [--no-public] [--port 7777] [--foreground]
 """
 from __future__ import annotations
 
@@ -149,9 +151,7 @@ def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
             return False
 
     if _plat.system() == "Windows":
-        print("  automatic restart needs Linux/Mac - "
-              "stop the old server manually and re-run")
-        return False
+        return _stop_server_windows(port, wait_sec)
     if _free():
         return True
     if (_sh.which("ss") is None and _sh.which("lsof") is None
@@ -189,8 +189,103 @@ def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
     return False
 
 
+def _stop_server_windows(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
+    """Windows fallback: find LISTEN holders via netstat, taskkill them."""
+    import subprocess as _sp
+    import time as _time
+
+    def _free() -> bool:
+        try:
+            return not _port_answers(port)
+        except Exception:
+            return False
+
+    if _free():
+        return True
+    try:
+        proc = _sp.run(["netstat", "-ano"], capture_output=True,
+                       text=True, timeout=15)
+        pids: list = []
+        for line in (proc.stdout or "").splitlines():
+            if "LISTENING" not in line or f":{port}" not in line:
+                continue
+            tail = line.strip().split()[-1]
+            try:
+                pid = int(tail)
+            except Exception:
+                continue
+            if pid > 1 and pid != os.getpid() and pid not in pids:
+                pids.append(pid)
+        for pid in pids:
+            print(f"  freeing port {port} (pid {pid}) ...")
+            try:
+                _sp.run(["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True, timeout=15)
+            except Exception:
+                pass
+        deadline = _time.time() + wait_sec
+        while _time.time() < deadline:
+            if _free():
+                print("  port is free - exactly one server will run now")
+                return True
+            _time.sleep(1)
+    except Exception:
+        pass
+    print(f"  port {port} is still busy - free it manually and re-run")
+    return False
+
+
+def _console_log_path() -> Path:
+    """Runtime log file (Data per Rule 69), fallback to project dir."""
+    try:
+        from core.paths import data_root, ensure_x5agent
+        ensure_x5agent()
+        log = data_root() / "logs" / "console.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        return log
+    except Exception:
+        return PROJECT_ROOT / "console.log"
+
+
+def launch_detached(port: int = DEFAULT_PORT, public: bool = True):
+    """Start the console detached (survives SSH/terminal close).
+
+    New session + stdio redirected to the log file, so SIGHUP or a closed
+    pipe can never kill it. Returns (pid, log_path). Never raises.
+    """
+    import subprocess as _sp
+    import time as _time
+
+    log_path = _console_log_path()
+    cmd = [sys.executable, "-m", "web.server.server",
+           "--host", "127.0.0.1", "--port", str(int(port))]
+    if public:
+        cmd.append("--public")
+    try:
+        log_fh = open(str(log_path), "a", encoding="utf-8")
+    except Exception:
+        log_path = PROJECT_ROOT / "console.log"
+        log_fh = open(str(log_path), "a", encoding="utf-8")
+    try:
+        proc = _sp.Popen(cmd, cwd=str(PROJECT_ROOT),
+                         stdin=_sp.DEVNULL, stdout=log_fh, stderr=_sp.STDOUT,
+                         start_new_session=True, close_fds=True)
+        pid = proc.pid
+    finally:
+        try:
+            log_fh.close()
+        except Exception:
+            pass
+    deadline = _time.time() + 30
+    while _time.time() < deadline:
+        if _port_answers(port):
+            break
+        _time.sleep(1)
+    return pid, log_path
+
+
 def main(argv=None) -> int:
-    """Serve now on loopback, restarting a running server first."""
+    """Serve persistently on loopback, restarting a running server first."""
     import argparse
 
     p = argparse.ArgumentParser(
@@ -202,7 +297,21 @@ def main(argv=None) -> int:
                    help="Local console only (skip the funnel)")
     p.add_argument("--port", type=int, default=DEFAULT_PORT,
                    help="Port to bind (default 7777)")
+    p.add_argument("--off", "--stop", dest="off", action="store_true",
+                   help="Stop all project servers on the port, then exit")
+    p.add_argument("--foreground", action="store_true",
+                   help="Run in the foreground (debug/systemd); default is detached")
     args = p.parse_args(argv)
+    if not isinstance(args.port, int) or not (1 <= args.port <= 65535):
+        print(f"[ERROR] Invalid port: {args.port}", file=sys.stderr)
+        return 1
+    if args.off:
+        print(f"  stopping every server on port {args.port} ...")
+        if _stop_server(args.port):
+            print("  stopped - no project server is running now")
+            return 0
+        print("  stop failed (see above).", file=sys.stderr)
+        return 1
     os.chdir(PROJECT_ROOT)
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
@@ -211,13 +320,45 @@ def main(argv=None) -> int:
         if not _stop_server(args.port):
             print("  start aborted (see above).", file=sys.stderr)
             return 1
-    from web.server.server import run
+    public = bool(args.public or not args.no_public)
+    if args.foreground:
+        from web.server.server import run
 
-    # Loopback only: remote access goes through the Tailscale funnel
-    # (which proxies to 127.0.0.1 and always requires the owner login),
-    # never a public bind. Public link on unless explicitly disabled.
-    return run(host="127.0.0.1", port=args.port,
-               public=(args.public or not args.no_public))
+        # Loopback only: remote access goes through the Tailscale funnel
+        # (which proxies to 127.0.0.1 and always requires the owner login),
+        # never a public bind. Foreground ties the server to this terminal
+        # (closing SSH stops it) - for persistent runs omit the flag.
+        return run(host="127.0.0.1", port=args.port, public=public)
+    # Persistent (default): detached child survives SSH/terminal close.
+    # Re-running this same command kills the old server above and starts
+    # a fresh one on the same port.
+    pid, log_path = launch_detached(port=args.port, public=public)
+    if _port_answers(args.port):
+        print(f"  console running persistently at http://127.0.0.1:{args.port}/ "
+              f"(pid {pid}, log {log_path})")
+        print("  safe to close this terminal/SSH now - re-run `x5agent` to "
+              "restart, `x5agent --off` to stop")
+        return 0
+    print(f"  start failed - see log: {log_path}", file=sys.stderr)
+    return 1
+
+
+def off(argv=None) -> int:
+    """`x5agent-off` alias: stop all project servers on the port."""
+    import argparse
+
+    p = argparse.ArgumentParser(
+        prog="x5agent-off",
+        description="Stop all X5Agent console servers on the port")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT,
+                   help="Port to free (default 7777)")
+    args = p.parse_args(argv)
+    print(f"  stopping every server on port {args.port} ...")
+    if _stop_server(args.port):
+        print("  stopped - no project server is running now")
+        return 0
+    print("  stop failed (see above).", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

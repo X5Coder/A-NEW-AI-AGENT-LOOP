@@ -37,10 +37,12 @@ curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bas
 What the one-liner does: clones (or fast-forward updates) the repo into
 `~/X5Agent`, auto-installs dependencies (`pip install -e .` inside
 `install.py` when missing), runs the full installer (env + browser doctor +
-owner once + firewall), then starts the console on `127.0.0.1:7777`
-(localhost only — remote access goes through the Tailscale Funnel public
-link, which always requires the owner login first).
-Re-running it only updates the source (`git pull --ff-only`, data untouched).
+owner once + firewall), then starts the console **persistently** on
+`127.0.0.1:7777` (detached — safe to close SSH; localhost only, remote
+access goes through the Tailscale Funnel public link, which always requires
+the owner login first).
+Re-running it updates the source (`git pull --ff-only`, data untouched),
+kills the old server and starts a fresh one on the same port.
 
 **Manual (Linux / Mac)**
 
@@ -60,15 +62,19 @@ Without `--run` it only installs; then start manually with `x5agent`.
 **Start directly (from anywhere, no update check)**
 
 ```bash
-x5agent              # serve now on 127.0.0.1:7777 (localhost only)
+x5agent              # persistent serve on 127.0.0.1:7777 (survives SSH close)
 x5agent --public     # also enable the Tailscale Funnel public link (login required)
+x5agent --off        # stop all project servers on the port
 ```
 
 The `x5agent` command is installed on PATH by `pip install -e .`
-(the installer adds it automatically when missing). Restart semantics:
-the console port is always freed first — ANY stale holder on it is stopped
-(graceful SIGINT, then forced SIGKILL; suspended ones resumed first) before
-the fresh server binds, so exactly one server ends up running.
+(the installer adds it automatically when missing). It always runs
+**detached** (new session + log in `X5Agent/Data/logs/console.log`), so
+closing the terminal/SSH never stops it. Restart semantics: the console
+port is always freed first — ANY stale holder on it is stopped (graceful
+SIGINT, then forced SIGKILL; suspended ones resumed first) before the fresh
+server binds, so exactly one server ends up running. `x5agent --off`
+stops every project server on the port (`x5agent-off` alias does the same).
 
 **Windows**
 

@@ -18,8 +18,9 @@ Flow (exactly, nothing else):
   9. public link via Tailscale Funnel (install check -> login URL
      shown + opened -> funnel on -> permanent public URL printed)
   10. opens the console in the browser + prints local and public URLs
-  11. with --run: replaces itself with the console server
-     (same as `python -m web.server.server`) so install+start is one command.
+   11. with --run: starts the console detached (persistent, survives SSH
+      close; same server as `python -m web.server.server`) so install+start
+      is one command. `--foreground` keeps the old blocking behavior.
 
 Run from the project/ directory:  python install.py --run
 Start the console only after:     python -m web.server.server
@@ -85,7 +86,11 @@ def parse_args(argv=None):
     p.add_argument("--run", action="store_true",
                    help="Install + start in one step: no prompts, the public "
                         "link is attempted automatically unless --no-public, "
-                        "then the console server takes over on 0.0.0.0:7777")
+                        "then the console server starts detached on 7777 "
+                        "(persistent: survives SSH close)")
+    p.add_argument("--foreground", action="store_true",
+                   help="With --run: keep the server in the foreground "
+                        "(closing SSH stops it). Default is detached.")
     return p.parse_args(argv)
 
 
@@ -809,13 +814,32 @@ def main(argv=None) -> int:
             if not ok:
                 print("  start aborted (see above).", file=sys.stderr)
                 return 1
-        print("\n[install] starting console now (--run)...")
-        cmd = [sys.executable, "-m", "web.server.server",
-               "--host", "127.0.0.1", "--port", "7777"]
-        if public_mode:
-            cmd.append("--public")
+        if args.foreground:
+            print("\n[install] starting console now (--run --foreground)...")
+            cmd = [sys.executable, "-m", "web.server.server",
+                   "--host", "127.0.0.1", "--port", "7777"]
+            if public_mode:
+                cmd.append("--public")
+            os.chdir(str(PROJECT_ROOT))
+            os.execv(sys.executable, cmd)
+        print("\n[install] starting console now (persistent, detached) ...")
+        try:
+            from scripts.cli import launch_detached as _launch, _port_answers as _probe2
+        except Exception:
+            _launch, _probe2 = None, None
+        if _launch is None:
+            print("  ERROR: persistent launcher unavailable", file=sys.stderr)
+            return 1
         os.chdir(str(PROJECT_ROOT))
-        os.execv(sys.executable, cmd)
+        pid, log_path = _launch(CONSOLE_PORT, bool(public_mode))
+        if _probe2 is not None and _probe2(CONSOLE_PORT):
+            print(f"  console running persistently at {UI_URL} "
+                  f"(pid {pid}, log {log_path})")
+            print("  safe to close this terminal/SSH now - re-run the same "
+                  "one-liner to restart, `x5agent --off` to stop")
+            return 0
+        print(f"  start failed - see log: {log_path}", file=sys.stderr)
+        return 1
     return 0
 
 

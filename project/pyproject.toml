@@ -32,6 +32,7 @@ include = ["core*", "scripts*"]
 
 [project.scripts]
 x5agent = "scripts.cli:main"
+x5agent-off = "scripts.cli:off"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

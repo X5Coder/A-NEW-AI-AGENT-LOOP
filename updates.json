@@ -1,6 +1,6 @@
 {
-  "version": "0.28.0",
-  "description": "The Balance card now shows real measured spend: every model request captures its own price at call time and the card sums those per-request captures instead of re-pricing aggregates. The boot splash only appears when loading actually takes a moment, so a quick boot never flashes black at all.",
+  "version": "0.29.0",
+  "description": "Console startup is now persistent: the setup one-liner and the x5agent command both start the server detached, so closing SSH or the terminal never stops it, and re-running the same command kills the old server and starts a fresh one on the same port. x5agent --off stops every project server on the port.",
   "features": [
     "Typing @ mid-word in Arabic opens the file picker; emails like mail@x never trigger it.",
     "@file and /skill boundaries match between editor paint and server injection, including Arabic adjacency.",
@@ -40,6 +40,9 @@
     "Page entrance replays on reveal, and a 15s watchdog guarantees the splash can never trap the screen when the backend is unreachable.",
     "Balance card shows measured lifetime spend (per-request captured prices summed), e.g. $0.55 measured spend · 174 requests, instead of the empty connect-a-model state.",
     "Daily cost charts use the same per-request sums, so charts and Balance always agree; older rows without a capture are priced from the cached table.",
-    "Boot splash never flashes on fast loads: it only appears when loading takes longer than a moment, otherwise the screen goes straight to data.", "Boot reveal is a single animation: page content stays hidden until all data lands, then appears exactly once with its entrance - no multi-jump refresh.", "Balance pricing also matches short custom model names to provider rates (gpt-4o-mini finds openai/gpt-4o-mini), so more requests measure a real dollar cost."
+    "Boot splash never flashes on fast loads: it only appears when loading takes longer than a moment, otherwise the screen goes straight to data.", "Boot reveal is a single animation: page content stays hidden until all data lands, then appears exactly once with its entrance - no multi-jump refresh.", "Balance pricing also matches short custom model names to provider rates (gpt-4o-mini finds openai/gpt-4o-mini), so more requests measure a real dollar cost.",
+    "The setup one-liner and x5agent now start the console detached: safe to close SSH, same command restarts (old server killed, new one on 7777).",
+    "x5agent --off (alias x5agent-off) stops every project server on the port.",
+    "Server log lives in X5Agent/Data/logs/console.log for persistent runs."
   ]
 }
