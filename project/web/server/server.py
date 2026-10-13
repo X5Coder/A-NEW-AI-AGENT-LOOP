@@ -108,10 +108,9 @@ mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/html", ".html")
 
 
-# Console version shown at the end of the sidebar (single source of truth,
-# keep in sync with pyproject.toml and updates.json at the repo root).
-APP_VERSION = "0.26.1"
-
+# Console version shown at the end of the sidebar (single source of truth:
+# updates.json at the repo root - read once at import so it can never
+# desync from the file again; falls back to the last known value).
 UPDATE_REPO = "X5Coder/X5Agent"
 
 # Source-only update job state (in-memory, one at a time, bounded lines).
@@ -228,6 +227,20 @@ def _is_newer_version(remote: str, local: str) -> bool:
         return r > l
     except Exception:
         return str(remote) != str(local)
+
+
+def _app_version_from_file() -> str:
+    """Console version from updates.json (repo root). Never raises."""
+    try:
+        parsed, err = _read_updates_file(_updates_local_path())
+        if parsed is not None:
+            return parsed[0]
+    except Exception:
+        pass
+    return "0.28.0"
+
+
+APP_VERSION = _app_version_from_file()
 
 
 def _local_version_info():

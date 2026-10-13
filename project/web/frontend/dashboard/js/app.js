@@ -16,7 +16,7 @@ import { initPlugins } from "./plugins.js?v=9";
 import { initSkills } from "./skills.js?v=10";
 import { initGateway } from "./gateway.js?v=30";
 import { initAiModels } from "./ai_models.js?v=6";
-import { initSettings } from "./settings.js?v=11";
+import { initSettings } from "./settings.js?v=12";
 
 // Keeps .app pinned to the real visible area when the mobile keyboard
 // opens. iOS doesn't shrink window.innerHeight and 100dvh differs per

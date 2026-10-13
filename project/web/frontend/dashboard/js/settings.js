@@ -196,15 +196,6 @@ async function _refreshChatCount() {
 }
 
 export function initSettings() {
-  // Returned for the app.js boot barrier (black splash waits on both).
-  return Promise.allSettled([
-    fetch("/api/dashboard").then((r) => r.json()).then((d) => {
-      const el = document.getElementById("projVersion");
-      if (el && d && d.version) el.textContent = "v" + d.version;
-    }).catch(() => {}),
-    _refreshChatCount(),
-  ]);
-
   document.getElementById("checkUpdateBtn")?.addEventListener("click", (e) => {
     _onCheckUpdates(e.currentTarget);
   });
@@ -307,4 +298,15 @@ export function initSettings() {
       });
     });
   });
+
+  // Returned for the app.js boot barrier (black splash waits on both).
+  // NOTE: keep this return LAST - everything above wires buttons, and an
+  // earlier return would leave them dead (unreachable code).
+  return Promise.allSettled([
+    fetch("/api/dashboard").then((r) => r.json()).then((d) => {
+      const el = document.getElementById("projVersion");
+      if (el && d && d.version) el.textContent = "v" + d.version;
+    }).catch(() => {}),
+    _refreshChatCount(),
+  ]);
 }
