@@ -1535,11 +1535,18 @@
   box-shadow: none;
 }
 .send-btn:disabled {
-  opacity: 0.4;
+  opacity: 1;
   cursor: not-allowed;
   transform: none;
   background: var(--fill-tsp-white-dark);
-  color: var(--text-disable);
+  color: var(--text-tertiary);
+  box-shadow: none;
+}
+.send-btn:disabled:hover,
+.send-btn:disabled:active {
+  opacity: 1;
+  transform: none;
+  box-shadow: none;
 }
 .send-btn.stop {
   background: var(--Button-black);

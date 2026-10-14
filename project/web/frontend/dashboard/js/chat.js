@@ -5080,6 +5080,24 @@ function isChatLive() {
   return false;
 }
 
+function clearChoiceOnType() {
+  // Typing a sentence while an ask choice is selected clears the selection
+  // (the typed text wins). The pre-selection stash is dropped — the typed
+  // sentence is the answer now. Programmatic composer writes never fire
+  // "input", so select/deselect never re-trigger this. Never throws.
+  try {
+    if (!pendingQuestion || pendingQuestion.kind !== "ask") return;
+    if (pendingQuestion.selected == null) return;
+    if (!document.getElementById("questionCard")) return;
+    pendingQuestion.selected = null;
+    pendingQuestion.typedCache = null;
+    document.querySelectorAll("#questionCard .q-chip.selected").forEach((x) => {
+      x.classList.remove("selected");
+      x.setAttribute("aria-pressed", "false");
+    });
+  } catch (_) {}
+}
+
 function showQuestionCardUnlessStopped(q) {
   if (!isChatLive()) {
     try { clearPendingStored(); } catch (_) {}
@@ -5090,7 +5108,7 @@ function showQuestionCardUnlessStopped(q) {
 
 function showQuestionCard(q) {
   hideQuestionCard();
-  pendingQuestion = { id: q.id, kind: q.kind || "ask", selected: null };
+  pendingQuestion = { id: q.id, kind: q.kind || "ask", selected: null, typedCache: null };
   const wrap = document.querySelector(".composer-wrap");
   if (!wrap) return;
   // The strip belongs to the writing template: same container, and it
@@ -5159,12 +5177,42 @@ function showQuestionCard(q) {
       b.appendChild(label);
       b.setAttribute("aria-pressed", "false");
       b.addEventListener("click", () => {
-        if (pendingQuestion) pendingQuestion.selected = String(c);
-        box.querySelectorAll(".q-chip").forEach((x) => {
-          const on = x === b;
-          x.classList.toggle("selected", on);
-          x.setAttribute("aria-pressed", on ? "true" : "false");
-        });
+        if (!pendingQuestion) return;
+        // Toggle: first tap selects (stashing any typed text, composer
+        // cleared); second tap on the SAME choice deselects and restores
+        // the stashed text. Switching to another choice keeps the stash.
+        // Same behavior for every choice label (including صح / غلط).
+        if (b.classList.contains("selected")) {
+          pendingQuestion.selected = null;
+          box.querySelectorAll(".q-chip").forEach((x) => {
+            x.classList.remove("selected");
+            x.setAttribute("aria-pressed", "false");
+          });
+          try {
+            composerInput.value = typeof pendingQuestion.typedCache === "string"
+              ? pendingQuestion.typedCache : "";
+            pendingQuestion.typedCache = null;
+            autoResize();
+            updateSendEnabled();
+          } catch (_) {}
+        } else {
+          try {
+            if (pendingQuestion.selected == null) {
+              pendingQuestion.typedCache = composerInput.value || "";
+            }
+          } catch (_) {}
+          pendingQuestion.selected = String(c);
+          box.querySelectorAll(".q-chip").forEach((x) => {
+            const on = x === b;
+            x.classList.toggle("selected", on);
+            x.setAttribute("aria-pressed", on ? "true" : "false");
+          });
+          try {
+            composerInput.value = "";
+            autoResize();
+            updateSendEnabled();
+          } catch (_) {}
+        }
         try {
           composerInput.focus();
         } catch (_) {}
@@ -8015,6 +8063,7 @@ export async function initChat() {
     handleSend();
   });
   composerInput.addEventListener("input", autoResize);
+  composerInput.addEventListener("input", clearChoiceOnType);
   composerInput.addEventListener("input", updateSendEnabled);
   composerInput.addEventListener("input", checkMention);
   composerInput.addEventListener("input", updateEditSendState);
