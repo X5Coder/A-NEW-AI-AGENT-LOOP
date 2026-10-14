@@ -1931,10 +1931,19 @@ function renderHistoryMessages(msgs) {
       });
     } catch (_) {}
     const keep = [];
+    const histStopped = valid.length > 0 && isStoppedMarker(valid[valid.length - 1]);
     chatInner.querySelectorAll(".msg").forEach((m) => {
       try {
         if (m.dataset.stopped === "1") {
-          m.remove();
+          // Persist not done yet: keep the live frozen Working so history
+          // reload cannot erase the steps. Once the stopped marker lands,
+          // the persisted copy owns the view.
+          if (!histStopped) {
+            keep.push(m);
+            m.remove();
+          } else {
+            m.remove();
+          }
         } else if (m.id === "thinkingMsg" || !m.dataset.mid) {
           keep.push(m);
           m.remove();
@@ -2262,6 +2271,13 @@ async function sendStream(value, attachments, thinking, skipHistoryIds, isResume
     if (err && (err.aborted || err.name === "AbortError" || wasCancelled)) {
       throw { aborted: true };
     }
+    return false;
+  }
+  if (res && res.status === 409) {
+    let body409 = {};
+    try { body409 = await res.json(); } catch (_) { body409 = {}; }
+    activeRun = null;
+    if (body409 && body409.retry) throw { retry: true };
     return false;
   }
   if (!res || !res.ok || !res.body) {
@@ -2876,9 +2892,16 @@ async function handleContinue() {
   // path is a brand-new request via handleSend). Never throws outward.
   try {
     let stoppedId = readStoppedUserId();
-    if (stoppedId === "1") stoppedId = await resolveStoppedUserId();
-    if (!stoppedId || activeRun) {
-      if (!stoppedId && !activeRun) toast("Stopped task expired — send as a new message");
+    if (!stoppedId || stoppedId === "1") {
+      const t0 = Date.now();
+      while (Date.now() - t0 < 8000) {
+        stoppedId = await resolveStoppedUserId();
+        if (stoppedId && stoppedId !== "1") break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    if (!stoppedId || stoppedId === "1" || activeRun) {
+      if ((!stoppedId || stoppedId === "1") && !activeRun) toast("Stopped task expired — send as a new message");
       return;
     }
     if (editingTarget || pendingQuestion) return;
@@ -2983,11 +3006,19 @@ async function executeAgentTurn(value, attachments, opts) {
   const isResume = !!(opts && opts.resume);
   try {
     let handled = false;
-    try {
-      handled = await sendStream(value, attachments, thinking, skipIds, isResume);
-    } catch (e) {
-      if (e && e.aborted) return;
-      handled = false;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        handled = await sendStream(value, attachments, thinking, skipIds, isResume);
+        break;
+      } catch (e) {
+        if (e && e.aborted) return;
+        if (e && e.retry && attempt < 3) {
+          try { await new Promise((r) => setTimeout(r, 750 * (attempt + 1))); } catch (_) {}
+          continue;
+        }
+        handled = false;
+        break;
+      }
     }
     if (!handled) await sendBlocking(value, attachments, thinking, skipIds, isResume);
   } finally {
@@ -6867,13 +6898,20 @@ function onChatPush(data) {
       }
       return;
     }
-    if (data && !data.active && activeThinking && !activeRun) {
+    if (data && !data.active && !activeRun) {
+      // STOP / died run: freeze Working in place. Never delete it — that
+      // was the wipe-then-Continue-from-scratch bug.
+      const thinkingEl = document.getElementById("thinkingMsg");
+      if (thinkingEl && thinkingEl.dataset.stopped !== "1") {
+        try { settleThinkingStopped(thinkingEl); } catch (_) {}
+        try {
+          const _mid = (typeof lastUserEl !== "undefined" && lastUserEl && lastUserEl.dataset && lastUserEl.dataset.mid) || "";
+          setStoppedTask(_mid || readStoppedUserId() || "1");
+        } catch (_) {}
+      }
       activeThinking = null;
       setSending(false);
-      try {
-        document.getElementById("thinkingMsg")?.remove();
-      } catch (_) {}
-      toast("Run stopped — send again");
+      catchupResume = false;
     }
   } catch (_) {}
 }
@@ -7722,12 +7760,14 @@ async function stopGeneration() {
       } catch (_) {}
       activeRun = null;
     }
+    // Freeze BEFORE cancel so the inactive chat push cannot delete Working.
+    try {
+      const thinkingEl = document.getElementById("thinkingMsg");
+      if (thinkingEl) settleThinkingStopped(thinkingEl);
+    } catch (_) {}
     await postCancel();
   } catch (_) {}
   catchupResume = false;
-  // STOP mid-task: freeze the Working block in place (stops animating,
-  // shows elapsed seconds, stays expandable) with a --- Stopped ---
-  // divider below it — never delete it.
   try {
     const thinkingEl = document.getElementById("thinkingMsg");
     if (thinkingEl) settleThinkingStopped(thinkingEl);

@@ -82,3 +82,36 @@ def test_is_cancelled_never_raises():
     ev.set()
     assert _is_cancelled(ev) is True
     assert _is_cancelled(object()) is False
+
+
+def test_clip_resume_units_bounds_and_skips_junk():
+    from core.agent.loop.engine import _clip_resume_units
+
+    units = [
+        [{"role": "assistant", "content": "x", "tool_calls": [{"id": "c1"}]}],
+        [{"role": "tool", "tool_call_id": "c1", "content": "y" * 5000}],
+        "nope",
+        [{"role": "user", "content": "ignore"}],
+    ]
+    out = _clip_resume_units(units)
+    assert len(out) == 2
+    assert out[0][0]["role"] == "assistant"
+    assert out[1][0]["role"] == "tool"
+    assert out[1][0]["content"].endswith("truncated")
+    assert _clip_resume_units(None) == []
+    assert _clip_resume_units("bad") == []  # type: ignore[arg-type]
+
+
+def test_units_from_steps_tells_model_not_to_repeat():
+    from core.agent.loop.engine import _units_from_steps
+
+    units = _units_from_steps([
+        {"event": "Terminal Command", "reason": "Render charts"},
+        {"event": "Writing · make_charts.py"},
+    ])
+    assert len(units) == 1
+    text = units[0][0]["content"]
+    assert "do not repeat" in text
+    assert "Terminal Command" in text
+    assert _units_from_steps([]) == []
+    assert _units_from_steps(None) == []

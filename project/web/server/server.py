@@ -4757,6 +4757,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._cleanup_paths(saved_paths)
                 self._send_json({"error": NO_MODEL_ERROR, "needs_model": True, "needs_kind": "text"}, status=503)
                 return
+            try:
+                if _chat_thread_busy():
+                    with _RUN_LOCK:
+                        stopping = bool(_ACTIVE_RUN.get("cancelled"))
+                    if stopping:
+                        self._cleanup_paths(saved_paths)
+                        self._send_json({"error": "still stopping, retry", "retry": True}, status=409)
+                        return
+            except Exception:
+                pass
 
             # Run the REAL agent loop (tools, memory, vision) — no direct-LLM shortcut.
             # The loop persists the conversation, syncs embeddings, and clears temp images.
@@ -4846,6 +4856,17 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._cleanup_paths(saved_paths)
                 self._send_json({"error": "another run is active, try again shortly"}, status=409)
                 return
+
+        try:
+            if _chat_thread_busy():
+                with _RUN_LOCK:
+                    stopping = bool(_ACTIVE_RUN.get("cancelled"))
+                if stopping:
+                    self._cleanup_paths(saved_paths)
+                    self._send_json({"error": "still stopping, retry", "retry": True}, status=409)
+                    return
+        except Exception:
+            pass
 
         try:
             self.send_response(200)

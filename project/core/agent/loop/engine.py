@@ -838,7 +838,7 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
                            images: list | None = None, elapsed: int | None = None,
                            audios: list | None = None, session_key: str | None = None,
                            reuse_user_id: str | None = None, files: list | None = None,
-                           stopped: bool = False):
+                           stopped: bool = False, resume_units: list | None = None):
     import uuid
     if isinstance(session_key, str) and session_key.strip():
         # Branch session (one per scheduled job / trigger): NEVER touches the
@@ -874,6 +874,8 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
                 # never the note text). The note itself stays in content so
                 # the model keeps the full context.
                 extra["stopped"] = True
+                if isinstance(resume_units, list) and resume_units:
+                    extra["resume_units"] = resume_units
             # Edit/regenerate resend: the edited user bubble already persists
             # (server updated it in place) — append ONLY the assistant reply,
             # same contract as the main chat (fixes the duplicated-message bug).
@@ -919,6 +921,7 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
             try:
                 if data and isinstance(data[-1], dict) and data[-1].get("role") == "assistant" and data[-1].get("stopped") is True:
                     data[-1].pop("stopped", None)
+                    data[-1].pop("resume_units", None)
                     data[-1]["resumed"] = True
             except Exception:
                 pass
@@ -935,6 +938,8 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
                         _last["steps"] = steps[:12]
                     if isinstance(elapsed, int) and elapsed >= 0:
                         _last["elapsed"] = elapsed
+                    if isinstance(resume_units, list) and resume_units:
+                        _last["resume_units"] = resume_units
                     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
                     return uid, str(_last["id"])[:16]
             except Exception:
@@ -956,6 +961,8 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
         assistant_msg["files"] = files[:4]
     if stopped:
         assistant_msg["stopped"] = True
+        if isinstance(resume_units, list) and resume_units:
+            assistant_msg["resume_units"] = resume_units
     data.append(assistant_msg)
     if len(data) > 1000:
         removed = data[:-1000]
@@ -985,6 +992,123 @@ def _persist_conversation(user_input: str, assistant_output: str, steps: list | 
 
 
 _UNIT_LIMIT = 30
+_RESUME_CONTENT_MAX = 4000
+
+
+def _clip_resume_units(units: list | None) -> list:
+    """Bound loop units stored on a STOP marker for Continue. Never raises."""
+    out: list = []
+    try:
+        for unit in (units or [])[-_UNIT_LIMIT:]:
+            if not isinstance(unit, list):
+                continue
+            clipped: list = []
+            for m in unit:
+                if not isinstance(m, dict):
+                    continue
+                role = m.get("role")
+                if role not in ("assistant", "tool"):
+                    continue
+                msg: dict = {"role": role}
+                if role == "assistant":
+                    if m.get("content"):
+                        msg["content"] = str(m.get("content"))[:_RESUME_CONTENT_MAX]
+                    if isinstance(m.get("tool_calls"), list) and m["tool_calls"]:
+                        msg["tool_calls"] = m["tool_calls"][:8]
+                else:
+                    msg["tool_call_id"] = str(m.get("tool_call_id") or "")[:64]
+                    c = str(m.get("content") or "")
+                    msg["content"] = c[:_RESUME_CONTENT_MAX] + ("\n... truncated" if len(c) > _RESUME_CONTENT_MAX else "")
+                clipped.append(msg)
+            if clipped:
+                out.append(clipped)
+    except Exception:
+        return []
+    return out
+
+
+def _units_from_steps(steps: list | None) -> list:
+    """Fallback Continue context from UI steps when resume_units is absent."""
+    lines: list[str] = []
+    try:
+        for s in (steps or [])[:40]:
+            if isinstance(s, dict):
+                ev = str(s.get("event") or "").strip()[:80]
+                rsn = str(s.get("reason") or "").strip()[:120]
+                if ev:
+                    lines.append(f"- {ev}" + (f" ({rsn})" if rsn else ""))
+            elif isinstance(s, str) and s.strip():
+                lines.append(f"- {s.strip()[:80]}")
+    except Exception:
+        lines = []
+    if not lines:
+        return []
+    text = ("Progress already completed this turn. Continue from here; "
+            "do not repeat these steps:\n" + "\n".join(lines))
+    return [[{"role": "assistant", "content": text[:_RESUME_CONTENT_MAX]}]]
+
+
+def _load_resume_units(reuse_user_id: str) -> list:
+    """Units saved on the stopped marker after this user id, or steps fallback."""
+    uid = (reuse_user_id or "").strip()[:16]
+    if not uid:
+        return []
+    try:
+        path = _resolve_conversation_path()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return []
+        for i, m in enumerate(data):
+            if not isinstance(m, dict) or m.get("role") != "user":
+                continue
+            if str(m.get("id") or "")[:16] != uid:
+                continue
+            nxt = data[i + 1] if i + 1 < len(data) else None
+            if not isinstance(nxt, dict) or nxt.get("role") != "assistant":
+                return []
+            stored = nxt.get("resume_units")
+            clipped = _clip_resume_units(stored) if isinstance(stored, list) else []
+            if clipped:
+                return clipped
+            return _units_from_steps(nxt.get("steps") or [])
+    except Exception:
+        return []
+    return []
+
+
+def _restore_dynamic_from_units(units: list, known_tool_names: set, dynamic_tools: list) -> None:
+    """Re-register tools discovered in a previous (stopped) turn. Never raises."""
+    try:
+        for unit in units or []:
+            if not isinstance(unit, list):
+                continue
+            for m in unit:
+                if not isinstance(m, dict) or m.get("role") != "tool":
+                    continue
+                try:
+                    payload = json.loads(m.get("content") or "")
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                found = (payload.get("output") or {}).get("results") if isinstance(payload.get("output"), dict) else None
+                if not isinstance(found, list):
+                    continue
+                for item in found:
+                    if not isinstance(item, dict):
+                        continue
+                    spec = item.get("spec") or {}
+                    tname = spec.get("name") or item.get("name")
+                    if not tname or tname in known_tool_names or len(dynamic_tools) >= MAX_DYNAMIC_TOOLS:
+                        continue
+                    dynamic_tools.append(openai_tool_from_spec(
+                        tname,
+                        spec.get("description") or item.get("description", ""),
+                        spec.get("inputs") or {},
+                    ))
+                    known_tool_names.add(tname)
+    except Exception:
+        pass
 
 
 def _outgoing_messages(seed: list, units: list, limit: int = _UNIT_LIMIT) -> list:
@@ -1146,6 +1270,11 @@ def run_loop(
     # `units`, and the provider only ever receives seed + last 30 units.
     seed = list(messages)
     units: list[list[dict]] = []
+    if resume_stopped:
+        try:
+            units = _load_resume_units(reuse_user_id or "")
+        except Exception:
+            units = []
     # Universal text model (AI Models section). No provider-specific code here:
     # the record carries everything the engine needs (see core/ai_models).
     try:
@@ -1209,6 +1338,8 @@ def run_loop(
     # Discovered tools become directly callable once tool_search returns their specs
     known_tool_names = {t.get("function", {}).get("name") for t in core_tools}
     dynamic_tools: list[dict] = []
+    if resume_stopped and units:
+        _restore_dynamic_from_units(units, known_tool_names, dynamic_tools)
     empty_strikes = 0
 
     for step in range(1, max_steps + 1):
@@ -1571,7 +1702,7 @@ def run_loop(
                 user_input, _STOPPED_NOTE, _persist_steps(tool_calls_log),
                 [], elapsed_sec, [],
                 session_key=session_key, reuse_user_id=reuse_user_id,
-                stopped=True)
+                stopped=True, resume_units=_clip_resume_units(units))
         except Exception:
             pass
     if not cancelled:
