@@ -746,12 +746,12 @@ def _progress_line(slide: dict, first: bool = False) -> str:
     title = slide["title"][:80]
     no = slide["slide_no"]
     if first and no == 1:
-        return f"خلصت سلايد رقم 1: {title}"
-    return f"خلصت سلايد رقم {no}: {title}"
+        return f"Slide 1 created: {title}"
+    return f"Slide {no} created: {title}"
 
 
 def _merge_line(count: int) -> str:
-    return f"تم تجميع {count} سلايدات في PDF"
+    return f"Merged {count} slides into PDF"
 
 
 def _extract_styles(html: str) -> list[str]:

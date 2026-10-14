@@ -106,6 +106,47 @@ let activeRun = null;
 // (STOP / fresh answer / newer message) exits quietly — no error text,
 // no blocking fallback, no state clobbering.
 let runGen = 0;
+// Refresh-mid-run guard: true from script load until resumeActiveRun settles.
+// hello/history renders must not wipe or duplicate the live run while set.
+let resumePending = true;
+let resumeSettled = false;
+// Full pending user text across refresh (preview from /api/chat_frames is
+// only 200 chars and prefix-matching it creates empty/duplicate bubbles).
+const PENDING_USER_KEY = "x5:pending-user";
+function storePendingUser(text) {
+  try {
+    const v = String(text || "").slice(0, 4000);
+    if (v.trim()) localStorage.setItem(PENDING_USER_KEY, v);
+  } catch (_) {}
+}
+function readPendingUser() {
+  try {
+    const v = localStorage.getItem(PENDING_USER_KEY);
+    return typeof v === "string" ? v.slice(0, 4000) : "";
+  } catch (_) { return ""; }
+}
+function clearPendingUser() {
+  try { localStorage.removeItem(PENDING_USER_KEY); } catch (_) {}
+}
+function enforceSingleLiveBlock(keepEl) {
+  // Protection: at most ONE live Working stays open. Any other live-looking
+  // block (a second #thinkingMsg, or a history block left open) is settled
+  // (wave stopped + collapsed) so refresh can never show two runnings.
+  // Never throws, never touches the kept live element.
+  try {
+    if (!chatInner) return;
+    chatInner.querySelectorAll(".msg.assistant").forEach((m) => {
+      try {
+        if (keepEl && (m === keepEl)) return;
+        if (m.id === "thinkingMsg" && m !== keepEl) m.removeAttribute("id");
+        const b = (m._block) || m.querySelector(":scope > .msg-content > .thinking-block, :scope > .thinking-block");
+        if (!b || b === (keepEl && keepEl._block)) return;
+        if (!b.classList.contains("done")) settleThinkingBlock(b);
+        b.classList.remove("open");
+      } catch (_) {}
+    });
+  } catch (_) {}
+}
 
 function scrollToBottom(smooth = true) {
   if (!chatScroll) return;
@@ -1326,11 +1367,12 @@ function ensureStepArrow(item) {
 
 function markStepRunning(item) {
   // The step was just requested: orange dot until it completes, then the
-  // dot alone turns green — no check mark anywhere.
+  // dot alone turns green — or red when the tool call failed. No check mark.
   try {
     if (!item) return;
     item._done = false;
     item.classList.remove("done");
+    item.classList.remove("fail");
     item.classList.add("running");
   } catch (_) {}
 }
@@ -1339,6 +1381,7 @@ function createStepItem(step) {
   const title = humanizeEvent(typeof step === "string" ? step : step?.event || step?.text || "") || "Step";
   const reason = stepReasonText(typeof step === "object" ? step : null);
   const output = typeof step === "object" && step && typeof step.output === "string" ? step.output.slice(0, 500) : "";
+  const failed = typeof step === "object" && !!step && step.failed === true;
   const media = typeof step === "object" && step ? step.media || null : null;
   const shot = typeof step === "object" && step
     ? (media && typeof media.shot === "string" && media.shot) || (typeof step.shot === "string" && step.shot) || ""
@@ -1404,13 +1447,14 @@ function createStepItem(step) {
     }
   });
 
-  completeStepItem(item, { output, shot });
+  completeStepItem(item, { output, shot, failed });
   return item;
 }
 
-function completeStepItem(item, { output = "", shot = "" } = {}) {
+function completeStepItem(item, { output = "", shot = "", failed = false } = {}) {
   // Fills a started step with its curated detail (under the reason) and/or
-  // image, then marks it done (green bullet). The detail is never raw tool
+  // image, then marks it done: green bullet on success, red on any tool
+  // failure (any method or input). The detail is never raw tool
   // output — the backend sends one short per-tool line only. Never throws.
   try {
     if (!item || !item._inner) return;
@@ -1445,7 +1489,7 @@ function completeStepItem(item, { output = "", shot = "" } = {}) {
     if (!item._done) {
       item._done = true;
       item.classList.remove("running");
-      item.classList.add("done");
+      item.classList.add(failed ? "fail" : "done");
     }
     // Late content (output/image at completion) earns the arrow then.
     ensureStepArrow(item);
@@ -1471,6 +1515,7 @@ function addThinking(text) {
   if (text) applyMsgDir(el, text, "ltr");
   chatInner.appendChild(el);
   scrollToBottom();
+  try { enforceSingleLiveBlock(el); } catch (_) {}
   return el;
 }
 
@@ -1896,8 +1941,11 @@ function prependHistoryMessages(msgs) {
 function onHelloChatLast50(msgs) {
   // hello section 1 (most important first): last-50 render immediately,
   // but never wipe an in-flight run — same keep-rules as loadHistory.
+  // resumePending covers the window BEFORE resumeActiveRun sets its flags
+  // (that was the refresh-duplicate race: hello rendered, then resume
+  // appended a second user bubble + second Working).
   try {
-    if (activeRun || activeThinking) return; // a run owns the UI right now
+    if (resumePending || activeRun || activeThinking || catchupResume) return; // a run owns the UI right now
     if (!Array.isArray(msgs) || !msgs.length) {
       // Emptied chat: no task exists — disarm Continue.
       try { clearStoppedTask(); } catch (_) {}
@@ -2431,6 +2479,7 @@ async function sendStream(value, attachments, thinking, skipHistoryIds, isResume
       completeStepItem(item, {
         output: typeof output === "string" ? output : "",
         shot: typeof shot === "string" ? shot : "",
+        failed: typeof step === "object" && !!step && step.failed === true,
       });
     }
     // Tool-phase text of this loop step moves inside the event.
@@ -2506,6 +2555,7 @@ async function sendStream(value, attachments, thinking, skipHistoryIds, isResume
             const _mid = (lastUserEl && lastUserEl.dataset && lastUserEl.dataset.mid) || "";
             setStoppedTask(_mid || readStoppedUserId() || "1");
           } catch (_) {}
+          try { clearPendingUser(); } catch (_) {}
           activeThinking = null;
           activeRun = null;
           turnResult = true;
@@ -2521,6 +2571,7 @@ async function sendStream(value, attachments, thinking, skipHistoryIds, isResume
           // The turn finished (including a continued task): no stopped task
           // remains, so the Continue pill goes away immediately.
           try { clearStoppedTask(); } catch (_) {}
+          try { clearPendingUser(); } catch (_) {}
           (async () => {
             try {
           // Push beat the stream: chat_done fired first and the history
@@ -2816,6 +2867,7 @@ async function handleSend() {
   try { stashBubbleRefs(lastUserEl, pending); } catch (_) {}
   try { paintBubbleMentions(lastUserEl); } catch (_) {}
   if (value) lastUserText = value;
+  try { storePendingUser(value); } catch (_) {}
   hideMentionMenu();
 
   // Real file bytes go to the server (bounded, compressed); the agent loop analyzes them.
@@ -2965,6 +3017,7 @@ async function executeAgentTurn(value, attachments, opts) {
   // A catch-up run from a pre-refresh generation no longer owns the UI.
   // A new local run takes over; completion still arrives via push.
   catchupResume = false;
+  try { resumePending = false; resumeSettled = false; } catch (_) {}
   // A new agent turn may legitimately start the browser again.
   clearBrowserClosedFlag();
   const adopted = opts && opts.reuseThinking && opts.reuseThinking.isConnected && opts.reuseThinking._block
@@ -6869,6 +6922,8 @@ async function onChatDonePush(data) {
       catchupResume = false;
       activeThinking = null;
       setSending(false);
+      try { clearPendingUser(); } catch (_) {}
+      try { resumePending = false; resumeSettled = false; } catch (_) {}
       try {
         document.getElementById("thinkingMsg")?.remove();
         if (lastUserEl && !lastUserEl.dataset.mid) lastUserEl.remove();
@@ -6912,6 +6967,8 @@ function onChatPush(data) {
       activeThinking = null;
       setSending(false);
       catchupResume = false;
+      try { clearPendingUser(); } catch (_) {}
+      try { resumePending = false; resumeSettled = false; } catch (_) {}
     }
   } catch (_) {}
 }
@@ -6923,6 +6980,9 @@ let catchupResume = false;
 // as new "run" pushes arrive. Rendering is idempotent (keyed step items), so a
 // frame seen twice (replay + push) never duplicates a step.
 let catchupLiveItems = new Map();
+// During bulk replay skips per-frame scrolling (that was the refresh hang:
+// 300 frames × forced layout). One scroll lands at the end instead.
+let replayQuiet = false;
 
 function renderRunFrame(frame) {
   try {
@@ -6938,7 +6998,7 @@ function renderRunFrame(frame) {
       block._stepsInner.appendChild(item);
       ensureHeaderArrow(block);
       catchupLiveItems.set(key, item);
-      scrollToBottom();
+      if (!replayQuiet) scrollToBottom();
       return;
     }
     if (type === "event") {
@@ -6961,6 +7021,7 @@ function renderRunFrame(frame) {
         completeStepItem(item, {
           output: typeof frame.output === "string" ? frame.output : "",
           shot: typeof frame.shot === "string" ? frame.shot : "",
+          failed: !!frame && frame.failed === true,
         });
       }
       try {
@@ -6973,7 +7034,7 @@ function renderRunFrame(frame) {
           }
         }
       } catch (_) {}
-      scrollToBottom();
+      if (!replayQuiet) scrollToBottom();
       return;
     }
     if (type === "question") {
@@ -6994,9 +7055,17 @@ function renderRunFrame(frame) {
 
 function replayRunFrames(frames) {
   catchupLiveItems = new Map();
-  if (Array.isArray(frames)) {
-    for (const frame of frames) renderRunFrame(frame);
+  if (!Array.isArray(frames) || !frames.length) return;
+  // Cap: the server buffers 300, but rendering hundreds of step cards in one
+  // go hangs the tab — the last 150 carry the live state.
+  const list = frames.length > 150 ? frames.slice(-150) : frames;
+  replayQuiet = true;
+  try {
+    for (const frame of list) renderRunFrame(frame);
+  } finally {
+    replayQuiet = false;
   }
+  try { scrollToBottom(false); } catch (_) {}
 }
 
 function onRunPush(frame) {
@@ -7027,22 +7096,60 @@ async function resumeActiveRun() {
   // pick up its reply when it lands. A STOP already marked cancelled reports
   // active=false — never rebuild a live Working block (that was the duplicate
   // steps-after-refresh bug). Continue mid-run adopts the frozen block.
-  let fd = null;
-  try {
-    fd = await fetch("/api/chat_frames", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-  } catch (_) {
+  // Idempotent + single-live protected: a second call (double hello / double
+  // refresh) never appends a second bubble or second Working.
+  if (resumeSettled || activeRun || (catchupResume && activeThinking)) {
+    try { resumePending = false; } catch (_) {}
     return;
   }
-  if (!fd || !fd.active) return;
+  let fd = null;
+  // Bounded retry: the POST may still be registering (or an old hello may
+  // have just rendered). Up to ~3s so an instant refresh after send still
+  // finds its run instead of showing the task with no Working.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      fd = await fetch("/api/chat_frames", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    } catch (_) {
+      fd = null;
+    }
+    if (fd && fd.active) break;
+    // Keep polling only while WE have an unsent-looking pending message; a
+    // truly idle server (no run, nothing pending) stops at once.
+    try {
+      if (!readPendingUser()) break;
+    } catch (_) { break; }
+    if (attempt < 5) {
+      try { await new Promise((r) => setTimeout(r, 500)); } catch (_) { break; }
+    }
+  }
+  if (!fd || !fd.active) {
+    try { resumePending = false; resumeSettled = false; } catch (_) {}
+    return;
+  }
+  // A live run already rebuilt while we fetched (hello + second resume raced):
+  // never build a second Working.
+  if (activeRun || (catchupResume && activeThinking) || document.getElementById("thinkingMsg")) {
+    try { resumePending = false; resumeSettled = true; } catch (_) {}
+    return;
+  }
   hideWelcome();
-  const preview = String(fd.input || "").slice(0, 200);
-  if (preview) {
+  // Full text first: server input_full (new) > stored pending (same tab,
+  // pre-refresh) > 200-char preview (never render the preview alone as a
+  // truncated bubble when a fuller copy exists).
+  const serverFull = String((fd && (fd.input_full || fd.input)) || "").slice(0, 4000);
+  const preview = serverFull.slice(0, 200);
+  // Full text first: the stored pending message (same tab, pre-refresh) is
+  // complete; the server preview is only 200 chars and must never render as
+  // an empty/truncated bubble on its own.
+  const storedFull = readPendingUser();
+  const fullText = (serverFull && storedFull && storedFull.length > serverFull.length ? storedFull : (serverFull || storedFull));
+  if (fullText) {
     // No duplicate resume bubble: reuse the tail user bubble when it already
-    // shows this pending input (double refresh of the same run). The preview
-    // is truncated, so a prefix match counts — strict equality would clone
-    // every long message into a second bubble.
-    const cleaned = cleanHistoryText(preview);
-    const want = String(cleaned.text || preview);
+    // shows this pending input (double refresh of the same run). Strict match
+    // on the FULL text — the old prefix match on the truncated preview is
+    // what cloned every long message into a second bubble.
+    const cleaned = cleanHistoryText(fullText);
+    const want = String(cleaned.text || fullText);
     let tail = null;
     try {
       const users = chatInner.querySelectorAll(".msg.user");
@@ -7051,12 +7158,12 @@ async function resumeActiveRun() {
       tail = null;
     }
     const tailRaw = String((tail && tail.dataset.raw) || "");
-    if (tail && want && (tailRaw === want || tailRaw.slice(0, want.length) === want)) {
+    if (tail && want && tailRaw === want) {
       lastUserEl = tail;
     } else if (!want) {
       if (tail) lastUserEl = tail;
     } else {
-      lastUserEl = appendUserMessage(cleaned.text || preview, []);
+      lastUserEl = appendUserMessage(cleaned.text || fullText, []);
       attachUserBar(lastUserEl);
     }
     if (cleaned.text) lastUserText = cleaned.text;
@@ -7087,6 +7194,10 @@ async function resumeActiveRun() {
   }
   if (!thinking) thinking = addThinking(preview);
   activeThinking = thinking;
+  // Single-live protection: any older open block is settled + collapsed, so
+  // only THIS resumed Working animates (the "first Working still running"
+  // confusion). History settled blocks stay collapsed below.
+  try { enforceSingleLiveBlock(thinking); } catch (_) {}
   // The button shows STOP while the resumed run lives — even though this
   // page owns no stream for it. Completion (or death) arrives via push
   // (chat_done / chat events) — no polling.
@@ -7095,6 +7206,7 @@ async function resumeActiveRun() {
   try {
     if (Array.isArray(fd.frames)) replayRunFrames(fd.frames);
   } catch (_) {}
+  try { resumePending = false; resumeSettled = true; } catch (_) {}
 }
 
 async function sendQuestionAnswer() {
@@ -7772,6 +7884,8 @@ async function stopGeneration() {
     const thinkingEl = document.getElementById("thinkingMsg");
     if (thinkingEl) settleThinkingStopped(thinkingEl);
   } catch (_) {}
+  try { clearPendingUser(); } catch (_) {}
+  try { resumePending = false; resumeSettled = false; } catch (_) {}
   // Arm the Continue pill: the stopped task resumes in place on tap (empty
   // composer only — any typed text is a brand-new request instead).
   try {

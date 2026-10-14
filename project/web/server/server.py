@@ -1162,6 +1162,7 @@ def _release_chat_run(run_id) -> bool:
             if owned:
                 _ACTIVE_RUN.pop("event", None)
                 _ACTIVE_RUN.pop("input", None)
+                _ACTIVE_RUN.pop("input_full", None)
                 _ACTIVE_RUN.pop("cancelled", None)
                 _ACTIVE_RUN.pop("id", None)
     except Exception:
@@ -1320,13 +1321,15 @@ def _build_stream_frame(kind: str, val: Any, out: Any) -> dict | None:
             return {"type": "live_end"}
         if kind in ("stop", "ping"):
             return None
-        # Completion: out is (output, key) or (output, key, media[, reason[, step]]).
-        _o, _k, _m, _r, _s = (list(out) + [None, None, None, None, None])[:5] if isinstance(out, (tuple, list)) else (out, None, None, None, None)
+        # Completion: out is (output, key) or (output, key, media[, reason[, step[, failed]]]).
+        _o, _k, _m, _r, _s, _f = (list(out) + [None, None, None, None, None, None])[:6] if isinstance(out, (tuple, list)) else (out, None, None, None, None, None)
         frame = {"type": "event", "event": val, "output": _o, "key": _k}
         if isinstance(_r, str) and _r.strip():
             frame["reason"] = _r[:200]
         if isinstance(_s, int):
             frame["step"] = _s
+        if _f:
+            frame["failed"] = True
         if isinstance(_m, dict) and _m:
             frame["media"] = {k: v for k, v in _m.items()
                               if k in ("shot", "stream", "audio") and isinstance(v, (str, dict))}
@@ -4619,11 +4622,17 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         try:
             active, preview = _chat_status()
             frames = []
+            full = ""
             if active:
                 with _RUN_FRAMES_LOCK:
                     frames = [dict(f) for f in _RUN_FRAMES]
+                try:
+                    with _RUN_LOCK:
+                        full = str(_ACTIVE_RUN.get("input_full") or preview or "")[:4000]
+                except Exception:
+                    full = preview
             self._send_json({"active": bool(active), "input": preview,
-                             "frames": frames})
+                             "input_full": full, "frames": frames})
         except Exception as e:
             self._send_json({"error": "failed to load run frames", "detail": str(e)}, status=500)
 
@@ -4903,6 +4912,27 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         box: dict = {}
         write_lock = threading.Lock()
 
+        # Sync run registration (refresh protection): the run is visible to
+        # /api/chat_frames BEFORE the SSE headers go out. Registration used to
+        # happen inside the background thread below, so a refresh in that
+        # window saw the PREVIOUS run (old Working kept running) or inactive
+        # (new task with no Working at all). Never raises outward.
+        try:
+            _sync_event = threading.Event()
+            _sync_id = id(_sync_event)
+            _run_frames_clear()
+            with _RUN_LOCK:
+                _ACTIVE_RUN["event"] = _sync_event
+                _ACTIVE_RUN["input"] = loop_input[:200]
+                _ACTIVE_RUN["input_full"] = loop_input[:4000]
+                _ACTIVE_RUN["id"] = _sync_id
+                _ACTIVE_RUN.pop("cancelled", None)
+                _CANCEL_EVENTS.add(_sync_event)
+            box["run_id"] = _sync_id
+            _events_emit_chat(gateway=gw)
+        except Exception:
+            pass
+
         def _emit(obj) -> bool:
             try:
                 data = ("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode("utf-8")
@@ -5058,16 +5088,29 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 pass
 
         def _run():
-            cancel_event = threading.Event()
-            run_id = id(cancel_event)
-            _run_frames_clear()
-            with _RUN_LOCK:
-                _ACTIVE_RUN["event"] = cancel_event
-                _ACTIVE_RUN["input"] = loop_input[:200]
-                _ACTIVE_RUN["id"] = run_id
-                _ACTIVE_RUN.pop("cancelled", None)
-                _CANCEL_EVENTS.add(cancel_event)
-            _events_emit_chat(gateway=gw)
+            # Reuse the synchronously registered run above (same id/event);
+            # register here only as a fallback (never clears a live buffer).
+            cancel_event = None
+            run_id = box.get("run_id")
+            try:
+                with _RUN_LOCK:
+                    if run_id is not None and _ACTIVE_RUN.get("id") == run_id and "event" in _ACTIVE_RUN:
+                        cancel_event = _ACTIVE_RUN["event"]
+            except Exception:
+                cancel_event = None
+            if cancel_event is None or run_id is None:
+                cancel_event = threading.Event()
+                run_id = id(cancel_event)
+                _run_frames_clear()
+                with _RUN_LOCK:
+                    _ACTIVE_RUN["event"] = cancel_event
+                    _ACTIVE_RUN["input"] = loop_input[:200]
+                    _ACTIVE_RUN["input_full"] = loop_input[:4000]
+                    _ACTIVE_RUN["id"] = run_id
+                    _ACTIVE_RUN.pop("cancelled", None)
+                    _CANCEL_EVENTS.add(cancel_event)
+                box["run_id"] = run_id
+                _events_emit_chat(gateway=gw)
             try:
                 from core.agent.loop.engine import run_loop
 
@@ -5080,7 +5123,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     verbose=False,
                     model=chat_model,
                     api_key=chat_key,
-                    on_event=lambda t, o=None, k=None, m=None, r=None, s=None: _stage("event", t, (o, k, m, r, s)),
+                    on_event=lambda t, o=None, k=None, m=None, r=None, s=None, f=None: _stage("event", t, (o, k, m, r, s, f)),
                     on_tool_start=lambda label, k=None, r=None, s=None: _stage("event_start", label, (k, r, s)),
                     on_token=lambda step, d: _stage("token", step, d),
                     restricted=restricted,

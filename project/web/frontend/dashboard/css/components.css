@@ -7511,6 +7511,12 @@ h4,
   box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
 }
 
+/* Failed step: red dot (any tool failure, any method or input). */
+.step-item.fail .step-bullet {
+  background: var(--red);
+  box-shadow: 0 0 6px rgba(240, 68, 56, 0.5);
+}
+
 /* Running step: orange dot, softly pulsing, until it completes. */
 .step-item.running .step-bullet {
   background: #f59e0b;
@@ -7522,7 +7528,7 @@ h4,
   50% { opacity: 0.5; transform: scale(1.35); }
 }
 
-/* Completed step: the dot alone turns green — no check mark. */
+/* Completed step: the dot alone turns green (red on tool failure) — no check mark. */
 
 /* Markdown headings inside an answer read like headings, not plain bold. */
 .msg .md-h {
@@ -7552,6 +7558,10 @@ h4,
 }
 
 .step-item.done .step-title {
+  color: #8a8a8a;
+}
+
+.step-item.fail .step-title {
   color: #8a8a8a;
 }
 

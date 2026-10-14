@@ -1571,7 +1571,7 @@ function schedStepItem(step) {
   const output = step && typeof step.output === "string" ? step.output.trim().slice(0, 500) : "";
   const shot = step && typeof step.shot === "string" ? step.shot : "";
   const item = document.createElement("div");
-  item.className = "step-item done";
+  item.className = "step-item " + (step && step.failed === true ? "fail" : "done");
   const head = document.createElement("div");
   head.className = "step-head";
   head.setAttribute("role", "button");

@@ -79,7 +79,7 @@ def _resolve_missing_model(name: str, args: Any, kind: str, on_question, cancel_
     """Pause for the user's Connect/Skip choice, then resume the loop.
 
     - Skip (or expiry / no-UI / STOP): continue WITHOUT the tool — the
-      Arabic skip sentence goes to the MODEL, which continues the task.
+      English skip sentence goes to the MODEL, which continues the task.
     - Connect: the UI keeps the strip up while the user connects that
       kind's model dialog; once saved it answers back and the SAME tool
       runs once (a single retry, never a loop). Still missing at retry
@@ -124,9 +124,9 @@ def _model_skipped_result(name: str, args: Any, kind: str) -> dict:
     return {"tool": name, "arguments": args,
             "output": {"event": f"Skipped {name} (no model)", "skipped": True,
                        "needs_model_kind": kind,
-                       "message": f"تم تخطي الأداة {name} لعدم توفر موديل مناسب ({kind}). "
-                                  "واصل المهمة بدون هذه الأداة عندما يكون ذلك ممكناً؛ "
-                                  "وإلا اعرض هذه الرسالة على المستخدم مع رابط /ai-models."},
+                       "message": f"Tool {name} was skipped: no suitable model connected ({kind}). "
+                                  "Continue the task without this tool when possible; "
+                                  "otherwise show this message to the user with the /ai-models link."},
             "success": True}
 
 
@@ -490,20 +490,20 @@ def _summarize_output(result: dict, name: str | None = None, args: Any = None) -
                     if isinstance(done, list) and done:
                         nums = [str(n) for n in done[:50] if isinstance(n, int)]
                         if nums:
-                            lines.append("خلصت سلايد رقم " + "، ".join(nums))
+                            lines.append("Slides created: " + ", ".join(nums))
                     changed = out.get("changed")
                     if isinstance(changed, list) and changed:
                         nums = [str(n) for n in changed[:50] if isinstance(n, int)]
                         if nums:
-                            lines.append("خلصت سلايد رقم " + "، ".join(nums))
+                            lines.append("Slides created: " + ", ".join(nums))
                 if isinstance(out.get("pdf_path"), str) and out.get("pdf_path"):
                     total = out.get("slides_done")
                     n = len(total) if isinstance(total, list) else 0
-                    if not any(line.startswith("تم تجميع") for line in lines):
+                    if not any(line.startswith("Merged") for line in lines):
                         if n:
-                            lines.append(f"تم تجميع {n} سلايدات في PDF")
+                            lines.append(f"Merged {n} slides into PDF")
                         else:
-                            lines.append("تم تجميع السلايدات في PDF")
+                            lines.append("Merged slides into PDF")
                 return "\n".join(lines)[:2000] or None
             except Exception:
                 return None
@@ -696,6 +696,11 @@ def _persist_steps(tool_calls_log: list) -> list[dict]:
                 excerpt = None
             if excerpt:
                 item["output"] = excerpt
+            try:
+                if isinstance(res, dict) and not res.get("success"):
+                    item["failed"] = True
+            except Exception:
+                pass
             try:
                 media = _event_media(name, res)
                 shot = media.get("shot") if isinstance(media, dict) else None
@@ -1513,7 +1518,7 @@ def run_loop(
                 # STOP aborts them mid-execution instead of after they finish.
                 result = execute_tool(name, args, cancel_flag=cancel_flag)
             # Missing-model gate: pauses for the user's Connect/Skip choice.
-            # Skip continues without the tool (the Arabic skip sentence goes
+            # Skip continues without the tool (the English skip sentence goes
             # to the model); Connect retries the SAME tool once the model is
             # connected. Only real skips flag the final reply, whose UI
             # renders the /ai-models link as a Connect button.
@@ -1623,23 +1628,31 @@ def run_loop(
                     # Titles are always the friendly preview label — raw error
                     # text never becomes a title (it lives, shortened, under
                     # the reason instead). Same rule as _persist_steps.
+                    # The 7th arg carries the failure flag so the UI dot turns
+                    # red on any failed call; old callbacks keep working via
+                    # the TypeError fallback chain below.
                     if not text:
                         text = _preview_event(name, args)
                     if text:
                         try:
+                            call_failed = not (isinstance(result, dict) and result.get("success"))
                             try:
                                 on_event(str(text)[:80], _summarize_output(result, name, args), call_key,
-                                         _event_media(name, result), call_reason, step)
+                                         _event_media(name, result), call_reason, step, call_failed)
                             except TypeError:
                                 try:
                                     on_event(str(text)[:80], _summarize_output(result, name, args), call_key,
-                                             _event_media(name, result), call_reason)
+                                             _event_media(name, result), call_reason, step)
                                 except TypeError:
                                     try:
                                         on_event(str(text)[:80], _summarize_output(result, name, args), call_key,
-                                                 _event_media(name, result))
+                                                 _event_media(name, result), call_reason)
                                     except TypeError:
-                                        on_event(str(text)[:80], _summarize_output(result, name, args))
+                                        try:
+                                            on_event(str(text)[:80], _summarize_output(result, name, args), call_key,
+                                                     _event_media(name, result))
+                                        except TypeError:
+                                            on_event(str(text)[:80], _summarize_output(result, name, args))
                         except Exception:
                             pass
                 except Exception:
