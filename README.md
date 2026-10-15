@@ -104,8 +104,8 @@ copy (release zip) and is used offline - nothing is downloaded on first run
 | --- | --- | --- |
 | Embedding (built-in, hidden) | `embedding_model/` | 1.15 GB |
 
-Chat, vision, image, speech-to-text and text-to-speech are NOT shipped:
-connect any of them in the console under **AI Models** (5 fixed templates,
+Chat, vision, video, image, speech-to-text and text-to-speech are NOT shipped:
+connect any of them in the console under **AI Models** (6 fixed templates,
 same 4 fields each, universal Connection JSON).
 
 ---

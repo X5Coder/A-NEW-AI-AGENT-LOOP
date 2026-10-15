@@ -1,6 +1,6 @@
 /**
  * ai_models.js — AI Models section (universal connection engine UI).
- * Owns: the fixed template cards (text, vision, image, tts, stt), each opening
+ * Owns: the fixed template cards (text, vision, video, image, tts, stt), each opening
  * a dialog with Claude-guided steps, 4 glass fields + a big Configuration
  * Protocol JSON editor with live coloring, and a Connect → black log panel
  * (green borders on success, red on failure) → Save state machine.
@@ -15,6 +15,7 @@ const CLAUDE_URL = "https://claude.ai";
 const TEMPLATES = [
   { kind: "text", tag: "TX", title: "AI Text Model", desc: "Chat model for the agent. Follow the 2 steps, then Connect." },
   { kind: "vision", tag: "VI", title: "AI Vision Model", desc: "Sees images and answers about them. Follow the 2 steps, then Connect." },
+  { kind: "video", tag: "VV", title: "AI Vision Videos", desc: "Understands videos and answers about them. Follow the 2 steps, then Connect." },
   { kind: "image", tag: "IM", title: "AI Image Model", desc: "Creates pictures from a description. Follow the 2 steps, then Connect." },
   { kind: "tts", tag: "TS", title: "AI Text to Speech", desc: "Reads text aloud as a voice record. Follow the 2 steps, then Connect." },
   { kind: "stt", tag: "ST", title: "AI Speech to Text", desc: "Turns voice notes into written words. Follow the 2 steps, then Connect." },
@@ -155,11 +156,32 @@ async function copySetupPrompt(kind, btn) {
   }
 }
 
+function extractConnectionJson(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  // 1) Direct paste of pure JSON (fast path, most common after the fix).
+  if (text.startsWith("{") && text.endsWith("}")) return text;
+  // 2) Claude reply with a fenced block: take the FIRST ```json block only.
+  //    This is the "Unexpected non-whitespace character after JSON" case:
+  //    the user pasted Field 1-5 text + instructions around the block.
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence && fence[1] && fence[1].trim().startsWith("{")) return fence[1].trim();
+  // 3) Bare JSON with surrounding prose (no fences): slice first { to last }.
+  const first = text.indexOf("{");
+  const last = text.lastIndexOf("}");
+  if (first !== -1 && last > first) {
+    const slice = text.slice(first, last + 1).trim();
+    if (slice.startsWith("{")) return slice;
+  }
+  return text;
+}
+
 function parseConnectionJson(raw) {
   const text = String(raw || "").trim();
   if (!text) return { ok: false, error: "Configuration Protocol is empty. Paste the block Claude gave you." };
+  const candidate = extractConnectionJson(text);
   try {
-    const obj = JSON.parse(text);
+    const obj = JSON.parse(candidate);
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
       return { ok: false, error: "Configuration Protocol must be an object starting with { and ending with }." };
     }

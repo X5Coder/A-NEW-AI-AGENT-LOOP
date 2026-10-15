@@ -1,0 +1,21 @@
+{
+  "name": "image_search",
+  "description": "THE ONLY WAY to find ready-made photos or icons from the internet by a search text. Call this tool DIRECTLY (via tool_search) the moment you need a real picture for content, a slide, or a page — never hand-craft source URLs manually with other tools. Takes plain search words (what the picture shows, English keywords work best) and returns ready-to-use image metadata: the searched text, each image width/height, mime type, byte size, source name, title/credit, and the Workspace-relative file path of the locally saved copy (already downloaded and verified, use the file path directly). Photos come from Openverse, Wikimedia Commons, Flickr, Internet Archive, NASA, Cleveland Museum, Art Institute of Chicago; icons come as SVG from Iconify; animals/food/fallbacks from their dedicated free APIs.",
+  "inputs": {
+    "query": {
+      "type": "string",
+      "required": true,
+      "description": "Search words for the wanted picture, 1..300 chars, e.g. 'black cat sitting on sofa' or 'nasa moon landing'."
+    },
+    "count": {
+      "type": "integer",
+      "required": false,
+      "description": "How many images to return, 1..10 (default 3)."
+    },
+    "kind": {
+      "type": "string",
+      "required": false,
+      "description": "auto (default: route by keywords), photo (general photos only), or icon (SVG icons only)."
+    }
+  }
+}

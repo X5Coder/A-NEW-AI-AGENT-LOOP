@@ -794,6 +794,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 /* Pro segmented switch: ONE centered glass pill glides under the active segment
    (transform-only, GPU-composited). Equal segments keep the travel exact. */
@@ -830,7 +831,7 @@
   top: 3px;
   bottom: 3px;
   left: 3px;
-  width: calc((100% - 6px) / 3);
+  width: calc((100% - 6px) / 4);
   border-radius: var(--r-full);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.045));
   -webkit-backdrop-filter: blur(12px) saturate(1.2);
@@ -844,6 +845,7 @@
 .range-switch:has(button:nth-child(1).active) { --pill-i: 0; }
 .range-switch:has(button:nth-child(2).active) { --pill-i: 1; }
 .range-switch:has(button:nth-child(3).active) { --pill-i: 2; }
+.range-switch:has(button:nth-child(4).active) { --pill-i: 3; }
 .range-switch button {
   position: relative;
   z-index: 1;
@@ -854,8 +856,8 @@
   border: 0;
   background: transparent;
   height: 30px;
-  min-width: 64px;
-  padding: 0 16px;
+  min-width: 56px;
+  padding: 0 10px;
   border-radius: var(--r-full);
   font-family: inherit;
   font-size: 12px;
@@ -884,20 +886,31 @@
   text-shadow: none;
 }
 
-/* Pro flow-chart: responsive SVG area+line, glass panel, touch-first. */
+/* Pro flow-chart: responsive SVG area+line, glass panel, touch-first.
+   Breathing layout: generous padding + fluid height from tokens so the blue
+   line never touches the edges; tall data gets headroom from the JS nice
+   ceiling, not from clipping. */
 .flow {
   position: relative;
-  padding: 12px 12px 8px;
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.32), rgba(0, 0, 0, 0.18));
+  padding: var(--sp-4) var(--sp-4) var(--sp-3);
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(90, 169, 255, 0.1), transparent 60%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.32), rgba(0, 0, 0, 0.18));
   border: 1px solid var(--border-light);
   border-radius: 14px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: stretch;
 }
 .flow-svg {
   display: block;
   width: 100%;
-  height: 190px;
+  height: 12rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: visible;
 }
 .flow-grid {
   stroke: var(--chart-grid);
@@ -912,15 +925,18 @@
   stroke-linecap: round;
   stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 2px 8px rgba(90, 169, 255, 0.45));
 }
 .flow-dot {
   fill: #0f0f0f;
   stroke: var(--chart-dot);
   stroke-width: 2;
+  filter: drop-shadow(0 0 6px rgba(143, 194, 255, 0.6));
 }
 .flow-dot.peak {
   fill: var(--chart-line);
   stroke: #fff;
+  filter: drop-shadow(0 0 10px rgba(90, 169, 255, 0.8));
 }
 .flow-hit {
   fill: transparent;
@@ -956,6 +972,240 @@
 }
 /* Legacy bar classes kept as no-op aliases (old cached JS never breaks). */
 .chart-track, .chart-x, .bar, .bar-fill { box-sizing: border-box; }
+
+/* ---------- clean usage tables (dashboard Token Usage / Requests) ----------
+   Real <table>: sticky head, hairline rows, tabular numbers, peak pill.
+   Logical props throughout so RTL mirrors; transform/opacity only. */
+.tbl-wrap {
+  max-height: var(--tbl-cap);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border-light);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.28), rgba(0, 0, 0, 0.16));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.tbl-wrap:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+.tbl thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: start;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  background: var(--background-menu-white);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-main);
+  white-space: nowrap;
+}
+.tbl tbody th {
+  text-align: start;
+  font-weight: 500;
+  color: var(--text-primary);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-light);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 10rem;
+}
+.tbl tbody td {
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-light);
+  vertical-align: middle;
+}
+.tbl tbody tr:last-child th,
+.tbl tbody tr:last-child td {
+  border-bottom: 0;
+}
+.tbl tbody tr:hover {
+  background: var(--tbl-row-hover);
+}
+.tbl .num {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.tbl-val {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.tbl-share {
+  margin-inline-start: var(--sp-2);
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.tbl tbody tr.is-peak {
+  background: var(--tbl-peak-bg);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+[dir="rtl"] .tbl tbody tr.is-peak {
+  box-shadow: inset -3px 0 0 var(--blue);
+}
+.tbl-peak {
+  display: inline-block;
+  margin-inline-start: var(--sp-2);
+  padding: 0 0.625rem;
+  height: 1.375rem;
+  line-height: 1.375rem;
+  border-radius: var(--r-full);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-blue);
+  background: rgba(59, 158, 255, 0.12);
+  border: 1px solid rgba(59, 158, 255, 0.35);
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+.tbl-empty {
+  padding: var(--sp-5) var(--sp-4);
+  font-size: 0.8125rem;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+/* ---------- usage block charts (dashboard Token Usage / Requests) -------
+   Grid-squares background, columns built block-by-block from the bottom
+   axis upward, days on the x axis, values on the left y axis.
+   aspect-ratio keeps every label undistorted on any screen. */
+.bars-wrap {
+  border: 1px solid var(--border-light);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0.16));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
+  overflow: hidden;
+}
+.bars-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 600 / 280;
+}
+.bars-grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+}
+.bars-grid.faint {
+  opacity: 0.5;
+}
+.bars-axis {
+  stroke: var(--border-main);
+  stroke-width: 1;
+}
+.bars-tick,
+.bars-x {
+  fill: var(--text-tertiary);
+  font-size: 12px;
+  font-family: inherit;
+}
+.bars-tick {
+  font-variant-numeric: tabular-nums;
+}
+.blk.bfill-tok {
+  fill: url(#x5g-tok);
+}
+.blk.bfill-req {
+  fill: var(--icon-primary);
+}
+.blk.bfill-req.peak {
+  fill: #fff;
+}
+.blk.peak {
+  filter: drop-shadow(0 2px 10px rgba(90, 169, 255, 0.55));
+}
+/* Connected columns: one solid shape per period (class-based fills —
+   presentation attributes cannot use var()). */
+.bars-col-tok {
+  fill: url(#x5g-tok);
+}
+.bars-col-req {
+  fill: var(--icon-primary);
+}
+.bars-col-req.peak {
+  fill: #fff;
+}
+.bars-col.peak {
+  filter: drop-shadow(0 2px 10px rgba(90, 169, 255, 0.55));
+}
+/* Rise entrance: every column grows from the baseline to its own height.
+   Transform-only (GPU), one unified motion, no per-column delays. */
+.bars-col {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: bars-rise var(--dur-slow) var(--ease) both;
+}
+@keyframes bars-rise {
+  from {
+    transform: scaleY(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+.bars-peak-val {
+  fill: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+/* Graphical cells: bold count on top, thin level bar below it.
+   Levels are fixed classes (lv0..lv10) so no inline styles are needed;
+   block layout anchors the fill to the inline-start side in LTR and RTL. */
+.gval {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.gbar {
+  display: block;
+  margin-top: 0.375rem;
+  height: 0.25rem;
+  border-radius: var(--r-full);
+  background: var(--fill-tsp-white-light);
+  overflow: hidden;
+}
+.gbar .gfill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--icon-primary);
+}
+.gbar.tok .gfill {
+  background: linear-gradient(90deg, var(--chart-line), var(--chart-line-hi));
+}
+.tbl tbody tr.is-peak .gbar.tok .gfill {
+  box-shadow: 0 0 0.5rem rgba(90, 169, 255, 0.7);
+}
+.gfill.lv0 { width: 0; }
+.gfill.lv1 { width: 10%; }
+.gfill.lv2 { width: 20%; }
+.gfill.lv3 { width: 30%; }
+.gfill.lv4 { width: 40%; }
+.gfill.lv5 { width: 50%; }
+.gfill.lv6 { width: 60%; }
+.gfill.lv7 { width: 70%; }
+.gfill.lv8 { width: 80%; }
+.gfill.lv9 { width: 90%; }
+.gfill.lv10 { width: 100%; }
 
 .chart-tip {
   position: fixed;
@@ -1471,6 +1721,13 @@
   width: 100%;
   position: relative;
   z-index: 1;
+  /* Hidden scrollbar (scroll still works): the composer grows, no white bar. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.composer textarea::-webkit-scrollbar,
+.composer-hlwrap > textarea::-webkit-scrollbar {
+  display: none;
 }
 .composer textarea::placeholder {
   color: var(--text-tertiary);
@@ -1592,7 +1849,9 @@
     transform: scale(1) translateY(0);
   }
 }
-/* SEND working state (edit prune / regenerate): spinner ring in place. */
+/* SEND working state (edit prune / regenerate): spinner ring in place.
+   Black ring: loading runs on the light disabled button, where a white
+   ring is invisible. */
 .send-btn.loading {
   pointer-events: none;
 }
@@ -1608,9 +1867,14 @@
   height: 16px;
   margin: -8px 0 0 -8px;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #fff;
+  border: 2px solid rgba(0, 0, 0, 0.25);
+  border-top-color: #000;
   animation: a-spin 0.8s linear infinite;
+}
+/* Generation owns the button as STOP: a leftover loading ring must never
+   cover the stop icon or block its click. */
+.send-btn.loading.stop::after {
+  display: none;
 }
 
 /* ---------- workspace (file browser) ---------- */
@@ -4906,6 +5170,10 @@
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
+  /* Inherit the card direction (dir=auto → RTL for Arabic): the letter
+     badge stays at the inline-start side — right for صح/غلط, left for
+     English — instead of dir=auto on the box forcing LTR from the "A". */
+  direction: inherit;
 }
 /* Essay question (no options): no empty chips gap — composer is the answer. */
 .question-chips:empty {
@@ -4976,131 +5244,35 @@
   display: none;
 }
 
-/* ---------- ask strip: fused above the composer, chips + composer-last ----------
-   The strip pulls the composer up over its bottom padding (-20px / 28px),
-   so chips and composer read as one fused template. Composer itself is the
-   custom-reply choice: no separate custom button. While asking, the +,
-   mode and mic controls hide — only SEND stays. */
-/* Dedicated enter: the strip rises softly out of the composer (GPU only). */
-@keyframes ask-in {
-  from { opacity: 0; transform: translateY(16px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes ask-chip-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.question-card.ask {
+/* ---------- ask strip: choices stack UNDER the question ----------
+   The strip is one fused template above the composer: question text on top,
+   full-width lettered rows (A / B / C …) below it — صح/غلط and multiple
+   choice render exactly like before. Bidi-safe: dir="auto" from JS +
+   plaintext here, so mixed Arabic/English never scrambles.
+   The .essay rule pins the fused look for text-only questions with
+   higher specificity, so the base floating card can never win. */
+.question-card.ask.essay {
   margin: 0 auto -20px;
   padding: 10px 12px 30px;
   border-radius: 22px 22px 0 0;
-  background: var(--background-card-gray);
-  border: 1px solid var(--border-light);
   border-bottom: 0;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    inset 0 0 0 1px rgba(0, 0, 0, 0.15);
-  animation: ask-in 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 .question-card.ask .question-text {
-  margin-bottom: 10px;
-}
-.question-chips {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-}
-/* Essay question (no options): no empty chips gap — composer is the answer. */
-.question-chips:empty {
-  display: none;
-}
-.q-chip {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 9px 12px 9px 9px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border-light);
-  border-radius: 12px;
-  color: var(--text-primary);
-  font-family: inherit;
-  font-size: 13.5px;
-  font-weight: 500;
-  cursor: pointer;
-  user-select: none;
-  -webkit-user-select: none;
+  unicode-bidi: plaintext;
   text-align: start;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
-  animation: ask-chip-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
-.q-chip:hover {
-  background: var(--fill-tsp-white-light);
-  border-color: var(--blue);
-}
-.q-chip:active {
-  transform: scale(0.98);
-}
-.q-chip:focus-visible {
-  outline: 2px solid var(--blue);
-  outline-offset: 1px;
-}
-/* Letter badge: A / B / C … — the elegant row marker. */
-.q-chip-key {
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 7px;
-  background: var(--fill-tsp-white-light);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 700;
-}
-.q-chip-label {
-  min-width: 0;
-  flex: 1;
-  overflow-wrap: anywhere;
-}
-.q-chip.selected {
-  background: var(--Button-black);
-  border-color: transparent;
-  color: var(--text-onblack);
-}
-.q-chip.selected .q-chip-key {
-  background: rgba(255, 255, 255, 0.18);
-  color: var(--text-onblack);
-}
-.composer.asking .attach-wrap,
-.composer.asking .composer-btn.mic,
-.composer.asking .send-group-divider {
-  display: none;
+.question-card.ask .q-chip-label {
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 /* ---------- question card transitions ---------- */
-.question-card {
-  margin: 0 auto 4px;
-  transition:
-    opacity var(--dur-fast) var(--ease),
-    transform var(--dur-fast) var(--ease);
-}
 .question-card.ask {
   transition:
     opacity var(--dur-fast) var(--ease),
     transform var(--dur-fast) var(--ease);
 }
-.question-card.ask {
-  transition:
-    opacity var(--dur-fast) var(--ease),
-    transform var(--dur-fast) var(--ease);
-}
-.question-card.ask.leaving,
-.question-card.ask.leaving,
+/* Exit keyframes for every strip kind (ask / essay / approval / model). */
 .question-card.leaving {
   animation: ask-out 200ms cubic-bezier(0.4, 0, 1, 1) both;
   pointer-events: none;
@@ -6480,6 +6652,8 @@ h4,
   caret-color: var(--text-blue);
   white-space: pre-wrap;
   overflow-wrap: break-word;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 .composer-hlwrap > textarea::selection {
   background: rgba(90, 169, 255, 0.35);
@@ -6501,9 +6675,10 @@ h4,
 .msg-content .hl-tok-msg {
   color: var(--text-blue);
 }
-/* Model-written Workspace paths (folder/file.pdf) inside assistant replies:
-   same blue (color only, never weight — layout must not shift). A click
-   jumps to the Workspace page with the file revealed exactly at its path. */
+/* Explicit Workspace file links [label](workspace:path) inside assistant
+   replies: blue + always underlined (never color alone). A click jumps to
+   the Workspace page with the file revealed exactly at its path. Plain
+   sentences never become links. */
 .msg-content .ws-path-link {
   color: var(--text-blue);
   background: none;
@@ -6514,10 +6689,11 @@ h4,
   line-height: inherit;
   letter-spacing: 0;
   cursor: pointer;
-  direction: ltr;
   unicode-bidi: isolate;
   overflow-wrap: anywhere;
   text-align: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
 }
 .msg-content .ws-path-link:hover {
   text-decoration: underline;
@@ -7106,7 +7282,7 @@ h4,
 /* Every agent question (ask / approval / model) emerges from the composer
    itself: same width, same glass, same 32px corners — never a separate
    floating card. Enter rises out of the template, exit sinks back into it. */
-.question-card.from-composer {
+.question-card.from-composer:not(.ask) {
   max-width: 800px;
   margin: 0 auto 8px;
   padding: 12px 14px;
@@ -7120,8 +7296,27 @@ h4,
   transform-origin: bottom center;
   animation: composer-emerge 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
-.question-card.from-composer.leaving {
+.question-card.from-composer:not(.ask).leaving {
   animation: composer-sink 200ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+/* Ask (choices / essay / صح-غلط) is ONE fused template with the composer:
+   flat bottom, pulled up over it — never a separate rounded card. Wins over
+   .from-composer by specificity so the two can never split apart. */
+.question-card.ask.from-composer {
+  margin: 0 auto -20px;
+  padding: 10px 12px 30px;
+  border-radius: 22px 22px 0 0;
+  background: var(--background-card-gray);
+  border: 1px solid var(--border-light);
+  border-bottom: 0;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+  transform-origin: bottom center;
+  animation: ask-in 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.question-card.ask.from-composer.leaving {
+  animation: ask-out 200ms cubic-bezier(0.4, 0, 1, 1) both;
 }
 @keyframes composer-emerge {
   from {
@@ -7690,30 +7885,54 @@ h4,
   background: #2a2a2a;
 }
 
-/* ---------- final-reply screenshots (part of the answer, survive refresh) ---------- */
+/* ---------- final-reply images: ONE unified centered template (screenshots + generated) ---------- */
 .msg-final-shots {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 8px;
-  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
 }
 .final-shot {
-  border-radius: 12px;
+  flex: 1 1 16rem;
+  max-width: 32rem;
+  margin-inline: auto;
+  border-radius: var(--r-md);
   overflow: hidden;
   border: 1px solid var(--border-light);
-  background: #0d0d0d;
+  background: var(--background-menu-white);
+  box-shadow: var(--sh-2);
   cursor: zoom-in;
   animation: a-thumb-in var(--dur-slow) var(--ease) both;
-  transition: transform var(--dur) var(--ease);
+  transition: transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
-.final-shot:hover {
-  transform: translateY(-2px);
+.final-shot:only-child {
+  flex: 0 1 28rem;
+}
+@media (hover: hover) {
+  .final-shot:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--sh-3);
+  }
+}
+.final-shot:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
 }
 .final-shot img {
   width: 100%;
   height: auto;
   object-fit: contain;
   display: block;
+}
+@media (prefers-reduced-motion: reduce) {
+  .final-shot {
+    animation: none;
+    transition: none;
+  }
+  .final-shot:hover {
+    transform: none;
+  }
 }
 
 /* ---------- screenshot lightbox: fullscreen + zoom (phone + desktop) ---------- */
@@ -10703,3 +10922,40 @@ body:not(.browser-visible) #liveMini {
   border: 1px solid var(--border-main);
   background: var(--background-nav);
 }
+
+/* ---------- PDF Studio overlay (full page above agent) ---------- */
+#studioOverlay{position:fixed;inset:0;z-index:200;display:none;background:#1a1a1a}
+#studioOverlay.open{display:flex;flex-direction:column;animation:st-ov-in 340ms cubic-bezier(.22,1,.36,1) both}
+@keyframes st-ov-in{from{opacity:0;transform:scale(.96) translateY(14px)}to{opacity:1;transform:none}}
+#studioOverlay.closing{animation:st-ov-out 280ms cubic-bezier(.4,0,1,1) both}
+@keyframes st-ov-out{from{opacity:1;transform:none}to{opacity:0;transform:scale(.97) translateY(10px)}}
+/* PDF Studio card (end of reply) — Gateway row-card language, thinner and
+   tighter: glass document tile + title row (status dot + name) + status
+   line + counts line + chevron. The whole card opens the studio.
+   Dots: orange = generating, green = new unseen designs, grey = caught up. */
+.row-card.st-row{gap:10px;margin-top:12px;margin-bottom:6px;padding:8px 10px;border-radius:18px;animation:st-card-in 520ms cubic-bezier(.22,1,.36,1) both}
+@keyframes st-card-in{from{opacity:0;transform:translateY(16px) scale(.97)}60%{opacity:1;transform:translateY(-2px) scale(1.005)}to{opacity:1;transform:none}}
+.row-card.st-row .tile.st-tile{width:38px;height:38px;flex-basis:38px;border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.04));border:1px solid rgba(255,255,255,.22);color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
+.row-card.st-row .tile.st-tile svg{width:19px;height:19px}
+.row-card.st-row .row-body{display:flex;flex-direction:column;gap:1px}
+.row-card.st-row .row-title{font-size:14px;margin-bottom:0}
+.row-card.st-row .row-title b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-card.st-row .row-sub{display:inline-flex;align-items:center;gap:6px;font-size:12px;margin-bottom:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-card.st-row .row-desc{font-size:11px;margin:0;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:#525252;box-shadow:none;animation:none}
+.st-dot.is-running{background:#fbbf24;box-shadow:0 0 8px rgba(251,191,36,.7);animation:st-dot-pulse 1.1s ease-in-out infinite}
+.st-dot.is-done{background:#4ade80;box-shadow:0 0 8px rgba(74,222,128,.7);animation:none}
+@keyframes st-dot-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+@media (max-width:640px){
+.row-card.st-row{padding:8px 10px}
+}
+@media (prefers-reduced-motion: reduce){
+.row-card.st-row{animation:none}
+.st-dot.is-running{animation:none}
+}
+#studioOverlay .st-ov-bar{height:44px;min-height:44px;background:#000;color:#fff;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid rgba(255,255,255,.12)}
+#studioOverlay .st-ov-title{flex:1;font-size:13px;font-weight:700}
+#studioOverlay .st-ov-close{width:30px;height:30px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:transparent;color:#fff;cursor:pointer}
+#studioOverlay .st-ov-frame{flex:1;border:0;background:#1a1a1a;width:100%}
+.st-open-card{display:inline-flex;align-items:center;gap:8px;margin-top:8px;padding:10px 16px;border-radius:999px;border:0;background:#fff;color:#000;font-weight:700;font-size:13px;cursor:pointer}
+

@@ -142,7 +142,7 @@ def _mock_gen(monkeypatch):
     import core.tools.trigger.tool as _T
     n = {"i": 0}
 
-    def fake(name, task, config, todo=None):
+    def fake(name, task, config, todo=None, cancel_flag=None):
         n["i"] += 1
         return f"# Mock Skill v{n['i']} for {task[:30]}"
 

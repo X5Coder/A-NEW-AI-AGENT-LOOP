@@ -1,9 +1,9 @@
 # Project Instructions — Mandatory
 
 > **MANDATORY FIRST STEP FOR EVERY NEW CHAT IN THIS PROJECT:**
-> This project is governed by `Master Code Rules.md` (83 rules + Absolute Rules + Final Principle) and `PROJECT_MAP.md` (standard structure blueprint).
+> This project is governed by `Design Rules.md` (Section 0 - base design rules, loaded first) + `Master Code Rules.md` (83 rules + Absolute Rules + Final Principle) and `PROJECT_MAP.md` (standard structure blueprint).
 > On **every new session/chat**, before doing ANY other task:
-> 1. Read `Master Code Rules.md`, `AGENTS.md`, and `PROJECT_MAP.md` in full (via `read` tool)
+> 1. Read `Design Rules.md`, `Master Code Rules.md`, `AGENTS.md`, and `PROJECT_MAP.md` in full (via `read` tool)
 > 2. Confirm you have loaded them and will enforce all rules + standard map for the entire session
 > 3. Apply the conflict priority: 1.Correctness > 2.Security > 3.Data integrity > 4.Explicit requirements > 5.Maintainability > 6.Performance > 7.Convenience
 > 4. Build strictly on `PROJECT_MAP.md` — place every file according to the map. If you add/move/rename/remove any file or directory, update `PROJECT_MAP.md` in the same session to keep it in sync.
@@ -21,6 +21,7 @@ Whenever the user asks to write, design, draft, improve, or fix ANY system promp
 4. Never answer such requests from general knowledge alone.
 
 Project root contains:
+- `Design Rules.md` — Section 0 base design rules (priority ladder + process + tokens-only + a11y/RTL/motion checklist), loaded first every chat
 - `Master Code Rules.md` — the canonical rules file (source of truth)
 - `PROJECT_MAP.md` — the standard project structure blueprint (must stay in sync with disk)
 - `updates.json` — the single update source (see Updates-file rule below)

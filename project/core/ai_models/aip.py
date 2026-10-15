@@ -57,7 +57,8 @@ MESSAGES_REF = "input.messages"
 MODEL_REF = "model.model_name"
 
 # Per-kind request refs that MUST appear somewhere inside request.*.
-# (vision carries its image inside messages parts; image/tts build their
+# (vision carries its image inside messages parts, video carries its video
+# inside messages parts; image/tts build their
 # prompt from messages via transform_content; stt collects audio from
 # messages via collect_media — all still need the messages ref.)
 # NOTE: model.model_name is deliberately NOT enforced: many local/private
@@ -66,6 +67,7 @@ MODEL_REF = "model.model_name"
 REQUIRED_REQUEST_REFS: dict = {
     "text": (MESSAGES_REF,),
     "vision": (MESSAGES_REF,),
+    "video": (MESSAGES_REF,),
     "image": (MESSAGES_REF,),
     "tts": (MESSAGES_REF,),
     "stt": (MESSAGES_REF,),
@@ -75,6 +77,7 @@ REQUIRED_REQUEST_REFS: dict = {
 REQUIRED_RESPONSE_ANY: dict = {
     "text": ("text", "tool_calls", "auto"),
     "vision": ("text", "auto"),
+    "video": ("text", "auto"),
     "image": ("media", "auto"),
     "tts": ("media", "auto"),
     "stt": ("text", "auto"),

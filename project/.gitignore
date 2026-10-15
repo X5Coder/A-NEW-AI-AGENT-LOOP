@@ -26,6 +26,10 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Studio shell build inputs only (dist/ IS committed: the console serves it)
+web/studio-pdf/node_modules/
+web/studio-pdf/dist-ssr/
+
 # Logs / temp / storage runtime data
 *.log
 storage/database/*

@@ -513,7 +513,7 @@ function openPreviewDialog(file) {
     // (opaque-origin frames send no cookies, so every authenticated
     // subresource 401s and previews show no pictures). Scripts stay fully
     // blocked (no allow-scripts), as do forms, popups and top navigation —
-    // deck slides are static by contract (no scripts, see pdf_slide_system),
+    // studio pages render without scripts in preview (see pdf_studio_system),
     // so nothing real loses functionality.
     // Scrolling stays enabled (no scrolling="no"): the dialog CSS gives the
     // frame overflow:auto, so wheel on desktop and finger swipes on phones

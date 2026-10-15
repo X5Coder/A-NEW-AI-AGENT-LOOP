@@ -17,7 +17,7 @@ def _validate_prompt(p) -> str | None:
     return p.strip() if p.strip() else None
 
 
-def execute(image_id: str | None = None, image_path: str | None = None, prompt: str | None = None) -> dict:
+def execute(image_id: str | None = None, image_path: str | None = None, prompt: str | None = None, cancel_flag=None) -> dict:
     if image_id is not None and not isinstance(image_id, str):
         raise TypeError("image_id must be string")
     if image_path is not None and not isinstance(image_path, str):
@@ -34,10 +34,14 @@ def execute(image_id: str | None = None, image_path: str | None = None, prompt: 
     b64, mime = image_to_base64(resolved)
     from core.ai_models.engine import analyze
     try:
+        # STOP reaches the vision request mid-flight: the loop forwards its
+        # cancel event here (dispatcher only passes it when accepted), and
+        # the engine aborts between read chunks instead of after inference.
+        options = {"cancel_event": cancel_flag} if cancel_flag is not None else None
         answer = analyze(record, {
             "prompt": pr or "Describe this image in detail.",
             "image_base64": b64, "image_mime": mime,
-        })
+        }, options)
     except RuntimeError:
         raise
     except Exception as e:

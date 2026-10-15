@@ -4,19 +4,19 @@
  */
 "use strict";
 
-import { initModal, hideBootSplash, animateIn } from "./ui.js?v=13";
-import { initNavigation } from "./navigation.js?v=13";
-import { startEvents, whenHello } from "./events.js?v=5";
+import { initModal, hideBootSplash, animateIn } from "./ui.js?v=14";
+import { initNavigation } from "./navigation.js?v=14";
+import { startEvents, whenHello, hasBootCache } from "./events.js?v=6";
 import { initWorkspace } from "./workspace.js?v=22";
 import { initDashboard } from "./dashboard.js?v=14";
-import { initCharts } from "./charts.js?v=14";
-import { initChat } from "./chat.js?v=101";
+import { initCharts } from "./charts.js?v=21";
+import { initChat } from "./chat.js?v=104";
 import { initSchedule } from "./schedule.js?v=26";
-import { initPlugins } from "./plugins.js?v=9";
 import { initSkills } from "./skills.js?v=10";
 import { initGateway } from "./gateway.js?v=30";
 import { initAiModels } from "./ai_models.js?v=6";
 import { initSettings } from "./settings.js?v=13";
+import { initStudioPdf } from "./studio_pdf.js?v=12";
 
 // Keeps .app pinned to the real visible area when the mobile keyboard
 // opens. iOS doesn't shrink window.innerHeight and 100dvh differs per
@@ -106,12 +106,48 @@ function replayEntrance() {
 async function init() {
   initModal();
   initKeyboardViewport();
+  initStudioPdf();
   initNavigation();
   startEvents();
-  // Boot barrier: the black splash lifts only after EVERY boot payload
-  // lands (SSE hello snapshot + each module's first load). allSettled so
-  // one failed fetch can never trap the splash; a bounded watchdog
-  // force-releases it when the backend is unreachable.
+  // Boot barrier, two paths:
+  // - Hash-cache hit (refresh): cached sections already replay into the
+  //   modules synchronously, so the shell paints instantly — lift the
+  //   splash fast (~one entrance beat) and reconcile with the network in
+  //   the background (unchanged hash = cached render stays, broken hash =
+  //   re-render + stored hash rewritten by events.js).
+  // - First run (no cache): wait for EVERY boot payload as before, so the
+  //   splash lifts only when real data is in. allSettled + a bounded
+  //   watchdog so one failed fetch can never trap the splash.
+  let cached = false;
+  try {
+    cached = hasBootCache() || !!window.__x5bootCached;
+  } catch (_) {}
+  if (cached) {
+    const background = Promise.allSettled([
+      whenHello(),
+      initDashboard(),
+      initCharts(),
+      initChat(),
+      initSkills(),
+      initAiModels(),
+      initWorkspace(),
+      initSchedule(),
+      initGateway(),
+      initSettings(),
+    ]);
+    // Let the cached paint land + the entrance play, then reveal.
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    } catch (_) {}
+    hideBootSplash();
+    replayEntrance();
+    // Background reconcile: never traps the UI; failures stay silent
+    // (live SSE redials on its own backoff).
+    try {
+      await background;
+    } catch (_) {}
+    return;
+  }
   const watchdog = new Promise((resolve) => setTimeout(resolve, 15000));
   try {
     await Promise.race([
@@ -120,7 +156,6 @@ async function init() {
         initDashboard(),
         initCharts(),
         initChat(),
-        initPlugins(),
         initSkills(),
         initAiModels(),
         initWorkspace(),

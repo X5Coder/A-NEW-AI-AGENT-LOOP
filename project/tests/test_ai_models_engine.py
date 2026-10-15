@@ -320,7 +320,7 @@ assert out["error"]["category"] == "invalid_config", out
 print("invalid_config unknown-var OK")
 
 # invalid_config: bad kind / version
-for kind, ver in (("video", 1), ("text", 99)):
+for kind, ver in (("music", 1), ("text", 99)):
     b2 = _rec(kind, "m", BASE)
     b2["config_json"]["version"] = ver
     probs = E.validate(b2["config_json"])

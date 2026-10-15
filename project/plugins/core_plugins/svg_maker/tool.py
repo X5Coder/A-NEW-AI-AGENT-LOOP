@@ -100,7 +100,7 @@ def _system_prompt() -> str:
             "Reply with raw <svg>...</svg> only, no explanation, no scripts.")
 
 
-def _llm_svg(system: str, user: str) -> str:
+def _llm_svg(system: str, user: str, cancel_flag=None) -> str:
     """One bounded model call returning raw SVG text. Raises RuntimeError."""
     _bootstrap()
     from core.ai_models.store import require_text_model
@@ -118,7 +118,7 @@ def _llm_svg(system: str, user: str) -> str:
             ],
         }
         try:
-            res = _aip.execute(record, canonical, "text")
+            res = _aip.execute(record, canonical, "text", cancel_event=cancel_flag)
             content = (res.get("text") if isinstance(res, dict) else "") or ""
         except Exception as e:
             raise RuntimeError(
@@ -132,7 +132,7 @@ def _llm_svg(system: str, user: str) -> str:
             content = _legacy_chat(
                 record,
                 [{"role": "user", "content": user}],
-                {"system": system},
+                {"system": system, "cancel_event": cancel_flag},
             )
         except Exception as e:
             raise RuntimeError(
@@ -180,13 +180,22 @@ def _validate_svg(svg: str) -> str:
     return svg
 
 
-def _run_icon(system: str, user: str) -> str:
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def _run_icon(system: str, user: str, cancel_flag=None) -> str:
     """One icon with bounded retries. Returns sanitized valid SVG."""
     last_error = "unknown error"
     prompt = user
     for _ in range(MAX_RETRIES):
+        if _cancelled(cancel_flag):
+            raise RuntimeError("Cancelled.")
         try:
-            raw = _llm_svg(system, prompt)
+            raw = _llm_svg(system, prompt, cancel_flag)
             return _validate_svg(_sanitize_svg(_extract_svg(raw)))
         except (RuntimeError, ValueError) as e:
             last_error = str(e)[:200]
@@ -207,7 +216,9 @@ def _save_svg(icon_name: str, svg: str) -> str:
     return rel
 
 
-def execute(description: str = "", icon_name: str | None = None, size: int | None = None, **_) -> dict:
+def execute(description: str = "", icon_name: str | None = None, size: int | None = None, cancel_flag=None, **_) -> dict:
+    if cancel_flag is not None and _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
     desc = _validate_description(description)
     name = _validate_icon_name(icon_name) or _slug(desc)
     px = _validate_size(size)
@@ -217,7 +228,7 @@ def execute(description: str = "", icon_name: str | None = None, size: int | Non
         f"Size: {px}x{px} (set width=\"{px}\" height=\"{px}\" on the svg root, keep viewBox=\"0 0 24 24\").\n"
         f"Create the icon now."
     )
-    svg = _run_icon(system, user)
+    svg = _run_icon(system, user, cancel_flag)
     rel = _save_svg(name, svg)
     try:
         size_bytes = len(svg.encode("utf-8"))

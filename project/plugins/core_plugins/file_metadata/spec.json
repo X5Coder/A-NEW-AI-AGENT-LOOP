@@ -1,0 +1,23 @@
+{
+  "name": "file_metadata",
+  "description": "Read AND edit metadata of ANY file inside X5Agent/Workspace. action=read (default) extracts everything it can — base facts for any file (name, size, mime, modified time, sha256) plus image details (format, dimensions, EXIF tags, PNG text) plus audio/video duration when ffmpeg exists — and returns it normally. action=set writes the given tags into a COPY (<name>.meta.<ext>, the original is never touched): EXIF for JPEG/TIFF, text chunks for PNG. Other file kinds cannot carry edited tags and are rejected for set.",
+  "inputs": {
+    "path": {
+      "type": "string",
+      "required": true,
+      "description": "Workspace-relative file path, e.g. images/photo.jpg."
+    },
+    "action": {
+      "type": "string",
+      "required": false,
+      "enum": ["read", "set"],
+      "default": "read",
+      "description": "read: extract all metadata. set: write tags (needs tags) into a .meta copy."
+    },
+    "tags": {
+      "type": "string",
+      "required": false,
+      "description": "JSON object of tags for action=set, e.g. {\"Artist\": \"Omar\", \"Copyright\": \"2026\"}. Common EXIF names (ImageDescription, Artist, Copyright, Software, DateTime) or numeric ids (\"271\"); PNG keys are stored verbatim. Max 20 tags."
+    }
+  }
+}

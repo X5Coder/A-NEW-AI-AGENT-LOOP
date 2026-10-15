@@ -95,6 +95,20 @@ def _compute_hash(triggers: list[dict]) -> str:
         blob += f"{t.get('name','')}:{t.get('description','')}\n"
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
+def _spec_fingerprint(name: str, description: str) -> str:
+    """Per-spec fingerprint (stored on every entry).
+
+    Incremental-update contract: a stored embedding is reused ONLY when
+    its fingerprint still matches the current spec. New specs, edited
+    descriptions, and legacy entries (no fingerprint) are re-embedded;
+    removed specs simply disappear. Never raises.
+    """
+    try:
+        blob = f"{name}:{description}"
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
+
 def _load_store() -> dict | None:
     for cand in (STORE_PATH, _STORE_LEGACY):
         if not cand.exists():
@@ -151,6 +165,26 @@ def ensure_embeddings(auto_create: bool = True) -> list[dict]:
     if stored and stored.get("hash") == current_hash and stored.get("triggers"):
         first = stored["triggers"][0]
         if isinstance(first.get("embedding"), list) and len(first["embedding"])>0:
+            # One-time migration: stamp per-spec fingerprints on vectors the
+            # global hash already verified — no re-embedding, so the NEXT
+            # change is incremental from the start. Never raises outward.
+            try:
+                cur_fp = {t.get("name", ""): _spec_fingerprint(t.get("name", ""), t.get("description", ""))
+                          for t in triggers}
+                touched = False
+                for entry in stored["triggers"]:
+                    try:
+                        if not entry.get("fingerprint"):
+                            fp = cur_fp.get(entry.get("name", ""))
+                            if fp:
+                                entry["fingerprint"] = fp
+                                touched = True
+                    except Exception:
+                        continue
+                if touched:
+                    _save_store(current_hash, stored["triggers"])
+            except Exception:
+                pass
             return stored["triggers"]
     if stored and stored.get("hash") != current_hash:
         try:
@@ -169,16 +203,61 @@ def ensure_embeddings(auto_create: bool = True) -> list[dict]:
             return seed["triggers"]
     if not auto_create:
         return []
-    from core.embedding.service import embed_texts, is_ready
-    if not is_ready():
-        raise FileNotFoundError("Embedding model folder is missing (project/embedding_model/). Copy it with the project and restart.")
     texts = [f"{t.get('name','')} : {t.get('description','')}"[:2000] for t in triggers]
-    embeddings = embed_texts(texts, normalize=True, progress_label="trigger-discovery")
+    fingerprints = [_spec_fingerprint(t.get("name", ""), t.get("description", "")) for t in triggers]
+    # Incremental rebuild: reuse stored embeddings whose fingerprint is
+    # unchanged — only new/changed specs hit the model.
+    old_by_name: dict = {}
+    if isinstance(stored, dict) and isinstance(stored.get("triggers"), list):
+        for entry in stored["triggers"]:
+            try:
+                if (isinstance(entry.get("name"), str)
+                        and isinstance(entry.get("embedding"), list)
+                        and entry["embedding"]):
+                    old_by_name[entry["name"]] = entry
+            except Exception:
+                continue
+    final_emb: list = [None] * len(triggers)
+    reused = 0
+    for i, t in enumerate(triggers):
+        old = old_by_name.get(t.get("name", ""))
+        if (old is not None and old.get("fingerprint") == fingerprints[i]
+                and isinstance(old.get("embedding"), list)):
+            final_emb[i] = old["embedding"]
+            reused += 1
+
+    def _embed_some(indexes: list) -> None:
+        from core.embedding.service import embed_texts, is_ready
+        if not is_ready():
+            raise FileNotFoundError("Embedding model folder is missing (project/embedding_model/). Copy it with the project and restart.")
+        got = embed_texts([texts[i] for i in indexes], normalize=True,
+                          progress_label="trigger-discovery")
+        if len(got) != len(indexes):
+            raise RuntimeError(f"Embedding batch incomplete ({len(got)}/{len(indexes)})")
+        for i, emb in zip(indexes, got):
+            final_emb[i] = emb
+
+    need = [i for i, e in enumerate(final_emb) if e is None]
+    if need:
+        _embed_some(need)
+    dim = next((len(e) for e in final_emb if isinstance(e, list) and e), 0)
+    bad = [i for i, e in enumerate(final_emb)
+           if not isinstance(e, list) or len(e) != dim or dim == 0]
+    if bad:
+        _embed_some(bad)
+        dim = next((len(e) for e in final_emb if isinstance(e, list) and e), 0)
+        bad = [i for i, e in enumerate(final_emb)
+               if not isinstance(e, list) or len(e) != dim or dim == 0]
+    if bad:
+        raise RuntimeError(f"Embedding rebuild left {len(bad)} triggers without vectors")
     with_emb = []
-    for spec, emb in zip(triggers, embeddings):
-        with_emb.append({"name": spec["name"], "description": spec["description"], "spec": spec, "embedding": emb})
+    for spec, emb, fp in zip(triggers, final_emb, fingerprints):
+        with_emb.append({"name": spec["name"], "description": spec["description"],
+                         "spec": spec, "embedding": emb, "fingerprint": fp})
     _save_store(current_hash, with_emb)
-    print(f"[trigger-discovery] Embeddings for {len(with_emb)} triggers, hash {current_hash[:8]}")
+    print(f"[trigger-discovery] Incremental update: reused {reused}, "
+          f"embedded {len(with_emb) - reused} of {len(with_emb)} triggers, "
+          f"hash {current_hash[:8]}")
     return with_emb
 
 def search(query: str, top_k: int = 5) -> list[dict]:

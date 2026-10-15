@@ -1,0 +1,11 @@
+{
+  "name": "generate_image",
+  "description": "Generate one image from a text prompt using the connected AI Image Model. Use whenever the user asks for a new picture, wallpaper, illustration or logo. Saves the file under X5Agent/Data/files/images and returns its name so it renders as a professional centered card at the end of the chat with fullscreen zoom. Keep prompts concrete (subject + style + mood, max 1000 chars).",
+  "inputs": {
+    "prompt": {
+      "type": "string",
+      "required": true,
+      "description": "What to draw (subject + style + mood, max 1000 chars)."
+    }
+  }
+}

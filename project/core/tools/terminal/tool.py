@@ -196,7 +196,16 @@ def _validate_timeout(v) -> int:
     return v
 
 
-def execute(command: str, workdir: str | None = None, timeout: int | None = None) -> dict:
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def execute(command: str, workdir: str | None = None, timeout: int | None = None, cancel_flag=None) -> dict:
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
     cmd = _validate_command(command)
     wd = _validate_workdir(workdir)
     to = _validate_timeout(timeout)
@@ -229,7 +238,22 @@ def execute(command: str, workdir: str | None = None, timeout: int | None = None
                 **popen_kwargs,
             )
             try:
-                proc.wait(timeout=to)
+                # Sliced wait: STOP kills the tree at once instead of
+                # waiting out the full timeout (up to 120s).
+                elapsed = 0.0
+                while True:
+                    if _cancelled(cancel_flag):
+                        _kill_tree(proc.pid)
+                        raise RuntimeError("Cancelled.")
+                    step = min(1.0, float(to) - elapsed)
+                    if step <= 0:
+                        raise subprocess.TimeoutExpired(cmd, to)
+                    try:
+                        proc.wait(timeout=step)
+                        break
+                    except subprocess.TimeoutExpired:
+                        elapsed += step
+                        continue
                 returncode = proc.returncode
             except subprocess.TimeoutExpired:
                 timed_out = True

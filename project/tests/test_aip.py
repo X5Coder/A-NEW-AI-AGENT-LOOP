@@ -411,16 +411,27 @@ def test_compile_once_fast_path():
 
 
 def test_models_prompts_teach_aip1():
+    import re as _re
     from core.ai_models.models_prompts import get_prompt, read_all
     p = project_root / "core" / "ai_models" / "models_prompts.md"
     assert p.exists(), "missing models_prompts.md"
     sections = read_all()
-    for kind in ("text", "vision", "image", "tts", "stt"):
+    for kind in ("text", "vision", "video", "image", "tts", "stt"):
         text = sections.get(kind) or get_prompt(kind)
         assert text and text.strip(), f"missing prompt section for {kind}"
         assert '"language": "AIP/1"' in text, f"{kind} prompt must teach AIP/1"
         assert "{{api_key}}" not in text, f"{kind} prompt must not use legacy variables"
         assert "Field 5" in text, f"{kind} prompt must describe all 5 dialog fields"
+        # Every pasted example parser must be strict-valid JSON: assistants
+        # copy the example shape, and one extra brace once caused
+        # "Unexpected non-whitespace character after JSON at position 1011".
+        fence_blocks = _re.findall(r"```json\s*([\s\S]*?)```", text)
+        pasted = [b.strip() for b in fence_blocks if b.strip().startswith("{")]
+        assert pasted, f"{kind} prompt has no pastable example parser"
+        for b in pasted:
+            obj = json.loads(b)
+            assert A.validate_parser(obj) == [], f"{kind} example parser invalid"
+            assert A.missing_required_refs(obj, kind) == [], f"{kind} example drops required refs"
 
 
 class _Mock(BaseHTTPRequestHandler):

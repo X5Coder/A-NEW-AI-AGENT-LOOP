@@ -112,10 +112,32 @@
     min-width: 0;
   }
   .flow {
-    padding: 10px 10px 6px;
+    padding: var(--sp-3) var(--sp-3) var(--sp-2);
   }
   .flow-svg {
-    height: 168px;
+    height: 10.5rem;
+  }
+  /* Graphical usage table: tighter cells keep Day + Requests + Tokens
+     on one screen width with no horizontal scroll. */
+  .tbl thead th,
+  .tbl tbody th,
+  .tbl tbody td {
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .tbl tbody th {
+    max-width: 5.5rem;
+  }
+  .gbar {
+    margin-top: 0.25rem;
+  }
+  /* Block charts: smaller axis labels keep every day readable on phones. */
+  .bars-wrap {
+    padding: var(--sp-2) var(--sp-2) 0;
+  }
+  .bars-tick,
+  .bars-x,
+  .bars-peak-val {
+    font-size: 10px;
   }
   .flow-x {
     gap: 2px;

@@ -104,6 +104,6 @@ The only built-in model is the hidden embedding model:
 embedding_model/  (bundled embedding model, ~1.2 GB, offline, GPU auto / CPU fallback)
 ```
 
-Chat, vision, image, speech-to-text and text-to-speech models are NOT
+Chat, vision, video, image, speech-to-text and text-to-speech models are NOT
 shipped: connect any of them in the console under **AI Models**
-(5 fixed templates, same 4 fields each, universal Connection JSON).
+(6 fixed templates, same 4 fields each, universal Connection JSON).

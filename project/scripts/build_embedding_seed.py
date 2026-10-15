@@ -4,6 +4,11 @@ Reads the runtime stores (X5Agent/Data/vector) and copies them as
 *.seed.json into project/storage/vector/ (committed, small JSON), so a
 fresh copy gets instant tool/trigger search when specs are unchanged.
 
+INCREMENTAL: the stores keep a per-spec fingerprint on every entry —
+ensure_* reuses stored embeddings whose fingerprint still matches and
+embeds ONLY new/changed specs (never all from scratch). So this script
+updates just what is missing, then snapshots the store into the seed.
+
 - Fully automatic: a missing/incomplete project/embedding_model/ folder
   downloads on its own (deltas only, resume on restart).
 - --snapshot-only : skip the model entirely; snapshot the current runtime
@@ -91,8 +96,9 @@ def main(argv: list[str]) -> int:
         return 1
     print(f"[seed] embedding model ready (device: {detect_device()}, auto)")
 
-    # ensure_* reuses the runtime store when specs are unchanged (hash match),
-    # so this is instant on a healthy copy and rebuilds only when needed.
+    # ensure_* is incremental (per-spec fingerprints): unchanged specs reuse
+    # their stored vectors, so this embeds only what is new/changed and is
+    # instant on a healthy copy.
     tools = tool_store.ensure_embeddings(auto_create=True)
     triggers = trigger_store.ensure_embeddings(auto_create=True)
     print(f"[seed] runtime stores ready: {len(tools)} tools, {len(triggers)} triggers")

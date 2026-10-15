@@ -407,13 +407,71 @@ def _live_update(channel: str, chat: str, reason: str) -> None:
         pass
 
 
+def _public_base() -> str:
+    """Clickable base for gateway links: the live funnel URL when the public
+    link is on, else the configured loopback (phones can't open loopback —
+    the reply still carries the text, but only a funnel link truly opens).
+    Read fresh per message (cheap JSON read, no subprocess): the funnel can
+    come up after the server started. Never raises."""
+    try:
+        import json as _json
+        from core.paths import data_root as _data_root
+        saved = _json.loads(
+            (_data_root() / "database" / "tailscale.json").read_text(encoding="utf-8"))
+        url = str((saved or {}).get("public_url") or "").strip()
+        if url.startswith("https://") and len(url) < 200:
+            return url if url.endswith("/") else url + "/"
+    except Exception:
+        pass
+    try:
+        base = str(_dashboard_url or "").strip() or "http://127.0.0.1:7777/"
+        return base if base.endswith("/") else base + "/"
+    except Exception:
+        return "http://127.0.0.1:7777/"
+
+
+def _expand_studio_links(text: str) -> str:
+    """Gateway has no OPEN button: turn every [STUDIO:id] card token and every
+    bare /studio-pdf/<id> path into a full clickable studio link (plain text).
+    Dead loopback absolutes the model may have written become the live base
+    too (a phone can never open 127.0.0.1). Website rendering is untouched
+    (it owns the card). Never raises."""
+    try:
+        import re as _re
+
+        base = _public_base()
+        t = str(text or "")
+        if not t or ("[STUDIO:" not in t and "/studio-pdf/" not in t
+                     and "127.0.0.1" not in t and "localhost" not in t):
+            return text
+        valid = _re.compile(r"\[STUDIO:([A-Za-z0-9_-]{1,40})\]")
+        seen: set[str] = set()
+
+        def _card(m) -> str:
+            sid = m.group(1)
+            seen.add(sid)
+            return f"\nرابط الاستوديو: {base}studio-pdf/{sid}"
+
+        t = valid.sub(_card, t)
+        # Bare relative links the model wrote ("/studio-pdf/pdf_1") become
+        # absolute too — but never touch already-absolute http(s) links,
+        # except dead loopback ones, which are rewritten to the live base.
+        t = _re.sub(r"(?<![:/\w])/(studio-pdf/[A-Za-z0-9_-]{1,40})",
+                    lambda m: f"{base}{m.group(1)}", t)
+        t = _re.sub(r"https?://(?:127\.0\.0\.1|localhost)(?::\d+)?/(studio-pdf/[A-Za-z0-9_-]{1,40})",
+                    lambda m: f"{base}{m.group(1)}", t)
+        return t.strip() or text
+    except Exception:
+        return text
+
+
 def _live_deliver_final(channel: str, chat: str, text: str, reply_to: str = "") -> bool:
     """Deliver the final reply through the live message when possible.
 
     Permanent rule: edit the live message to the reply once; ANY refusal
     sends the reply as a new message (bounded retries). Never raises."""
     try:
-        text = str(text or "").strip()
+        text = _expand_studio_links(str(text or "").strip())
         if not text:
             return False
         st = _state_for((channel, chat))

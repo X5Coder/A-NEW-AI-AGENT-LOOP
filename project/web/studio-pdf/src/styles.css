@@ -1,0 +1,358 @@
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: "Cairo", "Space Grotesk", system-ui, sans-serif;
+  background: #1a1a1a; /* نفس خلفية مشروع الايجنت */
+  color: #f5f5f5;
+  overflow: hidden;
+}
+
+.studio { height: 100dvh; display: flex; flex-direction: column; background: #1a1a1a; overflow: hidden; }
+
+/* ===== تولبار أسود صغير ===== */
+.toolbar { height: 44px; min-height: 44px; background: #000; border-bottom: 1px solid rgba(255,255,255,.12); display: flex; align-items: center; gap: 10px; padding: 0 10px; z-index: 50; }
+.tb-mark { display: grid; place-items: center; width: 30px; height: 30px; }
+.tb-square { width: 20px; height: 20px; background: #fff; border-radius: 5px; display: block; }
+.tb-group { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.tb-group::-webkit-scrollbar { display: none; }
+.tb-icon, .tb-pdf { flex: 0 0 auto; }
+.tb-sep { width: 1px; height: 20px; background: rgba(255,255,255,.15); margin: 0 6px; }
+.tb-icon { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: transparent; border: 1px solid transparent; color: #e8e8e8; cursor: pointer; padding: 0; }
+.tb-icon svg { width: 17px; height: 17px; }
+.tb-icon:hover { background: rgba(255,255,255,.1); }
+.tb-icon.is-active { background: rgba(255,255,255,.14); }
+.tb-icon.is-disabled { opacity: .28; cursor: not-allowed; }
+.tb-icon.is-disabled:hover { background: transparent; }
+.tb-pdf { display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px 0 8px; background: #fff; color: #000; border: 0; border-radius: 999px; font-weight: 700; font-size: 12px; letter-spacing: .06em; cursor: pointer; white-space: nowrap; }
+.tb-pdf-icon { display: grid; place-items: center; }
+.tb-pdf-icon svg { width: 16px; height: 16px; }
+.tb-pdf:hover { opacity: .88; }
+.tb-pdf:active { transform: scale(.96); }
+.tb-size-wrap { display: flex; align-items: center; gap: 2px; position: relative; }
+.tb-size-label { font-size: 11px; color: #bbb; min-width: 52px; }
+/* Right zone: reserved for the PDF name + page count only (all icons live
+   on the left). Bounded with its own border so a long name ellipsizes
+   inside and never slides over the icons — phone + desktop alike. */
+.tb-right { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 0 0 auto; max-width: 34vw; margin-inline-start: auto; overflow: hidden; border-inline-start: 1px solid rgba(255,255,255,.12); padding-inline-start: 10px; }
+/* THE single page creator: fixed in the toolbar (never scrolls away), always
+   visible on phone + desktop. White icon with NO background (same language
+   as the other toolbar icons). One press creates a page and scrolls to it. */
+.tb-add { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; background: transparent; color: #fff; border: 1px solid transparent; border-radius: 8px; cursor: pointer; padding: 0; transition: background .2s ease, transform .25s cubic-bezier(.22,1,.36,1); }
+.tb-add svg { width: 16px; height: 16px; }
+.tb-add:hover { background: rgba(255,255,255,.1); }
+.tb-add:active { transform: scale(.92); }
+@media (prefers-reduced-motion: reduce) {
+  .tb-add { transition: background .15s ease; }
+  .tb-add:active { transform: none; }
+}
+.tb-page { font-size: 11px; color: #999; font-variant-numeric: tabular-nums; }
+/* Studio title (ellipsis) + page-count pill: "ملف PDF جديد 2 · 1 / 3" reads as one clean unit. */
+.tb-title { flex: 1 1 auto; min-width: 0; font-size: 12px; font-weight: 700; color: #eee; max-width: 22vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+/* Inline rename field (double-click the name): same slot, never overflows. */
+.tb-title-edit { flex: 1 1 auto; min-width: 0; max-width: 22vw; height: 28px; font-size: 12px; font-weight: 700; font-family: inherit; color: #fff; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.3); border-radius: 8px; padding: 0 8px; outline: none; }
+.tb-count { flex: 0 0 auto; }
+.tb-count { font-size: 11px; font-weight: 700; color: #fff; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.16); border-radius: 999px; padding: 2px 10px; font-variant-numeric: tabular-nums; white-space: nowrap; animation: tb-count-pop .3s cubic-bezier(.22,1,.36,1) both; }
+@keyframes tb-count-pop { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: scale(1); } }
+.pop-backdrop { position: fixed; inset: 0; z-index: 60; }
+.size-pop { position: absolute; top: calc(100% + 10px); left: 0; width: 280px; background: linear-gradient(145deg, #252525, #141414); border: 1px solid rgba(255,255,255,.14); border-radius: 16px; padding: 8px; z-index: 61; box-shadow: 0 24px 54px rgba(0,0,0,.55); }
+.size-pop-title { margin: 4px 6px 8px; font-size: 12px; color: #aaa; }
+.size-row { display: flex; align-items: center; gap: 10px; width: 100%; background: transparent; border: 1px solid transparent; border-radius: 12px; padding: 8px; cursor: pointer; color: #fff; text-align: left; }
+.size-row:hover { background: rgba(255,255,255,.07); }
+.size-row.is-selected { background: rgba(255,255,255,.09); border-color: rgba(255,255,255,.12); }
+.size-thumb { width: 26px; background: #fff; border-radius: 3px; min-height: 30px; flex: 0 0 26px; }
+.size-meta { display: flex; flex-direction: column; flex: 1; }
+.size-meta b { font-size: 13px; }
+.size-meta i { font-style: normal; font-size: 10px; color: #999; }
+.size-check { color: #4ade80; font-weight: 700; }
+
+/* ===== الكانفس بنفس خلفية مشروع الايجنت (#1a1a1a) والصفحة البيضاء في النص ===== */
+.canvas-dark { background: #1a1a1a; } /* خلفية مشروع الايجنت الأصلية */
+.canvas { flex: 1; min-height: 0; position: relative; display: flex; padding: 0; }
+
+/* فيد عمودي TikTok — silk scroll: native smooth + contained overscroll */
+.feed { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-snap-type: y mandatory; overscroll-behavior: contain; scrollbar-width: none; -webkit-overflow-scrolling: touch; touch-action: pan-x pan-y; }
+/* NOTE: no scroll-behavior here — it fights the rAF page glide (every frame
+   retargets the browser smooth-scroll so the feed never lands). The glide in
+   App.jsx owns all animation; snap only settles discrete pages. */
+.feed::-webkit-scrollbar { display: none; }
+.feed-slide { height: 100%; scroll-snap-align: start; scroll-snap-stop: always; display: flex; align-items: safe center; justify-content: safe center; background: transparent; overflow: auto; overscroll-behavior: contain; overflow-anchor: none; padding: 12px 16px; position: relative; }
+/* NOTE: safe center = dead-center when the page fits, full scroll range when
+   zoomed (plain center cuts the top/left off once it overflows). */
+.feed-slide::-webkit-scrollbar { display: none; }
+.fit-box { flex-shrink: 0; margin: auto; overflow: hidden; border-radius: 10px; background: transparent; box-shadow: 0 12px 48px rgba(0,0,0,.45); touch-action: pan-x pan-y; will-change: transform; }
+.fit-inner { transform-origin: top left; position: relative; transition: transform .25s cubic-bezier(.22,1,.36,1); will-change: transform; }
+/* Active phone pinch: transition off so the zoom sticks to the fingers 1:1. */
+.fit-inner.is-live { transition: none; }
+.fit-box.is-running { background: #000; }
+.fit-box.is-zoomed { cursor: grab; }
+/* Zoomed = no copy: text selection (and the mobile long-press menu) is off
+   while zoomed so dragging always pans instead of selecting. */
+.fit-box.is-zoomed, .fit-box.is-zoomed * { user-select: none !important; -webkit-user-select: none !important; -webkit-touch-callout: none !important; }
+.fit-box.is-panning { cursor: grabbing; }
+/* Transparent black while re-designing: the CURRENT design shows through. */
+.fit-inner > .st-black{position:absolute;inset:0;z-index:5}
+.st-black.is-over{background:rgba(0,0,0,.8);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+
+/* القالب الأبيض — نفس طريقة pdf motion: مقاس حقيقي، فارغ تماماً */
+.pdf-page { break-after: page; break-inside: avoid; page-break-after: always; }
+
+/* الأسهم — للداخل قليلاً، تختفي وتظهر بأنيميشن ناعم */
+.nav-arrow { position: absolute; right: 18px; width: 38px; height: 38px; border-radius: 50%; background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.18); color: rgba(255,255,255,.8); display: grid; place-items: center; cursor: pointer; z-index: 20; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); box-shadow: 0 4px 16px rgba(0,0,0,.35); opacity: .7; transform: scale(1); transition: opacity .3s ease, transform .3s cubic-bezier(.34,1.4,.64,1); }
+.nav-arrow svg { width: 18px; height: 18px; }
+.nav-arrow:hover { opacity: 1; transform: scale(1.06); }
+.nav-arrow:active { transform: scale(.94); }
+.nav-arrow.is-hidden { opacity: 0; transform: scale(.6); pointer-events: none; }
+
+/* أدوات الزوم — في شريط التولبار */
+.tb-zoom { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.tb-zoom-btn { width: 26px; height: 26px; font-size: 15px; font-weight: 700; line-height: 1; }
+.tb-zoom-val { font-size: 11px; font-weight: 700; color: #eee; min-width: 42px; text-align: center; cursor: pointer; font-variant-numeric: tabular-nums; border-radius: 6px; padding: 4px 2px; }
+.tb-zoom-val:hover { background: rgba(255,255,255,.1); }
+.nav-down { bottom: 118px; }
+.nav-up { top: 10px; }
+
+/* ===== قالب الايجنت — نسخة طبق الأصل من المشروع الأصلي: عائم شفاف وثابت بالأسفل ===== */
+.agent-float {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 20px 24px 20px; /* نفس حشو .composer-wrap الأصلي */
+  background: transparent; /* ملوش خلفية — عائم */
+  pointer-events: none; /* نفس المشروع: الـ wrap شفاف */
+  z-index: 40;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.agent-log { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 800px; max-height: 120px; overflow: auto; pointer-events: auto; }
+.bubble { font-size: 13px; padding: 8px 12px; border-radius: 14px; line-height: 1.6; max-width: 85%; }
+.bubble.user { align-self: flex-end; background: #000; color: #fff; border-bottom-right-radius: 4px; }
+.bubble.agent { align-self: flex-start; background: rgba(255,255,255,.1); color: #eee; border-bottom-left-radius: 4px; }
+.composer-switch { width: 100%; max-width: 800px; pointer-events: auto; }
+.composer {
+  margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  padding: 14px 12px; /* نفس حجم المشروع الأصلي */
+  background: rgba(33,33,33,.98);
+  -webkit-backdrop-filter: blur(20px) saturate(1.25); backdrop-filter: blur(20px) saturate(1.25);
+  border: 1px solid rgba(255,255,255,.14); border-radius: 32px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.35); position: relative;
+}
+/* طبقة الإضاءة الموحدة — نفس المشروع: حد مضيء + توهج يظهران معاً عند الكتابة */
+.composer::after {
+  content: ""; position: absolute; inset: -1px; border-radius: 33px;
+  pointer-events: none; border: 1px solid rgba(255,255,255,.45);
+  box-shadow: 0 0 24px rgba(255,255,255,.24), 0 12px 32px rgba(0,0,0,.42);
+  opacity: 0; transition: opacity 250ms ease-in-out;
+}
+.composer:focus-within::after { opacity: 1; } /* الإضاءة تظهر عند الكتابة — نفس المشروع */
+.composer-btn { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; background: transparent; border: 1px solid transparent; border-radius: 50%; color: #a3a3a3; cursor: pointer; padding: 0; }
+.composer-btn svg { width: 16px; height: 16px; }
+.composer-btn:hover { background: rgba(255,255,255,.06); color: #ededed; }
+/* زر الـ + له خلفية في المشروع الأصلي */
+.composer-btn.attach-btn { border: 1px solid transparent; background: rgba(255,255,255,.06); color: #a3a3a3; }
+.composer-btn.attach-btn:hover { background: rgba(255,255,255,.09); color: #ededed; }
+/* Attach (+) menu — same language as the main agent template (images +
+   fonts only here): pop-in animation, hover slide, tile + two-line text. */
+.attach-wrap { position: relative; flex: 0 0 auto; z-index: 5; }
+.attach-menu { position: absolute; bottom: calc(100% + 10px); inset-inline-start: 0; inset-inline-end: auto; z-index: 30; transform-origin: bottom left; opacity: 0; transform: translateY(10px) scale(.96); visibility: hidden; pointer-events: none; transition: opacity .25s ease, transform .25s cubic-bezier(.2,.9,.25,1.1), visibility 0s linear .25s; }
+.attach-menu.open { opacity: 1; transform: translateY(0) scale(1); visibility: visible; pointer-events: auto; transition: opacity .25s ease, transform .25s cubic-bezier(.2,.9,.25,1.1), visibility 0s; }
+.attach-menu { min-width: min(248px, calc(100vw - 28px)); max-width: calc(100vw - 28px); padding: 6px; overflow: hidden; background: linear-gradient(145deg, rgba(37,37,37,.98), rgba(20,20,20,.98)); border: 1px solid rgba(255,255,255,.14); box-shadow: 0 24px 54px rgba(0,0,0,.52), inset 0 1px 0 rgba(255,255,255,.1); border-radius: 18px; transform-origin: bottom left; }
+.attach-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px; padding: 8px; margin: 2px 0; background: transparent; border: 1px solid transparent; color: #fff; cursor: pointer; font-family: inherit; text-align: start; border-radius: 14px; transform: translate3d(0,0,0); transition: transform 220ms cubic-bezier(.22,1,.36,1), background 200ms ease, border-color 200ms ease; }
+.attach-menu button:hover { background: rgba(255,255,255,.065); border-color: rgba(255,255,255,.1); transform: translate3d(3px,0,0); }
+.opt-tile { width: 29px; height: 29px; flex: 0 0 29px; display: grid; place-items: center; background: rgba(59,158,255,.12); border: 1px solid rgba(59,158,255,.22); border-radius: 9px; color: #8dbdff; transition: border-color .25s ease, background .25s ease; }
+.opt-tile svg { width: 16px; height: 16px; color: inherit; }
+.attach-menu button:hover .opt-tile { border-color: rgba(59,158,255,.4); background: rgba(59,158,255,.08); }
+.opt-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.opt-text b { font-size: 13px; font-weight: 600; color: #ededed; line-height: 1.35; }
+.opt-text i { font-style: normal; font-size: 10px; line-height: 1.4; color: #a3a3a3; }
+.composer-btn.mode-pill { width: auto; flex: 0 0 auto; height: 32px; padding: 0 12px 0 8px; gap: 6px; display: flex; align-items: center; border-radius: 999px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); }
+.mode-label { font-size: 12px; color: #ddd; }
+.composer textarea { flex: 1 1 100%; order: -1; border: 0; outline: none; resize: none; background: transparent; color: #ededed; font-family: inherit; font-size: 15px; line-height: 1.6; padding: 6px 4px; min-height: 50px; max-height: 216px; width: 100%; }
+.composer textarea::placeholder { color: #737373; }
+.composer-send-group { display: flex; align-items: center; gap: 10px; margin-left: auto; padding: 3px 6px 3px 3px; border-radius: 999px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.06); }
+.send-group-divider { width: 1px; height: 20px; background: rgba(255,255,255,.09); }
+.send-btn { width: 32px; height: 32px; flex: 0 0 32px; margin-inline-start: auto; border: 0; border-radius: 50%; background: #f5f5f4; color: #171717; display: grid; place-items: center; cursor: pointer; }
+.send-btn svg { width: 15px; height: 15px; }
+.send-btn:hover { opacity: .85; }
+.send-btn:active { transform: scale(.88); }
+/* ===== STOP mark while a turn runs: white, halts the loop entirely ===== */
+.send-btn.is-stop{background:#f5f5f4;color:#171717;pointer-events:auto;opacity:1;animation:st-stop-in .3s cubic-bezier(.22,1,.36,1) both}
+.send-btn.is-stop:hover{background:#fff;opacity:1}
+.send-btn.is-stop svg{width:13px;height:13px;animation:none}
+@keyframes st-stop-in{from{opacity:0;transform:scale(.7)}to{opacity:1;transform:scale(1)}}
+/* ===== Continue pill for stopped tasks (same idea as the main agent) ===== */
+.continue-pill{height:32px;padding:0 18px;border:0;border-radius:999px;background:#fff;color:#000;font-weight:700;font-size:13px;cursor:pointer;white-space:nowrap;animation:st-stop-in .3s cubic-bezier(.22,1,.36,1) both}
+.continue-pill:hover{opacity:.85}
+.continue-pill:active{transform:scale(.95)}
+
+.toast { position: fixed; bottom: 150px; left: 50%; transform: translateX(-50%); background: #000; color: #fff; font-size: 13px; font-weight: 600; padding: 8px 16px; border-radius: 999px; z-index: 99; box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+
+/* ===== delete confirm dialog (blank slides delete at once, designed ask) ===== */
+.confirm-ov { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: rgba(0,0,0,.55); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); animation: st-black-in .25s ease both; }
+.confirm-box { width: min(340px, 86vw); text-align: center; background: linear-gradient(145deg, #252525, #141414); border: 1px solid rgba(255,255,255,.14); border-radius: 18px; padding: 22px 20px; box-shadow: 0 24px 54px rgba(0,0,0,.55); }
+.confirm-title { font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 8px; }
+.confirm-text { font-size: 13px; color: #a3a3a3; line-height: 1.6; margin-bottom: 18px; }
+.confirm-actions { display: flex; gap: 10px; justify-content: center; }
+.confirm-cancel { height: 34px; padding: 0 22px; border-radius: 999px; border: 1px solid rgba(255,255,255,.2); background: transparent; color: #fff; font-weight: 700; font-size: 13px; cursor: pointer; }
+.confirm-cancel:hover { background: rgba(255,255,255,.08); }
+.confirm-danger { height: 34px; padding: 0 22px; border-radius: 999px; border: 0; background: #f04438; color: #fff; font-weight: 700; font-size: 13px; cursor: pointer; }
+.confirm-danger:hover { opacity: .88; }
+.confirm-danger:active { transform: scale(.95); }
+
+/* ===== phone ⋯ menu (a floating rounded card under the toolbar) ===== */
+.studio { position: relative; }
+.tb-more { display: none; }
+.tb-more svg { width: 16px; height: 16px; }
+/* Phone ⋯ menu: a floating rounded card (not a flat strip). It pops in with
+   a rise+scale animation and sinks back out the same way when tapping
+   outside — transform/opacity only, ease-out to open, ease-in to close. */
+.more-pop { position: absolute; top: 50px; inset-inline: 12px; z-index: 55; display: flex; flex-direction: row; align-items: center; justify-content: space-evenly; gap: 8px; padding: 10px 12px; overflow-x: auto; scrollbar-width: none; background: linear-gradient(145deg, rgba(37,37,37,.98), rgba(20,20,20,.98)); border: 1px solid rgba(255,255,255,.14); border-radius: 20px; box-shadow: 0 24px 54px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.08); transform-origin: top center; opacity: 0; transform: translateY(-10px) scale(.96); visibility: hidden; pointer-events: none; transition: opacity .28s ease-in, transform .28s cubic-bezier(.4,0,1,1), visibility 0s linear .28s; }
+.more-pop::-webkit-scrollbar { display: none; }
+.more-pop.open { opacity: 1; transform: translateY(0) scale(1); visibility: visible; pointer-events: auto; transition: opacity .32s ease, transform .32s cubic-bezier(.22,1,.36,1), visibility 0s; }
+@media (prefers-reduced-motion: reduce) {
+  .more-pop, .more-pop.open { transition: opacity .15s ease, visibility 0s; transform: none; }
+}
+.more-pop .tb-icon { flex: 0 0 auto; }
+.more-pop .tb-icon svg { width: 17px; height: 17px; }
+.more-pop .tb-del { color: #ff8a80; }
+
+/* موبايل */
+@media (max-width: 640px) {
+  .toolbar { padding: 0 8px; gap: 6px; }
+  /* Phone: the square mark is dropped to free room, so every toolbar icon
+     (PDF, +, trash, size, zoom, ⋯) sits together on the left of tb-group
+     with the title + count alone on the right. */
+  .tb-mark { display: none; }
+  .tb-group { justify-content: flex-start; }
+  .tb-more { display: grid; }
+  /* Phone toolbar keeps exactly 4 things on the left: PDF, +, zoom-reset
+     and ⋯ — everything else (prev/next, steps, trash, orientation, zoom
+     in/out + %) lives inside the ⋯ menu, so the ⋯ button always fits and
+     stays visible. */
+  .tb-group .tb-nav { display: none; }
+  .tb-group .tb-step { display: none; }
+  .tb-group .tb-del { display: none; }
+  .tb-group .tb-size-wrap { display: none; }
+  .tb-group .tb-sep { display: none; }
+  .tb-group .tb-zoom-val { display: none; }
+  .tb-group .tb-zoom-btn[aria-label="Zoom out"] { display: none; }
+  .tb-group .tb-zoom-btn[aria-label="Zoom in"] { display: none; }
+  .tb-group .tb-more { display: grid; flex: 0 0 auto; }
+  .tb-right { max-width: 44vw; padding-inline-start: 8px; }
+  .tb-title, .tb-title-edit { max-width: 26vw; }
+  .tb-pdf { height: 28px; padding: 0 10px 0 7px; }
+  .tb-icon { width: 28px; height: 28px; }
+  .tb-size-label { display: none; }
+  .feed-slide { padding: 8px 10px; }
+  .nav-arrow { display: none; } /* الأسهم العائمة للكمبيوتر فقط (الهاتف بالسحب) */
+  /* الزوم يظهر على الهاتف مضغوطًا: الكل في التولبار. */
+  .tb-zoom-btn { width: 24px; height: 24px; font-size: 14px; }
+  .tb-zoom-btn svg { width: 14px; height: 14px; }
+  .tb-zoom-val { min-width: 34px; font-size: 10px; }
+  .tb-title { max-width: 24vw; }
+  .tb-page, .tb-count { font-size: 10px; }
+  .nav-down { bottom: 112px; }
+  .agent-float { padding: 8px 12px 12px; } /* مدمج على الهاتف: مساحة أكبر للقالب */
+  .composer { padding: 10px; }
+  .composer textarea { min-height: 42px; }
+  .attach-menu { min-width: min(280px, calc(100vw - 32px)); width: max-content; bottom: calc(100% + 12px); }
+  .attach-menu button { min-height: 56px; padding: 10px; }
+  .size-pop { position: fixed; top: 50px; left: 8px; right: 8px; width: auto; }
+  .pdf-page { box-shadow: none; }
+}
+
+@media print {
+  body { overflow: visible; background: #fff; }
+  .toolbar, .agent-float, .nav-arrow, .toast { display: none !important; }
+  .studio { height: auto; }
+  .feed { overflow: visible; }
+  .feed-slide { height: auto; }
+}
+
+/* ===== studio working lights (black screen while the agent designs) ===== */
+.st-black{background:#000;color:#fff;width:100%;height:100%;min-width:100%;min-height:100%;display:grid;place-items:center;align-content:center;gap:16px;border-radius:0;margin:0;animation:st-black-in .45s cubic-bezier(.22,.61,.36,1) both;transition:opacity .38s ease,transform .38s ease}
+.st-black.is-leaving{opacity:0;transform:scale(.985)}
+@keyframes st-black-in{from{opacity:0;transform:scale(.985)}to{opacity:1;transform:scale(1)}}
+.st-lights{display:flex;flex-direction:column;align-items:center;gap:14px}
+.st-lights .dot-square{display:grid;grid-template-columns:repeat(5,14px);gap:8px}
+.st-lights .dot-square span{width:14px;height:14px;border-radius:50%;background:rgba(255,255,255,.18);animation:st-ring 1.6s infinite}
+.st-lights .dot-square span[data-ring='0']{animation-delay:0s}.st-lights .dot-square span[data-ring='1']{animation-delay:.3s}.st-lights .dot-square span[data-ring='2']{animation-delay:.6s}
+@keyframes st-ring{0%,100%{opacity:.2}50%{opacity:1}}
+.st-lights-word{font-size:15px;font-weight:600;letter-spacing:.04em;color:#eee;font-family:'Space Grotesk',sans-serif}
+
+
+/* ===== live approved pages (run the approved code, exact page box) ===== */
+.pdf-page.live{overflow:hidden;box-sizing:border-box;background:transparent;break-after:page;break-inside:avoid;animation:st-live-in .45s cubic-bezier(.22,.61,.36,1) both}
+/* Design-matched fill (bg set from JS): the design always covers the box,
+   so no white frame grows around it when zooming. Transparent here so no
+   white halo peeks past the design at any zoom. */
+.pdf-page.live > .live-fill{width:100%;height:100%;min-width:100%;min-height:100%;background:transparent;overflow:hidden}
+.pdf-page.live > .live-fill > *{min-width:100%;min-height:100%;margin:0 !important}
+@keyframes st-live-in{from{opacity:0;transform:scale(.992)}to{opacity:1;transform:scale(1)}}
+/* Undo/redo step animation, opacity only: the current design fades OUT
+   smoothly, then the stepped version fades IN smoothly and settles — no
+   sliding, no flicker. */
+.pdf-page.live{transition:opacity .22s ease}
+.pdf-page.live.is-leaving{opacity:0}
+.pdf-page.live.is-arrived{animation:st-arrive .32s ease both}
+@keyframes st-arrive{from{opacity:0}to{opacity:1}}
+/* ===== export progress 0-100 (pdf-motion style, animated) ===== */
+.exp-ov{position:absolute;inset:0;z-index:60;display:grid;place-items:center;background:rgba(0,0,0,.55);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.exp-box{width:min(320px,80vw);text-align:center}
+.exp-pct{font-size:28px;font-weight:700;color:#fff;font-variant-numeric:tabular-nums;margin-bottom:10px}
+.exp-bar{height:8px;border-radius:999px;background:rgba(255,255,255,.12);overflow:hidden}
+.exp-fill{height:100%;background:#fff;border-radius:999px;transition:width .3s ease}
+.exp-label{margin-top:10px;font-size:12px;color:#bbb}
+/* Export STOP mark: same language as the composer send-stop (white pill). */
+.exp-cancel{margin-top:14px;height:32px;padding:0 22px;border:0;border-radius:999px;background:#f5f5f4;color:#171717;font-weight:700;font-size:13px;cursor:pointer}
+.exp-cancel:hover{opacity:.85}
+.exp-cancel:active{transform:scale(.95)}
+
+
+/* ===== missing studio (deleted with the chat) ===== */
+.st-missing{height:100dvh;display:grid;place-items:center;background:#1a1a1a}
+.st-missing-box{width:min(360px,88vw);text-align:center;background:linear-gradient(145deg,#252525,#141414);border:1px solid rgba(255,255,255,.14);border-radius:18px;padding:26px 22px}
+.st-missing-title{font-size:16px;font-weight:700;margin-bottom:8px}
+.st-missing-text{font-size:13px;color:#a3a3a3;line-height:1.6;margin-bottom:16px}
+.st-missing-btn{padding:10px 22px;border-radius:999px;border:1px solid rgba(255,255,255,.35);background:rgba(255,255,255,.08);color:#fff;font-weight:700;font-size:13px;cursor:pointer}
+
+
+
+/* ===== send-mark loader: real three-dot loading, never a spinning arrow ===== */
+.send-btn.is-loading{pointer-events:none;opacity:1}
+.send-btn.is-loading svg{animation:none}
+.send-dots{display:inline-flex;align-items:center;gap:4px;height:15px}
+.send-dots i{width:6px;height:6px;border-radius:50%;background:#171717;opacity:.25;animation:st-dot 1.1s ease-in-out infinite}
+.send-dots i:nth-child(2){animation-delay:.15s}
+.send-dots i:nth-child(3){animation-delay:.3s}
+@keyframes st-dot{0%,100%{opacity:.2;transform:translateY(0)}50%{opacity:1;transform:translateY(-3px)}}
+@keyframes st-spin{to{transform:rotate(360deg)}}
+/* ===== voice recording template (exact main-agent copy) ===== */
+.composer-switch{pointer-events:none;max-width:800px;margin:0 auto;display:grid;align-items:start;position:relative}
+.composer-switch>.composer,.composer-switch>.voice-panel{grid-area:1/1;min-width:0;width:100%;margin:0;pointer-events:auto}
+.composer-switch>.is-hidden{position:absolute;inset-inline:0;top:0;opacity:0;transform:translateY(12px);visibility:hidden;pointer-events:none}
+.voice-panel{display:flex;align-items:center;gap:10px;padding:12px 14px;background:rgba(33,33,33,.98);-webkit-backdrop-filter:blur(20px) saturate(1.25);backdrop-filter:blur(20px) saturate(1.25);border:1px solid rgba(255,255,255,.16);border-radius:26px;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+.voice-dot{width:10px;height:10px;flex:0 0 10px;border-radius:50%;background:#f04438;animation:st-pulse 1.6s cubic-bezier(.22,.61,.36,1) infinite}
+@keyframes st-pulse{0%{box-shadow:0 0 0 0 rgba(217,45,32,.35)}70%{box-shadow:0 0 0 8px rgba(217,45,32,0)}100%{box-shadow:0 0 0 0 rgba(217,45,32,0)}}
+.voice-timer{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13px;color:#ededed;min-width:44px}
+.voice-wave{flex:1;display:flex;align-items:center;gap:3px;height:32px;min-width:0;overflow:hidden}
+.voice-wave .voice-bar{flex:1;min-width:3px;max-width:8px;height:4px;background:#f04438;border-radius:2px;opacity:.85}
+.voice-label{font-size:12px;color:#a3a3a3;white-space:nowrap}
+.voice-panel-actions{display:flex;align-items:center;gap:8px;margin-inline-start:auto}
+.voice-cancel:hover{background:#f04438;color:#fff}
+.voice-panel.transcribing .voice-panel-actions{opacity:.4;pointer-events:none}
+.voice-panel.transcribing .voice-dot{animation:st-spin 1s linear infinite;background:#a3a3a3;border-radius:2px}
+.voice-stop.loading svg,.voice-send.loading svg{animation:st-spin .9s linear infinite}
+.composer-btn.mic.listening{color:#f04438}
+.composer-btn.mic.loading{transform:scale(.85)}
+
+
+/* Black boot cover: every entry opens on black (never a white blank page)
+   until the first studio truth lands, then it lifts at once. */
+.st-boot { position: absolute; inset: 0; z-index: 70; background: #000; display: grid; place-items: center; align-content: center; animation: st-black-in .3s ease both; }
+@media (prefers-reduced-motion: reduce) {
+  .st-boot { animation: none; }
+}
+
+
+/* ===== locked send mark: unmistakable, no re-send while designing ===== */
+.send-btn:disabled{opacity:.45;cursor:not-allowed}
+.send-btn.is-loading{pointer-events:none}
+

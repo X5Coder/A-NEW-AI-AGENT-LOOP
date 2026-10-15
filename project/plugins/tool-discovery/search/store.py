@@ -50,6 +50,10 @@ def _collect_discoverable_specs() -> list[dict]:
     root = _project_root()
     plugins_root = root / "plugins"
     tools: list[dict] = []
+    # Session-only tools: they live in studio branch sessions alone (the
+    # studio loop pre-seeds them directly) and must never surface in the
+    # main agent via tool_search.
+    _SESSION_ONLY = {"studio_page", "studio_read"}
 
     # Known discoverable plugin locations (explicit per user request)
     # We scan all plugins subdirectories that contain spec.json
@@ -65,6 +69,10 @@ def _collect_discoverable_specs() -> list[dict]:
                     continue
                 # skill_create is CORE now (in-context), never discoverable
                 if tool_dir.name == "skill_create":
+                    continue
+                # studio session tools are session-only (studio
+                # branch sessions), never discoverable in the main agent
+                if tool_dir.name in _SESSION_ONLY:
                     continue
                 spec_path = tool_dir / "spec.json"
                 if spec_path.exists():
@@ -123,6 +131,21 @@ def _compute_hash(tools: list[dict]) -> str:
     for t in tools:
         blob += f"{t.get('name','')}:{t.get('description','')}\n"
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _spec_fingerprint(name: str, description: str) -> str:
+    """Per-spec fingerprint (stored on every entry).
+
+    Incremental-update contract: a stored embedding is reused ONLY when
+    its fingerprint still matches the current spec. New specs, edited
+    descriptions, and legacy entries (no fingerprint) are re-embedded;
+    removed specs simply disappear. Never raises.
+    """
+    try:
+        blob = f"{name}:{description}"
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
 
 
 def _load_store() -> dict | None:
@@ -266,6 +289,26 @@ def ensure_embeddings(auto_create: bool = True) -> list[dict]:
         # Validate first entry has embedding
         first = stored["tools"][0]
         if isinstance(first.get("embedding"), list) and len(first["embedding"]) > 0:
+            # One-time migration: stamp per-spec fingerprints on vectors the
+            # global hash already verified — no re-embedding, so the NEXT
+            # change is incremental from the start. Never raises outward.
+            try:
+                cur_fp = {t.get("name", ""): _spec_fingerprint(t.get("name", ""), t.get("description", ""))
+                          for t in tools}
+                touched = False
+                for entry in stored["tools"]:
+                    try:
+                        if not entry.get("fingerprint"):
+                            fp = cur_fp.get(entry.get("name", ""))
+                            if fp:
+                                entry["fingerprint"] = fp
+                                touched = True
+                    except Exception:
+                        continue
+                if touched:
+                    _save_store(current_hash, stored["tools"])
+            except Exception:
+                pass
             return stored["tools"]
 
     # Fresh copy: use the shipped prebuilt seed when specs are unchanged
@@ -312,39 +355,85 @@ def ensure_embeddings(auto_create: bool = True) -> list[dict]:
         if not auto_create:
             return []
 
-        # Need embedding model
-        # Validate model ready
-        try:
-            from core.embedding.service import embed_texts, is_ready
-        except Exception as e:
-            raise RuntimeError(f"Embedding service not available: {e}") from e
-
-        if not is_ready():
-            # Try to ensure models? Will raise with clear message
-            raise FileNotFoundError("Embedding model folder is missing (project/embedding_model/). Copy it with the project and restart.")
-
         # Prepare texts: description is the primary semantic signal, combine name + description for better retrieval
         texts = []
+        fingerprints = []
         for t in tools:
             # Use description verbatim as requested, but also include name for better matching
             txt = f"{t.get('name','')} : {t.get('description','')}"
             texts.append(txt[:2000])
+            fingerprints.append(_spec_fingerprint(t.get("name", ""), t.get("description", "")))
 
-        # Embed with bounded retries inside service (chunked progress lines
-        # so a long first-time CPU encode never looks hung).
-        embeddings = embed_texts(texts, normalize=True, progress_label="tool-discovery")
+        # Incremental rebuild: reuse stored embeddings whose fingerprint is
+        # unchanged — only new/changed specs hit the model. Removed specs
+        # drop out naturally (we iterate current specs only).
+        old_by_name: dict[str, dict] = {}
+        if isinstance(stored, dict) and isinstance(stored.get("tools"), list):
+            for entry in stored["tools"]:
+                try:
+                    if (isinstance(entry.get("name"), str)
+                            and isinstance(entry.get("embedding"), list)
+                            and entry["embedding"]):
+                        old_by_name[entry["name"]] = entry
+                except Exception:
+                    continue
+        final_emb: list = [None] * len(tools)
+        reused = 0
+        for i, t in enumerate(tools):
+            old = old_by_name.get(t.get("name", ""))
+            if (old is not None and old.get("fingerprint") == fingerprints[i]
+                    and isinstance(old.get("embedding"), list)):
+                final_emb[i] = old["embedding"]
+                reused += 1
+
+        def _embed_some(indexes: list[int]) -> None:
+            # Embed one batch in place. Needs the model — imported lazily so
+            # a fully-reused update never touches it. Never returns half-done.
+            try:
+                from core.embedding.service import embed_texts, is_ready
+            except Exception as e:
+                raise RuntimeError(f"Embedding service not available: {e}") from e
+            if not is_ready():
+                raise FileNotFoundError("Embedding model folder is missing (project/embedding_model/). Copy it with the project and restart.")
+            got = embed_texts([texts[i] for i in indexes], normalize=True,
+                              progress_label="tool-discovery")
+            if len(got) != len(indexes):
+                raise RuntimeError(f"Embedding batch incomplete ({len(got)}/{len(indexes)})")
+            for i, emb in zip(indexes, got):
+                final_emb[i] = emb
+
+        need = [i for i, e in enumerate(final_emb) if e is None]
+        if need:
+            # Embed with bounded retries inside service (chunked progress lines
+            # so a long first-time CPU encode never looks hung).
+            _embed_some(need)
+        # Dimension guard: reused vectors must match the fresh dimension
+        # (model swap) — mismatched ones are re-embedded, never mixed.
+        dim = next((len(e) for e in final_emb if isinstance(e, list) and e), 0)
+        bad = [i for i, e in enumerate(final_emb)
+               if not isinstance(e, list) or len(e) != dim or dim == 0]
+        if bad:
+            _embed_some(bad)
+            dim = next((len(e) for e in final_emb if isinstance(e, list) and e), 0)
+            bad = [i for i, e in enumerate(final_emb)
+                   if not isinstance(e, list) or len(e) != dim or dim == 0]
+        if bad:
+            raise RuntimeError(f"Embedding rebuild left {len(bad)} tools without vectors")
 
         tools_with_emb = []
-        for spec, emb in zip(tools, embeddings):
+        for spec, emb, fp in zip(tools, final_emb, fingerprints):
             tools_with_emb.append({
                 "name": spec["name"],
                 "description": spec["description"],
                 "spec": spec,
                 "embedding": emb,
+                "fingerprint": fp,
             })
 
         _save_store(current_hash, tools_with_emb)
-        print(f"[tool-discovery] Embeddings created for {len(tools_with_emb)} tools, hash {current_hash[:8]}")
+        print(f"[tool-discovery] Incremental update: reused {reused}, "
+              f"embedded {len(tools_with_emb) - reused} of {len(tools_with_emb)} tools, "
+              f"hash {current_hash[:8]}")
         return tools_with_emb
     finally:
         if won:

@@ -79,7 +79,7 @@ def mock_skill_llm(monkeypatch):
     import core.ai_models.aip as aip_mod
     monkeypatch.setattr(
         aip_mod, "execute",
-        lambda record, canonical, kind=None: {"status": "ok", "text": "# Test Skill"})
+        lambda record, canonical, kind=None, cancel_event=None: {"status": "ok", "text": "# Test Skill"})
 
 
 def test_scheduler_executes_concurrently(guard, mock_skill_llm, monkeypatch):

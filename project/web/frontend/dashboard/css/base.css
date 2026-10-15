@@ -294,11 +294,13 @@ pre,
 }
 
 /* ---------- boot splash (black start screen) ----------
-   Painted on first paint (static HTML in index.html), covers everything
-   until the app.js boot barrier resolves (every boot payload landed), then
-   fades out via .done (see hideBootSplash in ui.js). Dots mirror the
-   Working dot-square ring wave; the word reuses .working-text's wave.
-   Exit is opacity-only (compositor); static under reduced-motion. */
+   Visible from first paint (class show baked into index.html + critical
+   <style> paints it before this sheet lands), covers everything until the
+   app.js boot barrier resolves (every boot payload landed or the cached
+   render lifted it), then fades out via .done (see hideBootSplash in
+   ui.js). Dots mirror the Working dot-square ring wave; the word reuses
+   .working-text's wave. Entrance is a soft rise (transform + opacity
+   only, compositor); exit is opacity-only; static under reduced-motion. */
 body.booting {
   overflow: hidden;
 }
@@ -319,12 +321,29 @@ body.booting .app {
   align-items: center;
   justify-content: center;
   gap: 20px;
-  /* Hidden until the delayed show fires: fast boots never flash black. */
-  visibility: hidden;
+  /* Visible by default: the show class is baked into index.html and the
+     critical <style> paints it before this sheet loads — no pre-splash
+     flash, no delayed appearance. */
+  visibility: visible;
   transition: opacity 0.55s ease, visibility 0.55s;
 }
-.boot-splash.show {
-  visibility: visible;
+/* Professional entrance: content rises softly once (transform + opacity
+   only, compositor-friendly; staggered via the word delay). */
+.boot-splash.show > * {
+  animation: x5-boot-rise var(--dur-slow) var(--ease) both;
+}
+.boot-splash.show > *:nth-child(2) {
+  animation-delay: 80ms;
+}
+@keyframes x5-boot-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
 }
 .boot-splash.done {
   opacity: 0;

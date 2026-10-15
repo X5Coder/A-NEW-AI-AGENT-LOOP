@@ -73,6 +73,24 @@ def test_old_thread_finally_does_not_wipe_new_run():
     _reset()
 
 
+def test_release_clears_resume_id():
+    """A finished Continue must not leave a stale resume_id for later refreshes."""
+    _reset()
+    ev = threading.Event()
+    rid = id(ev)
+    with S._RUN_LOCK:
+        S._ACTIVE_RUN["event"] = ev
+        S._ACTIVE_RUN["input"] = ""
+        S._ACTIVE_RUN["input_full"] = ""
+        S._ACTIVE_RUN["id"] = rid
+        S._ACTIVE_RUN["resume_id"] = "abc123"
+        S._CANCEL_EVENTS.add(ev)
+    assert S._release_chat_run(rid) is True
+    with S._RUN_LOCK:
+        assert "resume_id" not in S._ACTIVE_RUN
+    _reset()
+
+
 def test_is_cancelled_never_raises():
     from core.agent.loop.engine import _is_cancelled
 

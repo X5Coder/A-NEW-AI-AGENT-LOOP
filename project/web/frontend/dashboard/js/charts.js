@@ -1,16 +1,20 @@
 /**
- * charts.js — X5Agent consumption charts (tokens + requests + est. cost)
- * Owns: fetching /api/cost, range switching (7D / 30D / months),
- * professional workshop bars, tooltips. Real data only; honest empty state.
- * Silent refresh: unchanged data never touches the DOM.
+ * charts.js — X5Agent usage block charts (tokens + requests)
+ * Owns: fetching /api/cost (90-day window), range switching (7D / 30D /
+ * 90D / months), one SVG
+ * chart per card: grid-squares background, tall connected columns rising
+ * from the bottom axis, days on the x axis, values on the left y axis.
+ * Hovering (or tapping on phones) any column shows its details card.
+ * Real data only; honest empty state. Silent refresh: unchanged data
+ * never touches the DOM.
  */
 "use strict";
 
-import { attachChartTooltip, pinChartTip } from "./ui.js?v=13";
+import { attachChartTooltip, pinChartTip } from "./ui.js?v=14";
 import { onPush } from "./events.js?v=5";
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const RANGE_LABELS = { "7d": "Last 7 days", "30d": "Last 30 days", "months": "By month" };
+const RANGE_LABELS = { "7d": "Last 7 days", "30d": "Last 30 days", "90d": "Last 90 days", "months": "By month" };
 
 function takeLast(arr, n) {
   const list = Array.isArray(arr) ? arr.slice(-n) : [];
@@ -35,7 +39,11 @@ function sliceRange(data, range) {
   const d = pad(daily.map((v) => Number(v) || 0));
   // Measured tokens when present; otherwise derive nothing (no fabricated estimates).
   const t = rawTokens ? pad(rawTokens.map((v) => Number(v) || 0)) : c.map(() => 0);
-  if (range === "30d") return { labels: lab, counts: c, costs: d, tokens: t };
+  if (range === "90d") return { labels: lab, counts: c, costs: d, tokens: t };
+  if (range === "30d") {
+    const k = 30;
+    return { labels: lab.slice(-k), counts: c.slice(-k), costs: d.slice(-k), tokens: t.slice(-k) };
+  }
   if (range === "months") {
     // Aggregate the available days into calendar months (only real data, never padded).
     const buckets = new Map();
@@ -69,105 +77,122 @@ function escHtml(s) {
   return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function smoothLine(pts) {
-  if (pts.length < 2) return pts.length ? `M ${pts[0][0]} ${pts[0][1]}` : "";
-  let d = `M ${pts[0][0]} ${pts[0][1]}`;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)];
-    const p1 = pts[i];
-    const p2 = pts[i + 1];
-    const p3 = pts[Math.min(pts.length - 1, i + 2)];
-    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
-    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
-    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
-    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
-    d += ` C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
-  }
-  return d;
+function niceCeiling(rawMax) {
+  // Headroom so the tallest stack never touches the top edge, snapped to a
+  // 1/2/2.5/5 step so the y axis labels stay round.
+  const target = Math.max(1, rawMax * 1.15);
+  const exp = Math.floor(Math.log10(target));
+  const base = Math.pow(10, exp);
+  const norm = target / base;
+  const snap = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10;
+  return snap * base;
 }
 
-let flowUid = 0;
-
-function renderChart(el, labels, values, unit) {
+function renderBars(el, labels, values, unit, accent) {
   if (!el) return;
   const n = Math.max(labels.length, values.length);
   const vals = Array.from({ length: n }, (_, i) => Number(values[i]) || 0);
   const labs = Array.from({ length: n }, (_, i) => String(labels[i] ?? "—"));
   const total = vals.reduce((a, b) => a + b, 0);
-  const hasData = total > 0;
-  const uid = `f${++flowUid}`;
+  const isTokens = accent === "tok";
+  const caption = isTokens ? "Token usage block chart" : "Requests block chart";
 
-  if (!hasData) {
+  const W = 600;
+  const H = 280;
+  const padL = 48;
+  const padR = 10;
+  const padT = 18;
+  const padB = 32;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const baseY = padT + plotH;
+
+  if (!(total > 0)) {
     el.innerHTML = `
-      <div class="flow" data-anim>
-        <svg class="flow-svg" viewBox="0 0 600 190" preserveAspectRatio="none" aria-hidden="true">
-          <line x1="0" y1="47" x2="600" y2="47" class="flow-grid" />
-          <line x1="0" y1="95" x2="600" y2="95" class="flow-grid" />
-          <line x1="0" y1="142" x2="600" y2="142" class="flow-grid" />
-          <line x1="0" y1="178" x2="600" y2="178" class="flow-grid" stroke-dasharray="3 6" />
+      <div class="bars-wrap" data-anim>
+        <svg class="bars-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+          ${[0, 1, 2, 3, 4].map((k) => `<line x1="${padL}" y1="${(padT + (plotH * k) / 4).toFixed(1)}" x2="${W - padR}" y2="${(padT + (plotH * k) / 4).toFixed(1)}" class="bars-grid" />`).join("")}
+          <line x1="${padL}" y1="${baseY}" x2="${W - padR}" y2="${baseY}" class="bars-axis" />
         </svg>
         <div class="chart-empty">No activity in this range — send a message to the agent.</div>
       </div>`;
     return;
   }
 
-  const W = 600;
-  const H = 190;
-  const padL = 10;
-  const padR = 10;
-  const padT = 14;
-  const padB = 12;
-  const max = Math.max(...vals, 1);
-  const step = n > 1 ? (W - padL - padR) / (n - 1) : 0;
-  const pts = vals.map((v, i) => {
-    const x = n > 1 ? padL + i * step : W / 2;
-    const y = padT + (1 - Math.max(0, v) / max) * (H - padT - padB);
-    return [x, y];
-  });
-  const line = smoothLine(pts);
-  const area = `${line} L ${pts[pts.length - 1][0].toFixed(1)} ${H - padB} L ${pts[0][0].toFixed(1)} ${H - padB} Z`;
-  const peakIdx = vals.indexOf(max);
-  const lastIdx = n - 1;
+  const rawMax = Math.max(...vals);
+  const max = niceCeiling(rawMax);
+  const peakIdx = vals.indexOf(rawMax);
+  const slot = plotW / n;
+  const colW = Math.max(4, Math.min(slot * 0.42, 34));
+  const rx = Math.min(5, colW / 3);
+  const TICKS = 4;
 
-  // Thin X labels so phones never crowd: keep ≤6 readable ticks, spacing preserved.
-  const maxTicks = n > 12 ? 5 : 7;
+  const grid = [];
+  for (let k = 0; k <= TICKS; k++) {
+    const gy = padT + (plotH * k) / TICKS;
+    const gv = (max * (TICKS - k)) / TICKS;
+    grid.push(
+      `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" class="bars-grid" />` +
+      `<text x="${padL - 8}" y="${(gy + 4).toFixed(1)}" text-anchor="end" class="bars-tick">${escHtml(formatCompact(gv))}</text>`
+    );
+  }
+  // Vertical gridlines through every slot: the background reads as squares.
+  for (let i = 0; i <= n; i++) {
+    const gx = padL + slot * i;
+    grid.push(`<line x1="${gx.toFixed(1)}" y1="${padT}" x2="${gx.toFixed(1)}" y2="${baseY}" class="bars-grid faint" />`);
+  }
+
+  // Connected tall columns: one solid column per period rising from the
+  // bottom axis; a transparent hit area covers the whole slot so hovering
+  // (or tapping) anywhere shows that period's details card.
+  const bars = vals
+    .map((v, i) => {
+      const bx = padL + slot * i + (slot - colW) / 2;
+      const by = padT + (1 - Math.max(0, v) / max) * plotH;
+      const bh = Math.max(0, baseY - by);
+      const isPeak = i === peakIdx;
+      const cls = `bars-col ${isTokens ? "bars-col-tok" : "bars-col-req"}${isPeak ? " peak" : ""}`;
+      const tip = `${escHtml(formatCompact(v))}${escHtml(unit)}`;
+      let s = "";
+      if (bh > 0) {
+        s += `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${colW.toFixed(1)}" height="${bh.toFixed(1)}" rx="${rx.toFixed(1)}" class="${cls}" />`;
+      }
+      s += `<rect class="flow-hit" x="${(padL + slot * i).toFixed(1)}" y="${padT}" width="${slot.toFixed(1)}" height="${plotH}" data-label="${escHtml(labs[i])}" data-value="${tip}" tabindex="0" role="img" aria-label="${escHtml(labs[i])}: ${tip}" />`;
+      if (isPeak && bh > 0) {
+        s += `<text x="${(bx + colW / 2).toFixed(1)}" y="${Math.max(10, by - 6).toFixed(1)}" text-anchor="middle" class="bars-peak-val">${tip}</text>`;
+      }
+      return s;
+    })
+    .join("");
+
+  // Thin x labels so phones never crowd.
+  const maxTicks = n > 12 ? 5 : 8;
   const keep = new Set();
   if (n <= maxTicks) {
     for (let i = 0; i < n; i++) keep.add(i);
   } else {
     for (let k = 0; k < maxTicks; k++) keep.add(Math.round((k * (n - 1)) / (maxTicks - 1)));
   }
+  const xlabels = vals
+    .map((_, i) => {
+      const cx = padL + slot * i + slot / 2;
+      return `<text x="${cx.toFixed(1)}" y="${baseY + 20}" text-anchor="middle" class="bars-x">${keep.has(i) ? escHtml(labs[i]) : ""}</text>`;
+    })
+    .join("");
 
   el.innerHTML = `
-    <div class="flow" data-anim>
-      <svg class="flow-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Usage flow chart">
-        <defs>
-          <linearGradient id="x5FlowFill-${uid}" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="var(--chart-fill-top)" stop-opacity="1" />
-            <stop offset="1" stop-color="var(--chart-fill-bot)" stop-opacity="1" />
-          </linearGradient>
-          <linearGradient id="x5FlowStroke-${uid}" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0" stop-color="var(--chart-line)" />
-            <stop offset="1" stop-color="var(--chart-line-hi)" />
-          </linearGradient>
-        </defs>
-        ${[0.25, 0.5, 0.75].map((f) => `<line x1="0" y1="${(padT + f * (H - padT - padB)).toFixed(1)}" x2="${W}" y2="${(padT + f * (H - padT - padB)).toFixed(1)}" class="flow-grid" />`).join("")}
-        <path class="flow-area" d="${area}" fill="url(#x5FlowFill-${uid})" />
-        <path class="flow-line" d="${line}" stroke="url(#x5FlowStroke-${uid})" />
-        ${[peakIdx, lastIdx].filter((v, i, a) => a.indexOf(v) === i).map((i) => `<circle class="flow-dot${i === peakIdx ? " peak" : ""}" cx="${pts[i][0].toFixed(1)}" cy="${pts[i][1].toFixed(1)}" r="${i === peakIdx ? 5 : 4}" />`).join("")}
-        ${pts.map((p, i) => `<rect class="flow-hit" x="${Math.max(0, p[0] - step / 2).toFixed(1)}" y="0" width="${(n > 1 ? step : W).toFixed(1)}" height="${H}" data-label="${escHtml(labs[i])}" data-value="${escHtml(`${formatCompact(vals[i])}${unit}`)}" tabindex="0" role="img" aria-label="${escHtml(`${labs[i]}: ${formatCompact(vals[i])}${unit}`)}" />`).join("")}
+    <div class="bars-wrap" data-anim>
+      <svg class="bars-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${escHtml(caption)}">
+        ${isTokens ? `<defs><linearGradient id="x5g-tok" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--chart-line-hi)" /><stop offset="1" stop-color="var(--chart-line)" /></linearGradient></defs>` : ""}
+        ${grid.join("")}
+        ${bars}
+        <line x1="${padL}" y1="${baseY}" x2="${W - padR}" y2="${baseY}" class="bars-axis" />
+        ${xlabels}
       </svg>
-      <div class="flow-x">${labs.map((l, i) => `<span>${keep.has(i) ? escHtml(l) : ""}</span>`).join("")}</div>
     </div>`;
 
-  // Fix gradient refs to the per-chart uid (keeps multi-chart pages collision-free).
-  try {
-    el.querySelector(".flow-area")?.setAttribute("fill", `url(#x5FlowFill-${uid})`);
-    el.querySelector(".flow-line")?.setAttribute("stroke", `url(#x5FlowStroke-${uid})`);
-  } catch (_) {}
-
   attachChartTooltip(el);
-  // Touch screens have no hover: tapping a point pins the day info instead.
+  // Touch screens have no hover: tapping a column shows its details at once.
   try {
     if (window.matchMedia("(hover: none)").matches) {
       el.querySelectorAll(".flow-hit").forEach((hit) => {
@@ -195,9 +220,9 @@ export async function initCharts() {
   if (!tokensEl || !reqEl) return;
 
   // Silent background refresh: skip DOM updates when data is unchanged
-  // (no flicker, open tooltips stay), and keep the last good chart if a tick
-  // fails instead of wiping it. The page entrance played once at boot —
-  // data swaps in with no re-animation.
+  // (no flicker), and keep the last good chart if a tick fails instead of
+  // wiping it. The page entrance played once at boot — data swaps in with
+  // no re-animation.
   const seen = { tokens: null, req: null };
   let firstPaint = true;
   let range = "7d";
@@ -215,11 +240,11 @@ export async function initCharts() {
     const sReq = sig(range, labels, counts);
     if (sTok !== seen.tokens) {
       seen.tokens = sTok;
-      renderChart(tokensEl, labels, tokens, "");
+      renderBars(tokensEl, labels, tokens, "", "tok");
     }
     if (sReq !== seen.req) {
       seen.req = sReq;
-      renderChart(reqEl, labels, counts, "");
+      renderBars(reqEl, labels, counts, "", "req");
     }
     firstPaint = false;
 
@@ -232,8 +257,8 @@ export async function initCharts() {
   }
 
   function paintEmpty() {
-    renderChart(tokensEl, [], [], "");
-    renderChart(reqEl, [], [], "");
+    renderBars(tokensEl, [], [], "", "tok");
+    renderBars(reqEl, [], [], "", "req");
     setBadge("tokensBadge", "unavailable");
     setBadge("requestsBadge", "unavailable");
     firstPaint = false;
@@ -242,7 +267,7 @@ export async function initCharts() {
   async function load() {
     let data = null;
     try {
-      const res = await fetch("/api/cost", { cache: "no-store" });
+      const res = await fetch("/api/cost?days=90", { cache: "no-store" });
       if (!res.ok) throw new Error("bad status");
       data = await res.json();
     } catch (_) {

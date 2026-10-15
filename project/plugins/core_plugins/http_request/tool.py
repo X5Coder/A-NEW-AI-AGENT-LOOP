@@ -28,6 +28,13 @@ MAX_HEADER_VALUE = 2000
 DEFAULT_TIMEOUT = 15
 MAX_TIMEOUT = 30
 MAX_RETRIES = 3  # bounded per Master Rules (initial attempt + up to 3 retries)
+# Default browser UA: several hosts (Wikimedia, Fontsource, Openverse) reject
+# urllib's default "Python-urllib/x.y" with 403. Sent only when the model did
+# not provide its own User-Agent header (explicit headers always win).
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
 
 
 def _validate_method(method: object) -> str:
@@ -145,16 +152,39 @@ def _redacted_url(url: str) -> str:
     return url[:500]
 
 
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def _sleep_interruptible(seconds: float, cancel_flag) -> None:
+    # Retry backoff that STOP interrupts at once instead of sleeping through.
+    try:
+        if cancel_flag is not None and hasattr(cancel_flag, "wait"):
+            cancel_flag.wait(timeout=max(0.0, float(seconds)))
+            return
+    except Exception:
+        pass
+    time.sleep(max(0.0, float(seconds)))
+
+
 def execute(
     url: str,
     method: str | None = None,
     headers: dict | None = None,
     body: object = None,
     timeout: float | int | None = None,
+    cancel_flag=None,
 ) -> dict:
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
     clean_method = _validate_method(method)
     clean_url = _validate_url(url)
     clean_headers = _validate_headers(headers)
+    if not any(k.lower() == "user-agent" for k in clean_headers):
+        clean_headers["User-Agent"] = DEFAULT_USER_AGENT
     raw_body = _validate_body(body, clean_method)
     clean_timeout = _validate_timeout(timeout)
     event = format_event(method=clean_method, url=clean_url)
@@ -174,6 +204,8 @@ def execute(
 
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
+        if _cancelled(cancel_flag):
+            raise RuntimeError("Cancelled.")
         try:
             with urllib.request.urlopen(request, timeout=clean_timeout) as response:
                 status = int(getattr(response, "status", 200) or 200)
@@ -229,7 +261,7 @@ def execute(
             if status in (429,) or 500 <= status <= 599:
                 last_error = e
                 if attempt < MAX_RETRIES:
-                    time.sleep(min(0.5 * (attempt + 1), 2.0))
+                    _sleep_interruptible(min(0.5 * (attempt + 1), 2.0), cancel_flag)
                     continue
             detail = ""
             try:
@@ -241,7 +273,7 @@ def execute(
             # Network-level failure (DNS, refused, reset, timeout): bounded retry.
             last_error = e
             if attempt < MAX_RETRIES:
-                time.sleep(min(0.5 * (attempt + 1), 2.0))
+                _sleep_interruptible(min(0.5 * (attempt + 1), 2.0), cancel_flag)
                 continue
             raise RuntimeError(f"Request failed for {clean_url[:120]}: {type(e).__name__}: {str(e)[:200]}") from None
         except (TypeError, ValueError, PermissionError):

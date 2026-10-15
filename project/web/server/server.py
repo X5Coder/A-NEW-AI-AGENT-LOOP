@@ -69,6 +69,10 @@ CHAT_MAX_TEXT_CHARS = 12000
 CHAT_MAX_DOC_BYTES = 100 * 1024 * 1024
 WS_MAX_BODY_BYTES = 160 * 1024 * 1024
 WS_MAX_FILE_BYTES = 100 * 1024 * 1024
+# Backup/restore: raw zip bytes, held in memory once (single-threaded server).
+# 1GB fits real Data+Workspace backups with headroom; bigger restores fail
+# clearly with 413 instead of stalling the console.
+BACKUP_HTTP_MAX_BYTES = 1024 * 1024 * 1024
 CHAT_LOOP_STEPS = 500
 
 STT_MAX_BODY = 12 * 1024 * 1024
@@ -818,9 +822,10 @@ def _get_models_data() -> dict:
     }
 
 
-def _get_cost_data() -> dict:
+def _get_cost_data(days: int = 30) -> dict:
     """
-    REAL cost history for last 30 days - measured, never estimated.
+    REAL cost history for the last `days` days (default 30) - measured, never
+    estimated.
     Tokens/requests come from Data/database/usage_log.json (every provider call logged).
     USD is the SUM of each request's own captured price (stored on the entry at
     call time) - never a re-pricing of day aggregates. Live OpenRouter pricing
@@ -829,7 +834,11 @@ def _get_cost_data() -> dict:
     """
     import datetime
 
-    days = _get_measured_days(30)
+    try:
+        days = max(1, min(400, int(days)))
+    except Exception:
+        days = 30
+    days = _get_measured_days(days)
     labels = []
     dates = []
     counts = []
@@ -1076,6 +1085,9 @@ def _session_cookie(token: str, clear: bool = False) -> str:
 
 # Pending loop questions: qid -> answer Queue (one outstanding per loop, bounded wait)
 _PENDING_QUESTIONS: dict = {}
+# Read-only metadata mirror (qid -> {kind,text,choices,...}) so a refreshed
+# page can rebuild the strip from server truth even if it missed the frame.
+_PENDING_QMETA: dict = {}
 _PQ_LOCK = threading.Lock()
 
 # Active chat loop cancel flag (single conversation): set by /api/chat_cancel
@@ -1111,6 +1123,29 @@ def _chat_thread_busy() -> bool:
             return "event" in _ACTIVE_RUN
     except Exception:
         return False
+
+
+def _any_task_running() -> str | None:
+    """English refusal reason when any task runs, else None. Never raises.
+
+    Covers the normal agent loop AND every PDF Studio turn: backup and
+    restore must see a quiet system (no in-flight reply, no slide being
+    designed). Callers turn the reason into a 409 message.
+    """
+    try:
+        if _chat_thread_busy():
+            return "an agent task is still running"
+    except Exception:
+        pass
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from core.studio import api as _studio_api
+        if _studio_api.any_studio_turn_running():
+            return "a PDF Studio task is still running"
+    except Exception:
+        pass
+    return None
 
 
 def _mark_chat_cancelled() -> None:
@@ -1165,6 +1200,7 @@ def _release_chat_run(run_id) -> bool:
                 _ACTIVE_RUN.pop("input_full", None)
                 _ACTIVE_RUN.pop("cancelled", None)
                 _ACTIVE_RUN.pop("id", None)
+                _ACTIVE_RUN.pop("resume_id", None)
     except Exception:
         owned = False
     return owned
@@ -1265,7 +1301,7 @@ def _run_frame_remember(frame: dict) -> None:
     if not isinstance(frame, dict):
         return
     if frame.get("type") not in ("event_start", "event", "question",
-                                 "live", "live_end"):
+                                 "question-expired", "live", "live_end"):
         return
     try:
         with _RUN_LOCK:
@@ -1880,6 +1916,14 @@ def _audio_root() -> Path:
         return PROJECT_ROOT.parents[0] / "X5Agent" / "Data" / "files" / "audio"
 
 
+def _images_root() -> Path:
+    try:
+        from core.paths import data_subdir
+        return data_subdir("files", "images")
+    except Exception:
+        return PROJECT_ROOT.parents[0] / "X5Agent" / "Data" / "files" / "images"
+
+
 _PREVIEW_MAX_HTML = 2 * 1024 * 1024
 
 
@@ -2045,6 +2089,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/chat_frames":
             self._handle_chat_frames_api()
             return
+        if parsed.path == "/api/pending_questions":
+            self._handle_pending_questions_get()
+            return
         if parsed.path == "/api/browser":
             self._handle_browser_api()
             return
@@ -2062,6 +2109,34 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/audio":
             self._handle_audio_get(parse_qs(parsed.query).get("path", [""])[0])
+            return
+        if parsed.path == "/api/image":
+            self._handle_image_get(parse_qs(parsed.query).get("path", [""])[0])
+            return
+        if parsed.path == "/api/backup/download":
+            self._handle_backup_download_get()
+            return
+        if parsed.path == "/api/backup/info":
+            self._handle_backup_info_get()
+            return
+        if parsed.path == "/api/studio":
+            try:
+                from core.studio import api as _studio_api
+                _code, _payload = _studio_api.handle_get(parsed.query)
+                self._send_json(_payload, status=_code)
+            except Exception as e:
+                self._send_json({"error": f"studio failed: {e}"[:300]}, status=500)
+            return
+        if parsed.path == "/api/studio/page":
+            try:
+                from core.studio import api as _studio_api
+                _code, _payload = _studio_api.handle_page_get(parsed.query)
+                self._send_json(_payload, status=_code)
+            except Exception as e:
+                self._send_json({"error": f"studio page failed: {e}"[:300]}, status=500)
+            return
+        if parsed.path == "/api/studio/asset":
+            self._handle_studio_asset_get(parsed.query)
             return
         if parsed.path == "/api/workspace":
             self._handle_workspace_api(parse_qs(parsed.query).get("path", [""])[0])
@@ -2085,6 +2160,48 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"events": _gd.get_log()})
             except Exception:
                 self._send_json({"error": "gateway failed"}, status=500)
+            return
+        if parsed.path == "/studio-pdf" or parsed.path.startswith("/studio-pdf/"):
+            # Split: /studio-pdf/<id> is a DASHBOARD route (boots the console,
+            # which auto-opens the overlay and pushes the session route).
+            # /studio-pdf/shell/<id> serves the built React shell (dist) for
+            # the overlay iframe. /studio-pdf/assets/* serves hashed bundles.
+            # Assets never fall back to HTML (that MIME mismatch breaks modules).
+            try:
+                from core.studio import api as _studio_api
+                rest = parsed.path[len("/studio-pdf"):].strip("/")
+                if rest.startswith("shell/") or rest.startswith("assets/"):
+                    dist = _studio_api.studio_dist_dir()
+                    if rest.startswith("shell/"):
+                        target = dist / "index.html"
+                    else:
+                        import re as _re2
+                        asset = rest[len("assets/"):]
+                        if not _re2.fullmatch(r"[A-Za-z0-9_.-]{1,80}", asset):
+                            self.send_error(403, "Forbidden")
+                            return
+                        target = dist / "assets" / asset
+                    resolved = target.resolve()
+                    if dist.resolve() not in resolved.parents and resolved != dist.resolve():
+                        self.send_error(403, "Forbidden")
+                        return
+                    if not resolved.is_file():
+                        self.send_error(404, "Not found")
+                        return
+                    body = resolved.read_bytes()
+                    ctype = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+                    self.send_response(200)
+                    self.send_header("Content-Type", ctype + ("; charset=utf-8" if ctype.startswith("text/") or "javascript" in ctype else ""))
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                # Dashboard route (/<id> or root): boot the console shell.
+                self.path = "/index.html"
+                super().do_GET()
+            except Exception as e:
+                self._send_json({"error": f"studio route failed: {e}"[:300]}, status=500)
             return
         # SPA fallback: real routes (/agent, /models ...) serve the console shell
         # so refresh and deep-links work. Only extensionless non-API paths rewrite.
@@ -2147,6 +2264,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/conversation/clear":
             self._handle_conversation_clear_post()
             return
+        if parsed.path == "/api/backup/restore":
+            self._handle_backup_restore_post()
+            return
         if parsed.path == "/api/stt":
             self._handle_stt_post()
             return
@@ -2206,6 +2326,163 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/workspace":
             self._handle_workspace_post()
+            return
+        if parsed.path == "/api/studio/add_page":
+            try:
+                from core.studio import api as _studio_api
+                _payload = self._read_json_body(10000)
+                _code, _out = _studio_api.handle_add_page(_payload if isinstance(_payload, dict) else {})
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
+            return
+        if parsed.path == "/api/studio/chat":
+            try:
+                from core.studio import api as _studio_api
+                from core.agent.loop.engine import run_loop as _studio_run_loop
+                _payload = self._read_json_body(160000)
+                try:
+                    _studio_model, _studio_key = _resolve_chat_model()
+                except Exception:
+                    _studio_model, _studio_key = None, None
+
+                def _run_studio_turn(loop_input, system_override=None, cancel_flag=None):
+                    # Studio branch turn: ONE shared branch session per
+                    # studio; every parallel per-slide request lands here
+                    # with the minimal sentence+state context and runs under
+                    # the studio system prompt with the single session tool
+                    # (studio_page) pre-seeded. The loop never pauses for
+                    # questions here (the studio prompt forbids them); it
+                    # designs and delivers instead. Hard step cap (25) plus
+                    # the prompt budget keep turns tight. STOP arrives via
+                    # cancel_flag and halts the loop entirely.
+                    return _studio_run_loop(loop_input, max_steps=25, verbose=False,
+                                            model=_studio_model, api_key=_studio_key,
+                                            isolated=True, on_question=None,
+                                            system_override=system_override,
+                                            studio_session=True, cancel_flag=cancel_flag)
+
+                _code, _out = _studio_api.handle_chat(_payload if isinstance(_payload, dict) else {},
+                                                      run_loop_fn=_run_studio_turn)
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
+            return
+        if parsed.path == "/api/studio/orientation":
+            try:
+                from core.studio import api as _studio_api
+                _payload = self._read_json_body(10000)
+                _code, _out = _studio_api.handle_orientation(_payload if isinstance(_payload, dict) else {})
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
+            return
+        if parsed.path == "/api/studio/rename":
+            try:
+                from core.studio import api as _studio_api
+                _payload = self._read_json_body(10000)
+                _code, _out = _studio_api.handle_rename(_payload if isinstance(_payload, dict) else {})
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
+            return
+        if parsed.path == "/api/studio/cancel":
+            try:
+                from core.studio import api as _studio_api
+                _payload = self._read_json_body(10000)
+                _code, _out = _studio_api.handle_cancel(_payload if isinstance(_payload, dict) else {})
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
+            return
+        if parsed.path == "/api/studio/continue":
+            try:
+                from core.studio import api as _studio_api
+                from core.agent.loop.engine import run_loop as _studio_run_loop
+                _payload = self._read_json_body(10000)
+                try:
+                    _studio_model, _studio_key = _resolve_chat_model()
+                except Exception:
+                    _studio_model, _studio_key = None, None
+
+                def _run_studio_turn(loop_input, system_override=None, cancel_flag=None):
+                    return _studio_run_loop(loop_input, max_steps=25, verbose=False,
+                                            model=_studio_model, api_key=_studio_key,
+                                            isolated=True, on_question=None,
+                                            system_override=system_override,
+                                            studio_session=True, cancel_flag=cancel_flag)
+
+                _code, _out = _studio_api.handle_continue(_payload if isinstance(_payload, dict) else {},
+                                                          run_loop_fn=_run_studio_turn)
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
+            return
+        if parsed.path == "/api/studio/history":
+            try:
+                from core.studio import api as _studio_api
+                _payload = self._read_json_body(10000)
+                _code, _out = _studio_api.handle_history(_payload if isinstance(_payload, dict) else {})
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
+            return
+        if parsed.path == "/api/studio/delete_page":
+            try:
+                from core.studio import api as _studio_api
+                _payload = self._read_json_body(10000)
+                _code, _out = _studio_api.handle_delete_page(_payload if isinstance(_payload, dict) else {})
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
+            return
+        if parsed.path == "/api/studio/upload":
+            try:
+                from core.studio import api as _studio_api
+                _payload = self._read_json_body(20 * 1024 * 1024)
+                _code, _out = _studio_api.handle_upload(_payload if isinstance(_payload, dict) else {})
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
+            return
+        if parsed.path == "/api/studio/page_error":
+            try:
+                from core.studio import api as _studio_api
+                _payload = self._read_json_body(10000)
+                _code, _out = _studio_api.handle_page_error(_payload if isinstance(_payload, dict) else {})
+                self._send_json(_out, status=_code)
+            except Exception as e:
+                try:
+                    self._send_json({"error": str(e)[:300]}, status=getattr(e, "status", 500))
+                except Exception:
+                    pass
             return
         if parsed.path == "/api/gateway/config":
             self._handle_gateway_config_post()
@@ -2709,7 +2986,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def _handle_cost_api(self):
         try:
-            data = _get_cost_data()
+            try:
+                _days = int(parse_qs(urlparse(self.path).query or "").get("days", ["30"])[0])
+            except Exception:
+                _days = 30
+            data = _get_cost_data(_days)
             self._send_json(data)
         except Exception as e:
             self._send_json({"error": "failed to load cost", "detail": str(e)}, status=500)
@@ -2901,6 +3182,85 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             try:
                 self.send_error(500, "Audio failed")
+            except Exception:
+                pass
+
+    def _handle_image_get(self, raw_path: str):
+        """Serve one generated image. Basename must resolve inside Data/files/images."""
+        try:
+            if not isinstance(raw_path, str) or not raw_path.strip() or len(raw_path) > 100:
+                self.send_error(400, "Bad path")
+                return
+            name = Path(raw_path.strip()).name
+            if not name or name.startswith(".") or "/" in raw_path.replace("\\", "/") or ".." in raw_path:
+                self.send_error(400, "Bad path")
+                return
+            if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+                self.send_error(400, "Bad path")
+                return
+            root = _images_root().resolve()
+            cand = (root / name).resolve()
+            try:
+                cand.relative_to(root)
+            except ValueError:
+                self.send_error(403, "Forbidden")
+                return
+            if not cand.is_file():
+                self.send_error(404, "Not found")
+                return
+            if cand.stat().st_size > 8 * 1024 * 1024:
+                self.send_error(413, "Too large")
+                return
+            body = cand.read_bytes()
+            mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif"}.get(cand.suffix.lower().lstrip("."), "image/png")
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            try:
+                self.send_error(500, "Image failed")
+            except Exception:
+                pass
+
+    def _handle_studio_asset_get(self, query: str):
+        """Serve one studio asset file (image/font) for live page code.
+
+        Same-origin + owner-gated like every /api/* route, so <img> and
+        @font-face never taint the canvas. Path-validated against the
+        studio dir (no traversal, allowlisted names/extensions, size cap).
+        """
+        try:
+            from urllib.parse import parse_qs as _parse_qs
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.studio import store as _store
+            qs = _parse_qs(query or "")
+            sid = (qs.get("studio_id", [""])[0] or "").strip()
+            rel = (qs.get("file", [""])[0] or "").strip()
+            try:
+                cand, mime = _store.resolve_asset_file(sid, rel)
+            except FileNotFoundError:
+                self.send_error(404, "Not found")
+                return
+            except ValueError:
+                self.send_error(400, "Bad asset path")
+                return
+            body = cand.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            try:
+                self.send_error(500, "Asset failed")
             except Exception:
                 pass
 
@@ -4366,6 +4726,35 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if _resume:
             if not skip_ids:
                 raise _ChatError("resume needs skip_history_ids of the stopped task")
+            # Trailing-only resume: the referenced user id must own the LAST
+            # assistant message and it must be an un-resumed stopped marker.
+            # A buried id (a newer task was sent after the STOP) is stale —
+            # refuse instead of attaching the continuation to the wrong task.
+            try:
+                _conv = _data_json("conversation.json", [])
+                _valid = [m for m in _conv if isinstance(m, dict)
+                          and m.get("role") in ("user", "assistant")
+                          and str(m.get("content") or "").strip()]
+                _last_a = None
+                _last_a_idx = -1
+                for _i in range(len(_valid) - 1, -1, -1):
+                    if _valid[_i].get("role") == "assistant":
+                        _last_a = _valid[_i]
+                        _last_a_idx = _i
+                        break
+                _ok = (isinstance(_last_a, dict)
+                       and _last_a.get("stopped") is True
+                       and _last_a.get("resumed") is not True)
+                if _ok and _last_a_idx > 0:
+                    _prev = _valid[_last_a_idx - 1]
+                    _ok = (isinstance(_prev, dict) and _prev.get("role") == "user"
+                           and str(_prev.get("id") or "")[:16] == skip_ids[0])
+                if not _ok:
+                    raise _ChatError("stopped task expired — send as a new message", status=410)
+            except _ChatError:
+                raise
+            except Exception:
+                pass
             try:
                 self._resume_task = True
             except Exception:
@@ -4596,8 +4985,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 self._send_json({"error": "answer or decision required"}, status=400)
                 return
-            # Resuming a live handoff ends its pause entry.
+            # Resuming a live handoff ends its pause entry, then re-broadcast
+            # the browser snapshot so every tab brings its edge tab back at
+            # once (the resumed loop emits no live frame for human_control).
             _live_pause_clear(qid)
+            try:
+                _events_emit_browser(force=True)
+            except Exception:
+                pass
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"error": "answer failed", "detail": str(e)[:200]}, status=500)
@@ -4623,18 +5018,39 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             active, preview = _chat_status()
             frames = []
             full = ""
+            resume_id = None
             if active:
                 with _RUN_FRAMES_LOCK:
                     frames = [dict(f) for f in _RUN_FRAMES]
                 try:
                     with _RUN_LOCK:
                         full = str(_ACTIVE_RUN.get("input_full") or preview or "")[:4000]
+                        _rid = _ACTIVE_RUN.get("resume_id")
+                        if isinstance(_rid, str) and _rid.strip():
+                            resume_id = _rid.strip()[:16]
                 except Exception:
                     full = preview
             self._send_json({"active": bool(active), "input": preview,
-                             "input_full": full, "frames": frames})
+                             "input_full": full, "frames": frames,
+                             "resume_id": resume_id})
         except Exception as e:
             self._send_json({"error": "failed to load run frames", "detail": str(e)}, status=500)
+
+    def _handle_pending_questions_get(self):
+        """Open loop questions (ask/approval/model) for strip rebuild.
+
+        Read-only: a refreshed page restores the waiting strip from server
+        truth (same qid, so answering resumes the paused loop). Live
+        handoffs are excluded (they restore through the live state).
+        Answered/expired/cancelled questions vanish here at once."""
+        try:
+            with _PQ_LOCK:
+                live_ids = set(_PENDING_QUESTIONS.keys())
+                out = [dict(_PENDING_QMETA[qid]) for qid in list(_PENDING_QMETA.keys())
+                       if qid in live_ids]
+            self._send_json({"questions": out})
+        except Exception as e:
+            self._send_json({"error": "failed to load pending questions", "detail": str(e)[:200]}, status=500)
 
     def _handle_chat_cancel_post(self):
         """Cancel the active chat loop (STOP / edit-during-generation).
@@ -4699,8 +5115,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_conversation_clear_post(self):
         """POST /api/conversation/clear — delete the MAIN chat history only.
 
-        Clears conversation.json + its chat embeddings. Saved memories
-        (user/agent/image/important) are never touched.
+        Clears conversation.json + its chat embeddings. PDF Studios are NEVER
+        deleted by anything: not by chat regenerate/edit/prune, and not by
+        this full Delete-chat-history either — every studio (Data/studios/pdf_*
+        + branch sessions) always survives. Use Backup before clearing if the
+        chat itself matters. Saved memories (user/agent/image/important),
+        Workspace, and all other Data are never touched either.
+        (studios_removed/sessions_removed stay in the response as 0 for
+        backward compatibility with older consoles.)
         """
         try:
             if str(PROJECT_ROOT) not in sys.path:
@@ -4718,9 +5140,162 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     cvs.clear_all()
                 except Exception:
                     pass
-            self._send_json({"ok": True, "removed": removed})
+            self._send_json({"ok": True, "removed": removed,
+                             "studios_removed": 0,
+                             "sessions_removed": 0})
         except Exception as e:
             self._send_json({"error": "clear failed", "detail": str(e)[:200]}, status=500)
+
+    def _handle_backup_info_get(self):
+        """GET /api/backup/info — last-backup date/count/size (never 404)."""
+        try:
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.backup import service as _backup
+            self._send_json({**_backup.get_backup_info(), "ok": True})
+        except Exception:
+            self._send_json({"ok": True, "has_backup": False,
+                             "last_backup_at": "", "files": 0, "size_bytes": 0})
+
+    def _handle_backup_download_get(self):
+        """GET /api/backup/download — zip Data + Workspace + skills for download.
+
+        Client data only (chat, studios, memories, skills incl. project/skills,
+        files, configs, Data/.env with API keys). System code + embedding
+        weights are never inside. Records backup_meta (date/count/size) for
+        /api/backup/info. Streams the file in 1MB chunks, never buffered.
+        Refused with 409 while any task runs (agent loop or PDF Studio
+        turn): the zip would miss the in-flight reply (or a slide being
+        designed) and could catch a half-written file.
+        """
+        import time as _time
+        tmp = None
+        try:
+            _busy = _any_task_running()
+            if _busy:
+                self._send_json({"error": f"{_busy} — wait until it finishes, then back up"}, status=409)
+                return
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+            from core.backup import service as _backup
+            try:
+                tmp = _backup.create_backup_zip()
+            except ValueError as e:
+                self._send_json({"error": str(e)[:200]}, status=413)
+                return
+            try:
+                size = tmp.stat().st_size
+            except Exception:
+                self._send_json({"error": "backup failed"}, status=500)
+                return
+            name = "x5agent-backup-" + _time.strftime("%Y%m%d-%H%M%S", _time.gmtime()) + ".zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            try:
+                with open(tmp, "rb") as fh:
+                    while True:
+                        chunk = fh.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        try:
+                            self.wfile.write(chunk)
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        except Exception:
+            try:
+                self.send_error(500, "Backup failed")
+            except Exception:
+                pass
+        finally:
+            try:
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _handle_backup_restore_post(self):
+        """POST /api/backup/restore — raw zip bytes in the body, any size.
+
+        Accepts the file this console's Backup button produced (or any zip
+        with Data/* + Workspace/* + skills/* layout). Validates every entry
+        (zip-slip rejected, system paths skipped) before touching disk, then
+        restores client data only: code + embedding weights are never
+        overwritten. Body cap is BACKUP_HTTP_MAX_BYTES (413 beyond it).
+        Refused with 409 while any task runs (agent loop or PDF Studio
+        turn): the worker would otherwise persist its reply on top of the
+        replaced data (or read a half-replaced history). Press STOP first.
+        """
+        import tempfile as _tempfile
+        try:
+            _busy = _any_task_running()
+            if _busy:
+                self._send_json({"error": f"{_busy} — press STOP first, then restore"}, status=409)
+                return
+            ctype = str(self.headers.get("Content-Type") or "")
+            if "multipart/" in ctype:
+                self._send_json({"error": "send the .zip file bytes directly (application/zip)"}, status=400)
+                return
+            try:
+                length = int((self.headers.get("Content-Length") or "0").strip() or 0)
+            except Exception:
+                length = 0
+            if length <= 0:
+                self._send_json({"error": "empty backup file"}, status=400)
+                return
+            if length > BACKUP_HTTP_MAX_BYTES:
+                self._send_json({"error": "backup too large (max 1GB)"}, status=413)
+                return
+            raw = _read_request_body(self.rfile, self.headers, BACKUP_HTTP_MAX_BYTES)
+            if not raw:
+                self._send_json({"error": "backup too large (max 1GB) or unreadable"}, status=413)
+                return
+            if len(raw) < 4 or raw[:2] != b"PK":
+                self._send_json({"error": "not a zip backup"}, status=400)
+                return
+            tmp = Path(_tempfile.mkstemp(prefix="x5_restore_", suffix=".zip")[1])
+            try:
+                tmp.write_bytes(raw)
+            finally:
+                raw = b""
+            try:
+                if str(PROJECT_ROOT) not in sys.path:
+                    sys.path.insert(0, str(PROJECT_ROOT))
+                from core.backup import service as _backup
+                try:
+                    out = _backup.restore_backup_zip(tmp)
+                except ValueError as e:
+                    self._send_json({"error": str(e)[:200]}, status=400)
+                    return
+                except OSError as e:
+                    self._send_json({"error": str(e)[:200]}, status=500)
+                    return
+                try:
+                    _events_emit_workspace(force=True)
+                except Exception:
+                    pass
+                try:
+                    _events_emit_scheduler(force=True)
+                except Exception:
+                    pass
+                self._send_json({"ok": True, **out})
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                self._send_json({"error": "restore failed", "detail": str(e)[:200]}, status=500)
+            except Exception:
+                pass
 
     def _reuse_user_id(self) -> str | None:
         """Id of the already-persisted edited user bubble (edit resend).
@@ -4766,14 +5341,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._cleanup_paths(saved_paths)
                 self._send_json({"error": NO_MODEL_ERROR, "needs_model": True, "needs_kind": "text"}, status=503)
                 return
+            # Serialize turns: a busy loop (running or winding down) answers
+            # 409 so the client retries instead of orphaning the old thread —
+            # overwriting used to persist two tasks out of order and resurrect
+            # the stopped one after refresh.
             try:
                 if _chat_thread_busy():
-                    with _RUN_LOCK:
-                        stopping = bool(_ACTIVE_RUN.get("cancelled"))
-                    if stopping:
-                        self._cleanup_paths(saved_paths)
-                        self._send_json({"error": "still stopping, retry", "retry": True}, status=409)
-                        return
+                    self._cleanup_paths(saved_paths)
+                    self._send_json({"error": "busy, retry", "retry": True}, status=409)
+                    return
             except Exception:
                 pass
 
@@ -4866,14 +5442,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"error": "another run is active, try again shortly"}, status=409)
                 return
 
+        # Same serialization as /api/chat: never overwrite a live run —
+        # the client retries with backoff and the old task persists first.
         try:
             if _chat_thread_busy():
-                with _RUN_LOCK:
-                    stopping = bool(_ACTIVE_RUN.get("cancelled"))
-                if stopping:
-                    self._cleanup_paths(saved_paths)
-                    self._send_json({"error": "still stopping, retry", "retry": True}, status=409)
-                    return
+                self._cleanup_paths(saved_paths)
+                self._send_json({"error": "busy, retry", "retry": True}, status=409)
+                return
         except Exception:
             pass
 
@@ -4921,11 +5496,25 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             _sync_event = threading.Event()
             _sync_id = id(_sync_event)
             _run_frames_clear()
+            # Which stopped task this run continues (Continue pill only): a
+            # refreshed page may adopt the frozen Working block ONLY when it
+            # belongs to this same task — never for a brand-new task sent
+            # after a STOP. Peek only (the run thread consumes these later).
+            _reg_resume_id = None
+            try:
+                _reg_ids = getattr(self, "_skip_history_ids", None)
+                if bool(getattr(self, "_resume_task", False)) and isinstance(_reg_ids, list) and _reg_ids:
+                    _cand = str(_reg_ids[0] or "").strip()[:16]
+                    if _cand:
+                        _reg_resume_id = _cand
+            except Exception:
+                _reg_resume_id = None
             with _RUN_LOCK:
                 _ACTIVE_RUN["event"] = _sync_event
                 _ACTIVE_RUN["input"] = loop_input[:200]
                 _ACTIVE_RUN["input_full"] = loop_input[:4000]
                 _ACTIVE_RUN["id"] = _sync_id
+                _ACTIVE_RUN["resume_id"] = _reg_resume_id
                 _ACTIVE_RUN.pop("cancelled", None)
                 _CANCEL_EVENTS.add(_sync_event)
             box["run_id"] = _sync_id
@@ -4983,6 +5572,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             q: _queue.Queue = _queue.Queue()
             with _PQ_LOCK:
                 _PENDING_QUESTIONS[qid] = q
+                if kind in ("ask", "approval", "needs_model"):
+                    _PENDING_QMETA[qid] = {
+                        "id": qid,
+                        "kind": kind,
+                        "text": str(qpayload.get("question") or qpayload.get("command") or "")[:2000],
+                        "choices": [str(c)[:200] for c in (qpayload.get("options") or [])[:4]],
+                        "command": str(qpayload.get("command") or "")[:500],
+                        "needs_kind": str(qpayload.get("kind") or "text")[:20],
+                        "tool": str(qpayload.get("tool") or "")[:40],
+                    }
             frame = {
                 "type": "question",
                 "id": qid,
@@ -5016,19 +5615,31 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     _LIVE_PAUSE[qid] = {"tool": frame["tool"],
                                         "view_only": live_view_only,
                                         "reason": frame["reason"]}
-            if not _emit(frame):
-                with _PQ_LOCK:
-                    _PENDING_QUESTIONS.pop(qid, None)
-                    _LIVE_PAUSE.pop(qid, None)
-                return None
+            # Buffer the pause so a refreshed page rebuilds the strip from
+            # /api/chat_frames (the SSE socket belongs to the old page).
+            try:
+                _run_frame_remember(dict(frame))
+            except Exception:
+                pass
+            # A failed emit (dead socket after refresh) NEVER skips the wait:
+            # every choice blocks until answered, expired (600s), or stopped.
+            try:
+                _emit(frame)
+            except Exception:
+                pass
             try:
                 return q.get(timeout=600)
             except Exception:
+                try:
+                    _run_frame_remember({"type": "question-expired", "id": qid})
+                except Exception:
+                    pass
                 _emit({"type": "question-expired", "id": qid})
                 return None
             finally:
                 with _PQ_LOCK:
                     _PENDING_QUESTIONS.pop(qid, None)
+                    _PENDING_QMETA.pop(qid, None)
                     _LIVE_PAUSE.pop(qid, None)
 
         def _on_gateway_question(kind: str, qpayload: dict):
@@ -5241,8 +5852,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header(str(key), str(value))
         except Exception:
             pass
-        self.end_headers()
-        self.wfile.write(body)
+        # A dead client (refresh/STOP mid-stream) must not raise: socketserver
+        # would log it as an "unexpected" traceback. Only real errors surface.
+        try:
+            self.end_headers()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            return
+        try:
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     # ---------- console owner gate (terminal-created owner, then cookie sessions) ----------
     # Owner is created in the TERMINAL ONLY (install prompt / env / server prompt).

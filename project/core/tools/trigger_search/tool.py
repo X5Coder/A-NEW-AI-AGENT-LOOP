@@ -63,7 +63,7 @@ def _validate_top_k(v) -> int:
     return v
 
 
-def _manage(action: str, trigger_name, task, config, trigger_id) -> dict:
+def _manage(action: str, trigger_name, task, config, trigger_id, cancel_flag=None) -> dict:
     """Delegate management actions to the internal trigger implementation."""
     import sys as _sys
     proj = Path(__file__).resolve().parents[3]
@@ -77,16 +77,17 @@ def _manage(action: str, trigger_name, task, config, trigger_id) -> dict:
     if cfg is not None and not isinstance(cfg, dict):
         raise TypeError("config must be object")
     return _trigger_execute(action=action, trigger_name=trigger_name, task=task,
-                            config=cfg, trigger_id=trigger_id)
+                            config=cfg, trigger_id=trigger_id,
+                            cancel_flag=cancel_flag)
 
 
 def execute(action: str | None = None, query: str | None = None, top_k=None,
             trigger_name: str | None = None, task: str | None = None,
-            config=None, trigger_id: str | None = None) -> dict:
+            config=None, trigger_id: str | None = None, cancel_flag=None) -> dict:
     act = _validate_action(action)
     event = format_event(action=act)
     if act in _MANAGE_ACTIONS:
-        out = _manage(act, trigger_name, task, config, trigger_id)
+        out = _manage(act, trigger_name, task, config, trigger_id, cancel_flag)
         # Keep one stable event label for the merged tool.
         if isinstance(out, dict):
             out["event"] = event

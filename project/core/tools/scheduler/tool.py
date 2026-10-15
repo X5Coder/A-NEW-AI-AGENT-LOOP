@@ -143,7 +143,14 @@ def _load_chat_snippet(limit: int = 30) -> str:
     return ""
 
 
-def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_snippet: str) -> str:
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_snippet: str, cancel_flag=None) -> str:
     """Internal LLM request using scheduler_skill_system.md. Returns skill markdown.
 
     SAME routing the agent loop itself uses: AIP/1 records go through the
@@ -189,7 +196,7 @@ def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_
             ],
         }
         try:
-            res = _aip.execute(_record, canonical, "text")
+            res = _aip.execute(_record, canonical, "text", cancel_event=cancel_flag)
             content = (res.get("text") if isinstance(res, dict) else "") or ""
         except Exception as e:
             raise RuntimeError(
@@ -204,7 +211,7 @@ def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_
             content = _legacy_chat(
                 _record,
                 [{"role": "user", "content": user_prompt}],
-                {"system": system_prompt},
+                {"system": system_prompt, "cancel_event": cancel_flag},
             )
         except Exception as e:
             raise RuntimeError(
@@ -217,7 +224,7 @@ def _generate_skill_content_via_llm(task: str, todo_snapshot: dict | None, chat_
     return content.strip()
 
 
-def _save_scheduled_skill(job_id: str, task: str, todo_snapshot: dict | None) -> tuple[str, str]:
+def _save_scheduled_skill(job_id: str, task: str, todo_snapshot: dict | None, cancel_flag=None) -> tuple[str, str]:
     """Create skill under skills/scheduled_skills/<safe_name> via internal LLM request.
     On failure a RuntimeError with retry guidance is raised (job is never saved half-built).
     Returns (safe_name, skill_content) on success.
@@ -241,7 +248,7 @@ def _save_scheduled_skill(job_id: str, task: str, todo_snapshot: dict | None) ->
     chat_snippet = _load_chat_snippet(limit=10)
     # Same-model skill generation (AIP/1 path, like the loop). Raises
     # RuntimeError with guidance when the service is unreachable.
-    llm_content = _generate_skill_content_via_llm(task, todo_snapshot, chat_snippet)
+    llm_content = _generate_skill_content_via_llm(task, todo_snapshot, chat_snippet, cancel_flag)
 
     target.mkdir(parents=True, exist_ok=True)
     skill_data = {
@@ -375,7 +382,9 @@ def _parse_next_run(start_at: str | None, repeat: str | None, timezone_str: str 
         return None
 
 
-def execute(action: str, job_id: str | None = None, task: str | None = None, start_at: str | None = None, repeat: str | None = None, repeat_count: int | None = None, end_at: str | None = None, timezone: str | None = None) -> dict:
+def execute(action: str, job_id: str | None = None, task: str | None = None, start_at: str | None = None, repeat: str | None = None, repeat_count: int | None = None, end_at: str | None = None, timezone: str | None = None, cancel_flag=None) -> dict:
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
     act = _validate_action(action)
     needs_id = act in ("update", "delete", "pause", "resume")
     jid = _validate_job_id(job_id, required=needs_id)
@@ -401,7 +410,7 @@ def execute(action: str, job_id: str | None = None, task: str | None = None, sta
         # Practical: for ANY task (small or large) create a scheduled_skill with all details from chat
         todo_snap = _find_recent_todo_for_task(task.strip())
         # Always create scheduled skill (most reliable) via internal LLM request
-        skill_ref, skill_content = _save_scheduled_skill(new_id, task.strip(), todo_snap)
+        skill_ref, skill_content = _save_scheduled_skill(new_id, task.strip(), todo_snap, cancel_flag)
         next_run = _parse_next_run(start_at or "now", repeat, timezone)
         entry = {
             "job_id": new_id,
@@ -495,7 +504,7 @@ def execute(action: str, job_id: str | None = None, task: str | None = None, sta
             todo_snap = _find_recent_todo_for_task(jobs[idx].get("task", ""))
             chat_snippet = _load_chat_snippet(limit=10)
             skill_content = _generate_skill_content_via_llm(
-                jobs[idx].get("task", ""), todo_snap, chat_snippet)
+                jobs[idx].get("task", ""), todo_snap, chat_snippet, cancel_flag)
             project_root = Path(__file__).resolve().parents[3]
             target = project_root / "skills" / "scheduled_skills" / (jobs[idx].get("skill_ref") or "")
             try:

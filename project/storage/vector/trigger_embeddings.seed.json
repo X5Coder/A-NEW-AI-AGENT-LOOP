@@ -1,7 +1,7 @@
 {
   "hash": "2afc2e92ba88aedc86b1ea958f562dd6069d99f7e0b46f893e2a445d3f5d2979",
   "model_id": "embedding-model",
-  "updated_at": "2026-10-12T01:54:28Z",
+  "updated_at": "2026-10-15T21:10:29Z",
   "triggers": [
     {
       "name": "filesystem_file_modified",
@@ -1047,7 +1047,8 @@
         0.0498046875,
         0.01409912109375,
         0.035888671875
-      ]
+      ],
+      "fingerprint": "51b4d14f27397f222495be18e2ab9c690e06c2b24964b594272b584286db6e29"
     },
     {
       "name": "filesystem_new_file",
@@ -2093,7 +2094,8 @@
         0.04345703125,
         0.017578125,
         0.0208740234375
-      ]
+      ],
+      "fingerprint": "e4af8aa52d51b2d596c6cc00702b96785d23cbd262c454cfe598dcc99d3f59c2"
     },
     {
       "name": "manage_triggers",
@@ -3190,7 +3192,8 @@
         0.0537109375,
         0.010498046875,
         -0.021728515625
-      ]
+      ],
+      "fingerprint": "b34014ebb2b828c2ea8ce48b7403ce6ec5f7197b06571f1d8a6dc0b5fe2e0d75"
     }
   ],
   "count": 3,

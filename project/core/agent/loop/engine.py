@@ -18,19 +18,119 @@ STORAGE_DB = Path(__file__).resolve().parents[3] / "storage" / "database"
 MAX_STEPS = 500
 MAX_DYNAMIC_TOOLS = 20
 
+# Studio-session tools: the 4 base tools exist inside every PDF Studio
+# branch session (pre-seeded there directly). The main agent never sees the
+# session-only ones (studio_page/studio_read): tool_search never returns
+# them and the main loop rejects them below. http_request is a normal
+# discoverable tool that is additionally allowed inside studio sessions
+# (fonts/links only — photos come from image_search, also discoverable).
+# vision_analyze joins them ONLY when a vision model is configured (never
+# advertised without a model behind it).
+STUDIO_ONLY_TOOLS = frozenset({"studio_page", "studio_read"})
+STUDIO_SESSION_TOOLS = frozenset({"studio_page", "studio_read", "http_request", "image_search"})
+STUDIO_VISION_TOOLS = frozenset({"vision_analyze"})
+
+
+def _studio_tool_specs() -> list[tuple[str, str, dict]]:
+    """Local studio tool specs (trusted spec.json files). Never raises.
+
+    image_search is pre-seeded with its studio face (studio_spec(): the
+    studio_id home, zero Workspace words) so the studio context never
+    mentions Workspace files — the studio stays self-contained.
+    """
+    out: list[tuple[str, str, dict]] = []
+    try:
+        wanted = set(STUDIO_SESSION_TOOLS)
+        try:
+            from core.agent.context.builder import _studio_vision_available
+            if _studio_vision_available():
+                wanted |= set(STUDIO_VISION_TOOLS)
+        except Exception:
+            pass
+        base = Path(__file__).resolve().parents[3] / "plugins" / "core_plugins"
+        for tname in sorted(wanted):
+            try:
+                if tname == "image_search":
+                    from plugins.core_plugins.image_search.tool import studio_spec
+                    spec = studio_spec()
+                else:
+                    spec = json.loads((base / tname / "spec.json").read_text(encoding="utf-8"))
+                if not isinstance(spec.get("name"), str) or not isinstance(spec.get("description"), str):
+                    continue
+                out.append((spec["name"], spec["description"], spec.get("inputs") or {}))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def is_studio_call_allowed(name: object, studio_session: bool = False) -> bool:
+    """True when a tool call may run in this loop kind. Never raises."""
+    try:
+        clean = str(name or "").strip()
+        if studio_session:
+            # Studio branch session: the 4 base tools, plus vision_analyze
+            # only while a vision model is configured behind it.
+            if clean in STUDIO_SESSION_TOOLS:
+                return True
+            if clean in STUDIO_VISION_TOOLS:
+                try:
+                    from core.agent.context.builder import _studio_vision_available
+                    return bool(_studio_vision_available())
+                except Exception:
+                    return False
+            return False
+        if clean in STUDIO_ONLY_TOOLS:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _sanitize_tool_args(name: object, args: Any, studio_session: bool = False) -> Any:
+    """Drop session-forged fields before execute. Never raises.
+
+    image_search accepts studio_id ONLY inside studio sessions (pictures
+    land in that studio's assets there). In the main chat the field is
+    stripped, so the main agent can never write studio assets even if the
+    model hallucinates a studio_id.
+    """
+    try:
+        if (name == "image_search" and not studio_session
+                and isinstance(args, dict) and "studio_id" in args):
+            args = {k: v for k, v in args.items() if k != "studio_id"}
+    except Exception:
+        pass
+    return args
+
 
 def _ask_user(name: str, args: Any, on_question) -> dict:
-    """Route a question tool call through the UI callback (pauses the loop until answered)."""
+    """Route a question tool call through the UI callback (pauses the loop until answered).
+
+    Invalid questions are REJECTED here (never pause the UI): the error goes
+    back to the model so it regenerates a valid question instead of parking
+    the turn on a blank dialog. Reuses the question tool validators.
+    """
     if on_question is None:
         return execute_tool(name, args)
+    if not isinstance(args, dict):
+        return {"tool": name, "arguments": args, "success": False,
+                "error": "Invalid question call: arguments must be an object with a "
+                         "'question' string. Call the question tool again with a clear "
+                         "one-sentence question."}
     try:
-        q = args.get("question", "") if isinstance(args, dict) else ""
-        opts = args.get("options") if isinstance(args, dict) else None
-        if not isinstance(opts, list):
-            opts = []
+        from core.tools.question.tool import _validate_question, _validate_options
+        q = _validate_question(args.get("question"))
+        opts = _validate_options(args.get("options")) if "options" in args else None
+    except (TypeError, ValueError) as e:
+        return {"tool": name, "arguments": args, "success": False,
+                "error": f"Invalid question: {e}. Call the question tool again with a "
+                         "valid one-sentence question (omit options for free-text answers)."}
+    try:
         answer = on_question("ask", {
-            "question": str(q)[:2000],
-            "options": [str(o)[:200] for o in opts[:4]],
+            "question": q,
+            "options": list(opts) if isinstance(opts, list) else [],
         })
     except Exception:
         answer = None
@@ -144,7 +244,7 @@ def _missing_kind_of(result: dict) -> str | None:
         if not isinstance(result, dict) or result.get("success"):
             return None
         direct = result.get("needs_model_kind")
-        if isinstance(direct, str) and direct in ("text", "vision", "image", "tts", "stt"):
+        if isinstance(direct, str) and direct in ("text", "vision", "video", "image", "tts", "stt"):
             return direct
         from core.ai_models.store import kind_from_missing_error as _kind_of
         return _kind_of(str(result.get("error") or ""))
@@ -271,6 +371,11 @@ def _should_show_arrow(name: str, result: dict | None = None) -> bool:
             out = result.get("output") if isinstance(result.get("output"), dict) else None
             if isinstance(out, dict) and out.get("has_screenshot"):
                 return True
+            if isinstance(out, dict):
+                for _k in ("image_path", "image"):
+                    _v = out.get(_k)
+                    if isinstance(_v, str) and _v.strip():
+                        return True
         try:
             from X5Browser.catalog import ALL_TOOLS as _BROWSER_ALL
             if name in _BROWSER_ALL:
@@ -350,7 +455,7 @@ def _summarize_output(result: dict, name: str | None = None, args: Any = None) -
     - navigate: URL only (args-based)
     - question: Q + the user's answer (the answer is shown here, never as
       a user bubble; unanswered → question only)
-    - pdf_create: one line per finished slide + a final merge line
+    - pdf_studio: studio id + open card; studio_page: slide result line
     - svg_maker: icon file name + size (never SVG markup)
     Failures return one short human line (machine prefix stripped), so every
     failed call gets an expandable arrow with the cause instead of a dump.
@@ -475,36 +580,49 @@ def _summarize_output(result: dict, name: str | None = None, args: Any = None) -
             return "\n".join(lines)[:520] or None
 
         # Default: reason-only (no output dump). Images travel via media.
-        # pdf_create: one dynamic line per finished slide + a final merge
-        # line, so the arrow shows the whole build story under the reason.
-        if tool == "pdf_create":
+        # pdf_studio: studio id + studio link, so the arrow shows the link
+        # the agent knows, and gateway chats can copy it as plain text.
+        if tool == "pdf_studio":
+            # NOTE: never include the [STUDIO:id] token here — the open card
+            # must render at the END of the reply, never inside this arrow.
             try:
-                lines: list[str] = []
-                prog = out.get("progress")
-                if isinstance(prog, list):
-                    for entry in prog[:50]:
-                        if isinstance(entry, str) and entry.strip():
-                            lines.append(entry.strip()[:140])
-                if not lines:
-                    done = out.get("slides_done")
-                    if isinstance(done, list) and done:
-                        nums = [str(n) for n in done[:50] if isinstance(n, int)]
-                        if nums:
-                            lines.append("Slides created: " + ", ".join(nums))
-                    changed = out.get("changed")
-                    if isinstance(changed, list) and changed:
-                        nums = [str(n) for n in changed[:50] if isinstance(n, int)]
-                        if nums:
-                            lines.append("Slides created: " + ", ".join(nums))
-                if isinstance(out.get("pdf_path"), str) and out.get("pdf_path"):
-                    total = out.get("slides_done")
-                    n = len(total) if isinstance(total, list) else 0
-                    if not any(line.startswith("Merged") for line in lines):
-                        if n:
-                            lines.append(f"Merged {n} slides into PDF")
-                        else:
-                            lines.append("Merged slides into PDF")
-                return "\n".join(lines)[:2000] or None
+                sid = str(out.get("studio_id") or safe_args.get("studio_id") or "").strip()[:40]
+                url = str(out.get("open_url") or out.get("studio_url") or "").strip()[:120]
+                if not url and sid:
+                    url = f"/studio-pdf/{sid}"
+                _act = str(out.get("action") or safe_args.get("action") or "").strip().lower()
+                if _act == "rename":
+                    return f"Studio {sid} renamed"[:200] if sid else "Studio renamed"[:200]
+                if _act == "list":
+                    try:
+                        _n = len(out.get("studios") or [])
+                    except Exception:
+                        _n = 0
+                    return f"Studios listed · {_n}"[:200]
+                if _act == "get":
+                    return f"Studio {sid} viewed · {url}"[:200] if sid else "Studio viewed"[:200]
+                if sid:
+                    return f"Studio {sid} ready · {url}"[:200] or None
+                return "Studio ready"[:200]
+            except Exception:
+                return None
+        if tool == "studio_page":
+            try:
+                act = str(safe_args.get("action") or "").strip().lower()
+                n = out.get("page_no") if isinstance(out.get("page_no"), int) else safe_args.get("page_no")
+                err = str(out.get("error") or "").strip()[:200]
+                if act == "list":
+                    return "Slides list"[:120]
+                if act == "read":
+                    has = out.get("has_code")
+                    return f"Slide {n}: {'has code' if has else 'empty'}"[:120]
+                if err:
+                    return f"Page {n}: {err}"[:300]
+                if act == "patch":
+                    return f"Page {n} section patched and hot-reloaded"[:200] if isinstance(n, int) else "Page section patched and hot-reloaded"[:200]
+                if isinstance(n, int):
+                    return f"Page {n} approved and hot-reloaded"[:200]
+                return "Page approved and hot-reloaded"[:200]
             except Exception:
                 return None
         if tool == "svg_maker":
@@ -513,6 +631,12 @@ def _summarize_output(result: dict, name: str | None = None, args: Any = None) -
                 size = out.get("size") if isinstance(out.get("size"), int) else safe_args.get("size")
                 head = (base or "icon") + (f" ({size}x{size})" if isinstance(size, int) else "")
                 return head[:120]
+            except Exception:
+                return None
+        if tool == "generate_image":
+            try:
+                base = _basename(out.get("image_path") or out.get("image"))
+                return (base or "image ready")[:120]
             except Exception:
                 return None
         return None
@@ -571,6 +695,17 @@ def _event_media(name: str, result: dict) -> dict | None:
         media: dict = {}
         if out.get("has_screenshot") and isinstance(out.get("screenshot_path"), str):
             media["shot"] = str(out["screenshot_path"])[:500]
+        # Generated images (generate_image + any tool returning image_path/image
+        # basename) travel here so steps and the end-of-reply card share them.
+        try:
+            _img_cand = out.get("image_path") if isinstance(out.get("image_path"), str) else (out.get("image") if isinstance(out.get("image"), str) else "")
+            _img_cand = (_img_cand or "").strip()
+            if _img_cand and "/" not in _img_cand.replace("\\", "/") and ".." not in _img_cand and len(_img_cand) <= 100:
+                _low = _img_cand.lower()
+                if _low.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+                    media["image"] = _img_cand
+        except Exception:
+            pass
         # TTS voice records are rendered once as a WhatsApp-style bubble on the
         # assistant message (see _collect_final_audio), never inside the step.
         _stream_url = None
@@ -625,26 +760,57 @@ def _resolve_legacy_conversation_path() -> Path:
 
 
 def _collect_final_images(tool_calls_log: list) -> list[dict]:
-    """Screenshots taken via the screenshot tool, for the final reply.
-    Shown under the answer (and after refresh) as part of the final reply.
-    Bounded, deduped by path. Never raises."""
+    """Images for the end-of-reply card (screenshots + generated images).
+
+    Shown under the answer (and after refresh) as one unified template.
+    Bounded (6), deduped by kind+value. Never raises."""
     images: list[dict] = []
     seen: set[str] = set()
     try:
         for entry in (tool_calls_log or [])[-12:]:
-            if not isinstance(entry, dict) or entry.get("tool") != "screenshot":
+            if not isinstance(entry, dict):
                 continue
             res = entry.get("result") or {}
             if not isinstance(res, dict) or not res.get("success"):
                 continue
             out = res.get("output") or {}
-            if not isinstance(out, dict) or not out.get("has_screenshot"):
+            if not isinstance(out, dict):
                 continue
-            shot = out.get("screenshot_path")
-            if not isinstance(shot, str) or not shot or shot in seen:
+            if entry.get("tool") == "screenshot" and out.get("has_screenshot"):
+                shot = out.get("screenshot_path")
+                if isinstance(shot, str) and shot and f"shot:{shot}" not in seen:
+                    seen.add(f"shot:{shot}")
+                    images.append({"shot": shot[:500]})
+                    if len(images) >= 6:
+                        break
                 continue
-            seen.add(shot)
-            images.append({"shot": shot[:500]})
+            if entry.get("tool") == "image_search":
+                # Workspace pictures (main agent only — studio turns never
+                # persist final images, and studio outputs carry no `file`).
+                for meta in (out.get("images") or [])[:6]:
+                    if not isinstance(meta, dict):
+                        continue
+                    rel = str(meta.get("file") or "")
+                    if (rel.startswith("images/") and ".." not in rel
+                            and len(rel) <= 200
+                            and rel.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+                            and f"ws:{rel}" not in seen):
+                        seen.add(f"ws:{rel}")
+                        images.append({"workspace": rel})
+                        if len(images) >= 6:
+                            break
+                continue
+            cand = out.get("image_path") if isinstance(out.get("image_path"), str) else (out.get("image") if isinstance(out.get("image"), str) else "")
+            cand = (cand or "").strip()
+            if not cand or "/" in cand.replace("\\", "/") or ".." in cand or len(cand) > 100:
+                continue
+            if not cand.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+                continue
+            key = f"image:{cand}"
+            if key in seen:
+                continue
+            seen.add(key)
+            images.append({"image": cand})
             if len(images) >= 6:
                 break
     except Exception:
@@ -706,6 +872,9 @@ def _persist_steps(tool_calls_log: list) -> list[dict]:
                 shot = media.get("shot") if isinstance(media, dict) else None
                 if isinstance(shot, str) and shot:
                     item["shot"] = shot[:500]
+                img = media.get("image") if isinstance(media, dict) else None
+                if isinstance(img, str) and img:
+                    item["image"] = img[:100]
             except Exception:
                 pass
             steps.append(item)
@@ -755,7 +924,7 @@ def _collect_final_audio(tool_calls_log: list) -> list[dict]:
 
 
 def _collect_final_files(tool_calls_log: list) -> list[dict]:
-    """Workspace files produced via tools (e.g. pdf_create), for the file card.
+    """Workspace files produced via tools (e.g. studio pages), for the file card.
 
     Scans for successful results carrying a Workspace-relative `file` path
     (plus slide images for pdf decks, so the preview can offer them too).
@@ -1204,6 +1373,8 @@ def run_loop(
     reuse_user_id: str | None = None,
     chat_limit: int = 30,
     resume_stopped: bool = False,
+    system_override: str | None = None,
+    studio_session: bool = False,
 ) -> dict[str, Any]:
     """
     Run agent loop for user_input.
@@ -1233,6 +1404,12 @@ def run_loop(
       resume_stopped so L8 is omitted and trailing stopped markers are
       excluded from L6. A LATER non-resume turn still sees the persisted
       marker and knows the task was stopped.
+    system_override: replaces the L1-L3 system prompt (studio branch
+      sessions run under their own system prompt, e.g. pdf_studio_system.md).
+    studio_session: True only inside a PDF Studio branch session. Pre-seeds
+      the session-only studio tool (studio_page) so the studio agent calls
+      it directly, and rejects it in every other loop so the main agent can
+      never run it.
     """
     if not isinstance(user_input, str):
         raise ValueError("user_input must be string")
@@ -1264,8 +1441,13 @@ def run_loop(
         return {"steps": 0, "final_answer": refusal, "history": [],
                 "tool_calls_log": [], "success": False, "no_embedding": True}
     mdl = model.strip() if model and isinstance(model, str) and model.strip() else "deepseek/deepseek-v4.1-flash"
-    # Build initial context (isolated for large scheduled tasks)
-    system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot, session_history=session_history, chat_limit=chat_limit, resume_stopped=resume_stopped)
+    # Build initial context (isolated for large scheduled tasks).
+    # Studio branch turns are fully isolated AND minimal: sentence + state
+    # only, never the main session, never old page codes.
+    system_prompt, user_context, core_tools = build_context(user_input, isolated=isolated, todo_snapshot=todo_snapshot, session_history=session_history, chat_limit=chat_limit, resume_stopped=resume_stopped, studio_mode=studio_session)
+    if isinstance(system_override, str) and system_override.strip():
+        # Branch session (studio): its own system prompt replaces L1-L3.
+        system_prompt = system_override.strip()[:16000]
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_context},
@@ -1296,7 +1478,8 @@ def run_loop(
             refusal = ("No AI Text Model connected. Open AI Models → AI Text Model (/ai-models), "
                        "press Test, then Save.")
         # A refused resume persists nothing (stopped marker + pill stay for retry).
-        if not resume_stopped:
+        # Studio turns never touch the main chat either (branch session owns them).
+        if not resume_stopped and not studio_session:
             try:
                 _persist_conversation(user_input, refusal, [], 0.0)
             except Exception:
@@ -1322,7 +1505,8 @@ def run_loop(
         except Exception as e:
             refusal = f"AI Text Model configuration error: {e}"
             # A refused resume persists nothing (stopped marker + pill stay for retry).
-            if not resume_stopped:
+            # Studio turns never touch the main chat either (branch session owns them).
+            if not resume_stopped and not studio_session:
                 try:
                     _persist_conversation(user_input, refusal, [], 0.0)
                 except Exception:
@@ -1343,6 +1527,24 @@ def run_loop(
     # Discovered tools become directly callable once tool_search returns their specs
     known_tool_names = {t.get("function", {}).get("name") for t in core_tools}
     dynamic_tools: list[dict] = []
+    if studio_session:
+        # Studio branch session: the studio tools are pre-seeded here
+        # (never via tool_search), so each parallel per-slide turn in the
+        # same session approves its own tasked page through studio_page,
+        # views other slides through studio_read, fetches links/files
+        # through http_request, and inspects images through vision_analyze
+        # (only when a vision model is configured). All turns share this
+        # one branch session and the same sentence+state context; one slide
+        # runs at most one turn (the designing flag + the per-page cancel
+        # registry enforce it), while different slides run in parallel.
+        try:
+            for _tname, _tdesc, _tinputs in _studio_tool_specs():
+                if not _tname or _tname in known_tool_names or len(dynamic_tools) >= MAX_DYNAMIC_TOOLS:
+                    continue
+                dynamic_tools.append(openai_tool_from_spec(_tname, _tdesc, _tinputs))
+                known_tool_names.add(_tname)
+        except Exception:
+            pass
     if resume_stopped and units:
         _restore_dynamic_from_units(units, known_tool_names, dynamic_tools)
     empty_strikes = 0
@@ -1483,7 +1685,7 @@ def run_loop(
                 call_reason = _tool_reason(name, clean_args, model_reason)
             except Exception:
                 call_reason = ""
-            args = clean_args
+            args = _sanitize_tool_args(name, clean_args, studio_session)
             if verbose:
                 print(f"  -> Executing {name} with {str(args)[:200]}")
             # Instant UI: show the call immediately (no output, no arrow yet).
@@ -1504,7 +1706,21 @@ def run_loop(
                                 on_tool_start(_preview_event(name, args))
                 except Exception:
                     pass
-            if name == "question" and on_question is not None:
+            if not is_studio_call_allowed(name, studio_session=studio_session):
+                # Wrong loop kind: session-only studio tools never run in
+                # the main agent, and studio turns run only their 4 tools.
+                if studio_session:
+                    result = {"tool": name, "arguments": args, "success": False,
+                              "error": (f"Tool {name} is not available in studio sessions — "
+                                        "use only studio_page (approve the tasked slide), "
+                                        "studio_read (view another slide), image_search "
+                                        "(find photos), http_request "
+                                        "(fonts/links)"
+                                        " or vision_analyze (when a vision model is connected).")}
+                else:
+                    result = {"tool": name, "arguments": args, "success": False,
+                              "error": f"Tool {name} runs inside PDF Studio sessions only, never in the main chat."}
+            elif name == "question" and on_question is not None:
                 result = _ask_user(name, args, on_question)
             elif restricted and name == "terminal" and on_question is not None:
                 result = _approve_terminal(name, args, on_question)
@@ -1514,7 +1730,7 @@ def run_loop(
                 # No cap: search as many times as needed, the loop itself is bounded by max_steps.
                 result = execute_tool(name, args)
             else:
-                # Long tools (e.g. pdf_create) receive the cancel event so
+                # Long tools (e.g. studio_page) receive the cancel event so
                 # STOP aborts them mid-execution instead of after they finish.
                 result = execute_tool(name, args, cancel_flag=cancel_flag)
             # Missing-model gate: pauses for the user's Connect/Skip choice.
@@ -1709,7 +1925,10 @@ def run_loop(
         elapsed_sec = max(0, int(round(time.time() - turn_t0)))
     except Exception:
         elapsed_sec = 0
-    if cancelled:
+    # Studio branch turns persist NOTHING to the main chat — not even a
+    # stopped marker. The studio branch session (core/studio/session.py)
+    # owns its own history; the main session stays untouched.
+    if cancelled and not studio_session:
         try:
             persist_ids = _persist_conversation(
                 user_input, _STOPPED_NOTE, _persist_steps(tool_calls_log),
@@ -1718,7 +1937,7 @@ def run_loop(
                 stopped=True, resume_units=_clip_resume_units(units))
         except Exception:
             pass
-    if not cancelled:
+    if not cancelled and not studio_session:
         try:
             final_images = _collect_final_images(tool_calls_log)
         except Exception:

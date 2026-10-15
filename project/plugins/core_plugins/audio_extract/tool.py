@@ -136,7 +136,27 @@ def _probe_duration(video: Path) -> float:
     return 0.0
 
 
-def execute(video_path: str, audio_format: str | None = None, output_name: str | None = None) -> dict:
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def _kill_proc(proc) -> None:
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+
+
+def execute(video_path: str, audio_format: str | None = None, output_name: str | None = None, cancel_flag=None) -> dict:
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
     event = format_event(video_path=video_path if isinstance(video_path, str) else "")
     fmt = "mp3"
     if audio_format is not None:
@@ -168,16 +188,40 @@ def execute(video_path: str, audio_format: str | None = None, output_name: str |
         cmd = ["ffmpeg", "-y", "-i", str(src), "-vn",
                "-acodec", "libmp3lame", "-q:a", "4", str(dest)]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        # Sliced wait (was a single 120s blocking call): STOP kills FFmpeg
+        # at once instead of waiting out the extraction.
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, text=True)
+        except FileNotFoundError:
+            raise RuntimeError("FFmpeg not found on PATH") from None
+        err_text = ""
+        elapsed = 0.0
+        while True:
+            if _cancelled(cancel_flag):
+                _kill_proc(proc)
+                try:
+                    if dest.exists():
+                        dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise RuntimeError("Cancelled.")
+            try:
+                _, err_text = proc.communicate(timeout=1.0)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed += 1.0
+                if elapsed >= 120:
+                    _kill_proc(proc)
+                    try:
+                        if dest.exists():
+                            dest.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise RuntimeError("Audio extraction timed out") from None
+        proc = subprocess.CompletedProcess(cmd, proc.returncode, "", err_text or "")
     except FileNotFoundError:
         raise RuntimeError("FFmpeg not found on PATH") from None
-    except subprocess.TimeoutExpired:
-        try:
-            if dest.exists():
-                dest.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise RuntimeError("Audio extraction timed out") from None
     if proc.returncode != 0:
         err = (proc.stderr or "")[-500:]
         try:

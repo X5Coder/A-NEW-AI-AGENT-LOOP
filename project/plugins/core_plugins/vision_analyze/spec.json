@@ -1,6 +1,6 @@
 {
   "name": "vision_analyze",
-  "description": "A visual inspection tool that analyzes images AND video visual content using local vision models to extract visual details, text, and structure. Use whenever images (receipts, diagrams, UI mockups, photos) or videos (video files in Workspace, downloaded via video_download, or video frames via video_analyze) are provided or referenced in user requests. Use this to perform grounded visual reasoning directly without terminal workarounds.",
+  "description": "Still-image inspection via the connected AI Vision Model (images only — videos go through video_analyze with the AI Vision Videos model). Use for photos, receipts, diagrams, UI mockups. Grounded visual reasoning without terminal workarounds.",
   "inputs": {
     "image_id": {"type": "string", "required": false, "controllable": false, "description": "ID of the stored image."},
     "image_path": {"type": "string", "required": false, "controllable": false, "description": "Path to the image."},

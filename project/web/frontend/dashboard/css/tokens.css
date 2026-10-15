@@ -110,13 +110,17 @@
   --glass-sh: 0 8px 28px rgba(0, 0, 0, 0.35), 0 1px 0 rgba(0, 0, 0, 0.2);
   --glass-blur: blur(22px) saturate(1.55);
 
-  /* ---------- pro flow-chart (single accent system, desktop + phone) ---------- */
+  /* ---------- clean usage tables (replaces the old flow-chart) ---------- */
   --chart-line: #5aa9ff;
   --chart-line-hi: #9cc8ff;
   --chart-fill-top: rgba(90, 169, 255, 0.32);
   --chart-fill-bot: rgba(90, 169, 255, 0.02);
   --chart-grid: rgba(255, 255, 255, 0.07);
   --chart-dot: #8fc2ff;
+  /* Peak row tint + scroll cap for long ranges (30D) */
+  --tbl-peak-bg: rgba(90, 169, 255, 0.1);
+  --tbl-row-hover: rgba(255, 255, 255, 0.045);
+  --tbl-cap: 22rem;
 
   --grain: none;
 }

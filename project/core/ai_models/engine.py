@@ -29,7 +29,7 @@ from typing import Any, Callable
 log = logging.getLogger("ai_models")
 
 PROTOCOL_VERSION = 1
-SUPPORTED_KINDS = ("text", "vision", "image", "tts", "stt")
+SUPPORTED_KINDS = ("text", "vision", "video", "image", "tts", "stt")
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 MAX_BODY_PREVIEW = 1500
@@ -38,6 +38,8 @@ MAX_BODY_PREVIEW = 1500
 KIND_VARIABLES = {
     "text": ("model", "message", "messages", "system", "api_key"),
     "vision": ("model", "prompt", "image_base64", "image_url", "image_mime",
+               "messages", "system", "api_key"),
+    "video": ("model", "prompt", "video_base64", "video_url", "video_mime",
                "messages", "system", "api_key"),
     "image": ("model", "prompt", "system", "api_key"),
     "tts": ("model", "text", "system", "api_key"),
@@ -933,12 +935,13 @@ def parse_response(raw: bytes, cfg_resp: dict, on_chunk=None, cancel_event=None)
 
 
 # --------------------------------------------------------------------------
-# Public API: one generic core, dispatched on kind (text/vision/image/tts/stt)
+# Public API: one generic core, dispatched on kind (text/vision/video/image/tts/stt)
 # --------------------------------------------------------------------------
 
 KIND_TITLES = {
     "text": "AI Text Model",
     "vision": "AI Vision Model",
+    "video": "AI Vision Videos",
     "image": "AI Image Model",
     "tts": "AI Text to Speech",
     "stt": "AI Speech to Text",
@@ -1260,7 +1263,7 @@ def test_connection(model_record: dict) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Kind calls: vision / image / tts / stt (same core, kind-specific variables)
+# Kind calls: vision / video / image / tts / stt (same core, kind-specific variables)
 # --------------------------------------------------------------------------
 
 def _post_with_vars(model_record: dict, cfg: dict, variables: dict,
@@ -1374,11 +1377,15 @@ def analyze(model_record: dict, inputs: dict, options: dict | None = None) -> st
             parts.append({"type": "image", "url": image_url, "mime": mime})
         elif image_b64:
             parts.append({"type": "image", "data": f"data:{mime};base64,{image_b64}", "mime": mime})
+        try:
+            _cancel = options.get("cancel_event")
+        except Exception:
+            _cancel = None
         res = _aip.execute(model_record, {
             "version": 1,
             "messages": _aip_messages(system, parts),
             "modalities": {"input": ["text", "image"], "output": ["text"]},
-        }, "vision")
+        }, "vision", cancel_event=_cancel)
         reply = _aip_text_out(res)
         if not reply.strip():
             raise EngineError("bad_response", "The service did not return text.",
@@ -1400,6 +1407,55 @@ def analyze(model_record: dict, inputs: dict, options: dict | None = None) -> st
     return _finish_text_out(ctx, cfg, options)
 
 
+def analyze_video(model_record: dict, inputs: dict, options: dict | None = None) -> str:
+    """Video-vision: describe/answer about a video. inputs: {prompt, video_base64?, video_url?, video_mime?}."""
+    options = dict(options or {})
+    inputs = inputs or {}
+    system = str(options.get("system") or "")
+    if is_aip_record(model_record):
+        # New system: video travels as a canonical typed part (url or data-URL).
+        from core.ai_models import aip as _aip
+        prompt = str(inputs.get("prompt") or "")
+        parts: list[dict] = []
+        if prompt:
+            parts.append({"type": "text", "text": prompt})
+        video_url = str(inputs.get("video_url") or "")
+        video_b64 = str(inputs.get("video_base64") or "")
+        mime = str(inputs.get("video_mime") or "video/mp4")
+        if video_url:
+            parts.append({"type": "video", "url": video_url, "mime": mime})
+        elif video_b64:
+            parts.append({"type": "video", "data": f"data:{mime};base64,{video_b64}", "mime": mime})
+        try:
+            _cancel = options.get("cancel_event")
+        except Exception:
+            _cancel = None
+        res = _aip.execute(model_record, {
+            "version": 1,
+            "messages": _aip_messages(system, parts),
+            "modalities": {"input": ["text", "video"], "output": ["text"]},
+        }, "video", cancel_event=_cancel)
+        reply = _aip_text_out(res)
+        if not reply.strip():
+            raise EngineError("bad_response", "The service did not return text.",
+                              technical="empty text",
+                              copyable="Bad response: expected text.")
+        return reply
+    cfg = _validated_cfg(model_record, "video")
+    variables = _base_vars(model_record)
+    variables.update({
+        "prompt": str(inputs.get("prompt") or ""),
+        "video_base64": str(inputs.get("video_base64") or ""),
+        "video_url": str(inputs.get("video_url") or ""),
+        "video_mime": str(inputs.get("video_mime") or "video/mp4"),
+        "messages": [],
+        "system": str(options.get("system") or ""),
+    })
+    options["_record"] = model_record
+    ctx = _post_with_vars(model_record, cfg, variables, options)
+    return _finish_text_out(ctx, cfg, options)
+
+
 def generate_image(model_record: dict, inputs: dict, options: dict | None = None) -> dict:
     """Image generation: {prompt} -> {"media", "source", "type": "image"} (polls when configured)."""
     options = dict(options or {})
@@ -1408,11 +1464,15 @@ def generate_image(model_record: dict, inputs: dict, options: dict | None = None
     if is_aip_record(model_record):
         # New system: single-shot JSON only (AIP/1 refuses async poll flows).
         from core.ai_models import aip as _aip
+        try:
+            _cancel = options.get("cancel_event")
+        except Exception:
+            _cancel = None
         res = _aip.execute(model_record, {
             "version": 1,
             "messages": _aip_messages(system, str(inputs.get("prompt") or "")),
             "modalities": {"input": ["text"], "output": ["image"]},
-        }, "image")
+        }, "image", cancel_event=_cancel)
         data, source = _aip_media_out(res)
         if not data:
             raise EngineError("bad_response", "The service did not return a file.",
@@ -1436,11 +1496,15 @@ def synthesize(model_record: dict, inputs: dict, options: dict | None = None) ->
     if is_aip_record(model_record):
         # New system: single-shot JSON only (AIP/1 refuses async poll flows).
         from core.ai_models import aip as _aip
+        try:
+            _cancel = options.get("cancel_event")
+        except Exception:
+            _cancel = None
         res = _aip.execute(model_record, {
             "version": 1,
             "messages": _aip_messages(system, str(inputs.get("text") or "")),
             "modalities": {"input": ["text"], "output": ["audio"]},
-        }, "tts")
+        }, "tts", cancel_event=_cancel)
         data, source = _aip_media_out(res)
         if not data:
             raise EngineError("bad_response", "The service did not return a file.",
@@ -1476,13 +1540,17 @@ def transcribe(model_record: dict, inputs: dict, options: dict | None = None) ->
         # New system: audio travels as a canonical typed part (data-URL).
         from core.ai_models import aip as _aip
         system = str(options.get("system") or "")
+        try:
+            _cancel = options.get("cancel_event")
+        except Exception:
+            _cancel = None
         res = _aip.execute(model_record, {
             "version": 1,
             "messages": _aip_messages(system, [
                 {"type": "audio", "data": f"data:{mime};base64,{raw_b64}", "mime": mime},
             ]),
             "modalities": {"input": ["audio"], "output": ["text"]},
-        }, "stt")
+        }, "stt", cancel_event=_cancel)
         reply = _aip_text_out(res)
         if not reply.strip():
             raise EngineError("bad_response", "The service did not return text.",
@@ -1528,6 +1596,10 @@ def _run_kind_test(model_record: dict, kind: str, cfg: dict):
         return analyze(model_record, {"prompt": "Reply with the single word: OK",
                                       "image_base64": _tiny_png_b64(),
                                       "image_mime": "image/png"}, {})
+    if kind == "video":
+        # Text-only probe: the AIP path sends no media and passes the
+        # modalities gate; legacy parsers fail here with a clear error.
+        return analyze_video(model_record, {"prompt": "Reply with the single word: OK"}, {})
     if kind == "image":
         out = generate_image(model_record, {"prompt": "a tiny red square icon"}, {})
         return f"Image OK ({out.get('source', '?')})"

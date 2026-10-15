@@ -75,6 +75,17 @@ def _save_jobs(jobs: list[dict]) -> None:
     STORAGE.parent.mkdir(parents=True, exist_ok=True)
     STORAGE.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
 
+def _fail_job(job_id: str, message: str) -> None:
+    with _LOCK:
+        jobs = _load_jobs()
+        for j in jobs:
+            if j["job_id"] == job_id:
+                j["status"] = "failed"
+                j["error"] = str(message)[:500]
+                j["progress"] = "failed"
+                break
+        _save_jobs(jobs)
+
 def _workspace_base() -> Path | None:
     try:
         import sys as _sysw
@@ -161,18 +172,26 @@ def _extract_audio(video_path: Path, out_wav: Path) -> bool:
     except Exception:
         return False
 
-def _transcribe_audio(wav_path: Path, language: str | None = None) -> list[dict]:
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def _transcribe_audio(wav_path: Path, language: str | None = None, cancel_flag=None) -> list[dict]:
     """Transcribe wav via the connected AI Speech to Text model (one segment)."""
     from core.ai_models.media import read_audio
     from core.ai_models.store import require_model
     from core.ai_models.engine import transcribe
     record = require_model("stt")  # fixed refusal + model link when missing
     blob, mime = read_audio(wav_path)
-    text = transcribe(record, {"audio_bytes": blob, "mime": mime})
+    options = {"cancel_event": cancel_flag} if cancel_flag is not None else None
+    text = transcribe(record, {"audio_bytes": blob, "mime": mime}, options)
     text = text.strip()
     return [{"start": 0.0, "end": 0.0, "text": text, "frame_note": f"Said: {text[:120]}"}]
 
-def _process_job_async(job_id: str, video_path: Path, language: str | None, metadata: dict):
+def _process_job_async(job_id: str, video_path: Path, language: str | None, metadata: dict, cancel_flag=None):
     try:
         with _LOCK:
             jobs = _load_jobs()
@@ -183,6 +202,9 @@ def _process_job_async(job_id: str, video_path: Path, language: str | None, meta
                     break
             _save_jobs(jobs)
 
+        if _cancelled(cancel_flag):
+            _fail_job(job_id, "Cancelled.")
+            return
         # Extract audio to temp
         tmpdir = Path(tempfile.mkdtemp(prefix="video_audio_"))
         wav = tmpdir / "audio.wav"
@@ -206,7 +228,10 @@ def _process_job_async(job_id: str, video_path: Path, language: str | None, meta
                     break
             _save_jobs(jobs)
 
-        segments = _transcribe_audio(wav, language=language)
+        if _cancelled(cancel_flag):
+            _fail_job(job_id, "Cancelled.")
+            return
+        segments = _transcribe_audio(wav, language=language, cancel_flag=cancel_flag)
 
         output = {
             "metadata": metadata,
@@ -264,7 +289,9 @@ def _process_job_async(job_id: str, video_path: Path, language: str | None, meta
         except Exception:
             pass
 
-def execute(video_path: str | None = None, video_id: str | None = None, job_id: str | None = None, language: str | None = None) -> dict:
+def execute(video_path: str | None = None, video_id: str | None = None, job_id: str | None = None, language: str | None = None, cancel_flag=None) -> dict:
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
     event = format_event(video_path=video_path, video_id=video_id, job_id=job_id)
     if job_id:
         if not isinstance(job_id, str) or not job_id.strip():
@@ -310,7 +337,7 @@ def execute(video_path: str | None = None, video_id: str | None = None, job_id: 
     _save_jobs(jobs)
 
     import threading
-    t = threading.Thread(target=_process_job_async, args=(new_id, vp, lang, metadata), daemon=True)
+    t = threading.Thread(target=_process_job_async, args=(new_id, vp, lang, metadata, cancel_flag), daemon=True)
     t.start()
 
     return {

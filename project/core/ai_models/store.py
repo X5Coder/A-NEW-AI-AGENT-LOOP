@@ -1,5 +1,5 @@
 """
-Storage for universal model records (one per kind: text/vision/image/tts/stt).
+Storage for universal model records (one per kind: text/vision/video/image/tts/stt).
 
 Record: { model_name, server_url, api_key, config_json, kind }.
 Writes ALWAYS to X5Agent/Data (database/ai_models.json). Reads Data-first,
@@ -19,11 +19,12 @@ from typing import Any
 
 FILENAME = "ai_models.json"
 
-KINDS = ("text", "vision", "image", "tts", "stt")
+KINDS = ("text", "vision", "video", "image", "tts", "stt")
 
 KIND_TITLES = {
     "text": "AI Text Model",
     "vision": "AI Vision Model",
+    "video": "AI Vision Videos",
     "image": "AI Image Model",
     "tts": "AI Text to Speech",
     "stt": "AI Speech to Text",
@@ -32,6 +33,7 @@ KIND_TITLES = {
 ENV_NAMES = {
     "text": "AI_TEXT_API_KEY",
     "vision": "AI_VISION_API_KEY",
+    "video": "AI_VIDEO_API_KEY",
     "image": "AI_IMAGE_API_KEY",
     "tts": "AI_TTS_API_KEY",
     "stt": "AI_STT_API_KEY",
@@ -40,6 +42,7 @@ ENV_NAMES = {
 MODEL_LINKS = {
     "text": "AI Models → AI Text Model (/ai-models)",
     "vision": "AI Models → AI Vision Model (/ai-models)",
+    "video": "AI Models → AI Vision Videos (/ai-models)",
     "image": "AI Models → AI Image Model (/ai-models)",
     "tts": "AI Models → AI Text to Speech (/ai-models)",
     "stt": "AI Models → AI Speech to Text (/ai-models)",
@@ -197,6 +200,8 @@ def kind_from_missing_error(err: str | None) -> str | None:
     low = text.lower()
     if "ai text model" in low:
         return "text"
+    if "vision videos" in low or "ai video" in low:
+        return "video"
     if "ai vision model" in low:
         return "vision"
     if "ai image model" in low:

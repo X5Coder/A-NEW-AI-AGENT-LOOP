@@ -1,6 +1,6 @@
 """
 Reader for models_prompts.md — single file, one `## KIND: <kind>` section
-per model kind (text/vision/image/tts/stt).
+per model kind (text/vision/video/image/tts/stt).
 
 Single responsibility: split the file into per-kind prompt texts.
 The server serves one section per dialog; the copy button copies it verbatim.
@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 FILE_NAME = "models_prompts.md"
-KINDS = ("text", "vision", "image", "tts", "stt")
+KINDS = ("text", "vision", "video", "image", "tts", "stt")
 
 _KIND_RE = re.compile(r"^##\s*KIND:\s*([A-Za-z0-9_-]+)\s*$")
 

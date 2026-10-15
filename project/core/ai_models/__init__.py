@@ -1,6 +1,7 @@
 """AI Models - Universal Model Connection Engine + AIP/1 interpreter (v1)."""
 from core.ai_models.engine import (
     analyze,
+    analyze_video,
     chat,
     generate_image,
     synthesize,
@@ -20,7 +21,7 @@ from core.ai_models.store import (
 
 __all__ = [
     "validate", "chat", "test_connection",
-    "analyze", "generate_image", "synthesize", "transcribe",
+    "analyze", "analyze_video", "generate_image", "synthesize", "transcribe",
     "get_model", "has_model", "require_model", "missing_message",
     "get_text_model", "has_text_model", "require_text_model",
 ]

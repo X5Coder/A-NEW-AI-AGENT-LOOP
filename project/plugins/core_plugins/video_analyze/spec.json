@@ -1,6 +1,6 @@
 {
   "name": "video_analyze",
-  "description": "An asynchronous video inspection tool that extracts keyframes across a video timeline and performs vision analysis per frame. Use whenever a video file requires visual content analysis, object detection, or temporal scene summarization. Use this to inspect complex temporal visual data reliably without overloading system memory.",
+  "description": "Video understanding via the connected AI Vision Videos model (AI Models template 'AI Vision Videos') — sends the video bytes themselves, never still-image frames. Use whenever a video file requires visual content analysis. Refuses with the model link when no Vision Videos model is connected; it never uses the images model.",
   "inputs": {
     "video_path": {"type": "string", "required": false, "controllable": false, "description": "Path to the video file."},
     "video_id": {"type": "string", "required": false, "controllable": false, "description": "ID of the stored video."},

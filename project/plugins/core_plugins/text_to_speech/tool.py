@@ -36,7 +36,14 @@ def _audio_dir() -> Path:
     return d.resolve()
 
 
-def _save_media(media: str, source: str) -> tuple[Path, int]:
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def _save_media(media: str, source: str, cancel_flag=None) -> tuple[Path, int]:
     """Decode base64/data-URL or download http(s) URL (capped). Returns (path, bytes)."""
     import urllib.request as _url
     if source == "url":
@@ -46,6 +53,8 @@ def _save_media(media: str, source: str) -> tuple[Path, int]:
             total = 0
             ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             while True:
+                if _cancelled(cancel_flag):
+                    raise RuntimeError("Cancelled.")
                 piece = resp.read(65536)
                 if not piece:
                     break
@@ -71,7 +80,7 @@ def _save_media(media: str, source: str) -> tuple[Path, int]:
     return out, len(blob)
 
 
-def execute(text: str, voice: str | None = None, lang: str | None = None) -> dict:
+def execute(text: str, voice: str | None = None, lang: str | None = None, cancel_flag=None) -> dict:
     event = format_event(text=text if isinstance(text, str) else "")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text must be non-empty string")
@@ -81,12 +90,13 @@ def execute(text: str, voice: str | None = None, lang: str | None = None) -> dic
     from core.ai_models.engine import synthesize
     record = require_model("tts")  # fixed refusal + model link when missing
     try:
-        out = synthesize(record, {"text": text.strip()})
+        options = {"cancel_event": cancel_flag} if cancel_flag is not None else None
+        out = synthesize(record, {"text": text.strip()}, options)
     except RuntimeError:
         raise
     except Exception as e:
         raise RuntimeError(f"Speech synthesis failed: {e}") from None
-    path, size = _save_media(out["media"], out.get("source", "base64"))
+    path, size = _save_media(out["media"], out.get("source", "base64"), cancel_flag)
     return {
         "event": event,
         "audio_path": path.name,

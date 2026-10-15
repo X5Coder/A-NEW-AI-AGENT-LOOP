@@ -8,23 +8,49 @@
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='black'/%3E%3Crect%20x='17'%20y='17'%20width='30'%20height='30'%20rx='7'%20fill='white'/%3E%3C/svg%3E" />
   <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='black'/%3E%3Crect%20x='17'%20y='17'%20width='30'%20height='30'%20rx='7'%20fill='white'/%3E%3C/svg%3E" />
   <title>X5Agent — AI Gateway Console</title>
+  <style>
+    /* Critical first-paint: black ground + visible splash BEFORE external
+       CSS lands, so refresh never flashes the raw shell first. Mirrors the
+       full rules in base.css (opacity-only exit, transform+opacity entrance). */
+    html, body { background: #000; margin: 0; }
+    body.booting { overflow: hidden; }
+    body.booting .app { visibility: hidden; }
+    .boot-splash {
+      position: fixed; inset: 0; z-index: 9999; background: #000;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 20px; visibility: visible;
+      transition: opacity 0.55s ease, visibility 0.55s;
+    }
+    .boot-splash.done { opacity: 0; visibility: hidden; pointer-events: none; }
+    .boot-splash.show > * { animation: x5-boot-rise 0.6s cubic-bezier(0.22, 0.61, 0.36, 1) both; }
+    .boot-splash.show > *:nth-child(2) { animation-delay: 0.08s; }
+    @keyframes x5-boot-rise {
+      from { opacity: 0; transform: translate3d(0, 10px, 0) scale(0.98); }
+      to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .boot-splash.show > * { animation: none; }
+    }
+  </style>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Cairo:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/css/tokens.css?v=13" />
+  <link rel="stylesheet" href="/css/tokens.css?v=14" />
   <link rel="stylesheet" href="/css/base.css?v=13" />
   <link rel="stylesheet" href="/css/layout.css?v=21" />
-  <link rel="stylesheet" href="/css/components.css?v=131" />
-  <link rel="stylesheet" href="/css/responsive.css?v=22" />
+  <link rel="stylesheet" href="/css/components.css?v=145" />
+  <link rel="stylesheet" href="/css/responsive.css?v=25" />
 </head>
 <body>
   <!-- ============ BOOT SPLASH ============ -->
-  <!-- Black start screen: painted on first paint, covers everything until
-       ALL boot data lands, then fades out (hideBootSplash in ui.js, driven
-       by the app.js boot barrier). Dots speak the Working ring-wave language
-       (pure CSS so they run before the JS bundle); the word reuses the
-       Working wave text style. -->
-  <div class="boot-splash" id="bootSplash" aria-hidden="true">
+  <!-- Black start screen: VISIBLE on first paint (class show is baked in +
+       critical <style> above paints it before external CSS), covers everything
+       until ALL boot data lands, then fades out (hideBootSplash in ui.js,
+       driven by the app.js boot barrier). Dots speak the Working ring-wave
+       language (pure CSS so they run before the JS bundle); the word reuses
+       the Working wave text style. Entrance is a soft rise (transform +
+       opacity only, see the critical keyframes above). -->
+  <div class="boot-splash show" id="bootSplash" aria-hidden="true">
     <div class="dot-square boot-dots" id="bootDots"></div>
     <div class="working-text boot-word">X5Agent</div>
   </div>
@@ -36,9 +62,17 @@
     (function () {
       try {
         // Boot flag: hideBootSplash sets it when all data lands. The splash
-        // only APPEARS when loading actually takes a moment - a fast boot
-        // never flashes black at all.
+        // is ALREADY visible (class show baked in + critical CSS), so there
+        // is no delayed appearance and no pre-splash flash at all.
         window.__x5bootDone = false;
+        window.__x5bootCached = false;
+        try {
+          // Fast path hint for app.js: a stored hash-cache means the shell
+          // can paint cached data instantly and lift the splash without
+          // waiting for the network on every refresh.
+          var raw = localStorage.getItem("x5_boot_cache_v1");
+          window.__x5bootCached = !!raw && raw.length > 32;
+        } catch (e) {}
         document.body.classList.add("booting");
         var host = document.getElementById("bootDots");
         if (host) {
@@ -73,14 +107,7 @@
           } catch (e) {}
         }
         cycle();
-        setTimeout(function () {
-          try {
-            if (!window.__x5bootDone) {
-              var sp = document.getElementById("bootSplash");
-              if (sp) sp.classList.add("show");
-            }
-          } catch (e) {}
-        }, 350);
+        // No delayed show: the splash is visible from first paint.
         // Catastrophic fallback (app.js never ran, e.g. broken bundle):
         // never trap the user behind an invisible app forever.
         setTimeout(function () {
@@ -141,14 +168,6 @@
             <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
           </svg>
           <span>Gateway</span>
-        </button>
-
-        <button class="nav-item" data-nav="plugins" type="button">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 7h-9" /><path d="M14 17H5" />
-            <circle cx="17" cy="17" r="3" /><circle cx="7" cy="7" r="3" />
-          </svg>
-          <span>Plugins</span>
         </button>
 
         <button class="nav-item" data-nav="skills" type="button">
@@ -271,6 +290,7 @@
                   <div class="range-switch" data-chart-range>
                     <button type="button" data-range="7d" class="active">7D</button>
                     <button type="button" data-range="30d">30D</button>
+                    <button type="button" data-range="90d">90D</button>
                     <button type="button" data-range="months">Months</button>
                   </div>
                   <span class="badge" id="tokensBadge">— total</span>
@@ -286,6 +306,7 @@
                   <div class="range-switch" data-chart-range>
                     <button type="button" data-range="7d" class="active">7D</button>
                     <button type="button" data-range="30d">30D</button>
+                    <button type="button" data-range="90d">90D</button>
                     <button type="button" data-range="months">Months</button>
                   </div>
                   <span class="badge" id="requestsBadge">— total</span>
@@ -490,11 +511,6 @@
           </div>
         </section>
 
-        <!-- ============ PLUGINS (real) ============ -->
-        <section class="page" data-page="plugins">
-          <div class="grid-cards" id="pluginsGrid"></div>
-        </section>
-
         <!-- ============ SKILLS (user-authored, searchable via skills_search) ============ -->
         <section class="page" data-page="skills">
           <div class="card-head" style="margin-bottom: var(--sp-4); align-items: center;">
@@ -572,6 +588,28 @@
             <div class="card settings-card" data-anim>
               <div class="settings-head">
                 <div class="settings-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                </div>
+                <div class="settings-head-text">
+                  <h3>Backup &amp; restore</h3>
+                  <p>Backup downloads every client data as one .zip file (chat, PDF Studios, memories, skills, files, settings and API keys). System code and the embedding model are never included. Restore replaces current data from a backup file.</p>
+                </div>
+              </div>
+              <p class="settings-status" id="backupStatus">No backup yet.</p>
+              <div class="dl-progress" id="backupProg" hidden>
+                <div class="dl-bar update-bar-running" id="backupBar"></div>
+              </div>
+              <p class="dl-label" id="backupLabel" hidden></p>
+              <div class="settings-actions">
+                <button class="glass-btn settings-btn" id="backupNowBtn" type="button">Backup now</button>
+                <button class="glass-btn settings-btn" id="restorePickBtn" type="button">Restore…</button>
+                <input type="file" id="restoreFileInput" accept=".zip,application/zip" hidden />
+              </div>
+            </div>
+
+            <div class="card settings-card" data-anim>
+              <div class="settings-head">
+                <div class="settings-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
                 </div>
                 <div class="settings-head-text">
@@ -579,6 +617,8 @@
                   <p>Update the password used to sign in to this console on this device.</p>
                 </div>
               </div>
+              <form id="pwForm" method="post" action="#">
+              <input type="text" id="pwUser" name="username" autocomplete="username" tabindex="-1" aria-hidden="true" readonly style="position:absolute;opacity:0;height:0;width:0;pointer-events:none;" />
               <div class="field">
                 <label for="pwOld">Current password</label>
                 <input class="input" type="password" id="pwOld" placeholder="••••••••" autocomplete="current-password" />
@@ -591,7 +631,8 @@
                 <label for="pwConfirm">Confirm new password</label>
                 <input class="input" type="password" id="pwConfirm" placeholder="••••••••" autocomplete="new-password" />
               </div>
-              <button class="btn btn-primary settings-btn" id="changePwBtn" type="button">Change password</button>
+              <button class="btn btn-primary settings-btn" id="changePwBtn" type="submit">Change password</button>
+              </form>
             </div>
 
             <div class="card settings-card" data-anim>
@@ -601,7 +642,7 @@
                 </div>
                 <div class="settings-head-text">
                   <h3>Chat history</h3>
-                  <p>Delete the main agent chat and its search index. Your saved memories stay untouched.</p>
+                  <p>Delete the main agent chat and its search index. Every PDF Studio and your saved memories stay untouched.</p>
                 </div>
               </div>
               <div class="settings-row chat-clear-row">
@@ -642,7 +683,7 @@
       try {
         if (localStorage.getItem("x5_sidebar") !== "expanded") document.body.classList.add("sidebar-collapsed");
         var seg = (location.pathname || "/").replace(/\/+$/, "").split("/").pop() || "";
-        var pages = ["dashboard", "agent", "workspace", "gateway", "plugins", "skills", "ai-models", "settings"];
+        var pages = ["dashboard", "agent", "workspace", "gateway", "skills", "ai-models", "settings"];
         var page = seg === "" || seg === "index.html" ? "agent" : seg;
         if (pages.indexOf(page) < 0) page = "agent";
         if (page !== "agent") {
@@ -657,7 +698,6 @@
             agent: ["Agent", "Chat with your AI assistant"],
             workspace: ["Workspace", "Your agent's files and folders"],
             gateway: ["WhatsApp gateway", "Connect and manage your WhatsApp agent"],
-            plugins: ["Plugins", "Extend your agent capabilities"],
             skills: ["Skills", "Reusable instructions for your agent"],
             "ai-models": ["AI Models", "Connect any AI model"],
             settings: ["Settings", "Preferences and account"]
@@ -690,6 +730,6 @@
   <div class="chart-tip" id="chartTip"></div>
   <div class="toast-wrap" id="toastWrap"></div>
 
-  <script type="module" src="/js/app.js?v=81"></script>
+  <script type="module" src="/js/app.js?v=87"></script>
 </body>
 </html>

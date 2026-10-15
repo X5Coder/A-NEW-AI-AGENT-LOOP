@@ -43,6 +43,25 @@ def _image_dirs() -> list[Path]:
 
 def resolve_image(image_id: str | None = None, image_path: str | None = None) -> Path:
     """Resolve an image file. Raises ValueError/FileNotFoundError. Never trusts input."""
+    if image_path and isinstance(image_path, str) and image_path.strip().lower().startswith("studio:"):
+        # Studio asset ref (studio:pdf_2/images/hero.png) — validated exactly
+        # like the asset route (no traversal, images only). Lets studio turns
+        # inspect their own assets through vision_analyze.
+        try:
+            import sys as _sys0
+            if str(_project_root()) not in _sys0.path:
+                _sys0.path.insert(0, str(_project_root()))
+            from core.studio import store as _sstore
+            rest = image_path.strip()[len("studio:"):].strip().replace("\\", "/")
+            sid, _, rel = rest.partition("/")
+            cand, mime = _sstore.resolve_asset_file(sid, rel)
+            if not str(mime).startswith("image/"):
+                raise ValueError("Studio asset is not an image")
+            return _checked(cand, IMAGE_EXTS, MAX_IMAGE_BYTES, "Image")
+        except (FileNotFoundError, ValueError):
+            raise
+        except Exception as e:
+            raise ValueError(f"Invalid studio image ref: {e}") from None
     if image_path:
         if not isinstance(image_path, str) or not image_path.strip():
             raise ValueError("image_path must be a non-empty string")

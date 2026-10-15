@@ -1,8 +1,8 @@
-"""Workspace file ids + upload mirror + @ injection + vision/pdf resolution.
+"""Workspace file ids + upload mirror + @ injection + vision/studio resolution.
 
 Deterministic: every file id is the Workspace-relative path, shown in the
 context map, carried by @ mentions, resolvable by vision_analyze and by the
-pdf_create asset check. Run: pytest project/tests/test_workspace_media_logic.py
+studio asset store. Run: pytest project/tests/test_workspace_media_logic.py
 """
 import base64
 import shutil
@@ -175,27 +175,17 @@ def test_vision_resolves_workspace_ids():
         pass
 
 
-def test_pdf_check_assets_accepts_workspace_id_and_copies():
-    from plugins.core_plugins.pdf_create.tool import _check_assets
+def test_studio_assets_dirs_exist_per_studio():
+    from core.studio import store as _store
 
-    tag = _unique_tag()
-    ws = workspace_root()
-    src_dir = ws / f"{tag}_src"
-    task_rel = f"{tag}_deck"
-    src_dir.mkdir(parents=True, exist_ok=True)
+    created = _store.create_studio(title="UT Assets", pages=1)
     try:
-        (src_dir / "art.png").write_bytes(_PNG)
-        (ws / task_rel).mkdir(parents=True, exist_ok=True)
-        slides = [{"slide_no": 1, "title": "T", "body": "b",
-                   "images": [{"file": f"{src_dir.name}/art.png", "place": "right"}],
-                   "fonts": [], "colors": {}}]
-        _check_assets(task_rel, slides)
-        # Copied under the deck folder at the same relative id the slide
-        # HTML references as its <img src>.
-        assert ((ws / task_rel) / src_dir.name / "art.png").is_file()
+        base = _store.studios_root() / created["studio_id"]
+        assert (base / "assets" / "fonts").is_dir()
+        assert (base / "assets" / "images").is_dir()
+        assert (base / "pages" / "Page01.jsx").is_file()
     finally:
-        shutil.rmtree(str(src_dir), ignore_errors=True)
-        shutil.rmtree(str(ws / task_rel), ignore_errors=True)
+        shutil.rmtree(str(_store.studios_root() / created["studio_id"]), ignore_errors=True)
 
 
 def test_workspace_map_uses_full_metadata_shape():
@@ -301,14 +291,14 @@ def test_folder_listing_entries_carry_path():
         shutil.rmtree(str(target), ignore_errors=True)
 
 
-def test_pdf_file_ref_allows_subpaths_rejects_escape():
-    from plugins.core_plugins.pdf_create.tool import _validate_file_ref
+def test_studio_id_validation_rejects_escape():
+    from core.studio import store as _store
 
-    assert _validate_file_ref("logo.png", "image file", 1) == "logo.png"
-    assert _validate_file_ref("deck/logo.png", "image file", 1) == "deck/logo.png"
-    for bad in ("../x.png", "/x.png", "a//b.png", "a/./b.png", ""):
+    assert _store.validate_studio_id("pdf_1") == "pdf_1"
+    assert _store.validate_page_no(3) == 3
+    for bad in ("../x", "/x", "", "pdf_", "deck/1"):
         try:
-            _validate_file_ref(bad, "image file", 1)
+            _store.validate_studio_id(bad)
             raise AssertionError("must reject: %r" % (bad,))
         except (ValueError, TypeError):
             pass
@@ -378,16 +368,12 @@ def test_emitted_paths_are_directly_usable_in_html():
         shutil.rmtree(str(sub), ignore_errors=True)
 
 
-def test_pdf_session_carries_map_and_english_path_instructions():
-    from plugins.core_plugins.pdf_create.tool import _internal_context
-
-    ctx = _internal_context()
-    assert "Workspace map" in ctx
-    assert "id + path + type + size" in ctx
-    assert "as-is" in ctx and "one folder" in ctx
-    assert "@<file-id>" in ctx
-    # Instruction block is English (part of the English system prompt).
-    assert "استخدم" not in ctx
+def test_studio_system_prompt_is_english_and_mandates_approve():
+    from pathlib import Path as _Path
+    text = (_Path(__file__).resolve().parents[1] / "prompts" / "pdf_studio_system.md").read_text(encoding="utf-8")
+    assert "studio_page" in text
+    assert "MUST" in text
+    assert "استخدم" not in text
 
 
 def test_gateway_mirror_keeps_original_name():

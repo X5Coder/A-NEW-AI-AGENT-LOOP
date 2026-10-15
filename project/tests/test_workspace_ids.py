@@ -73,10 +73,15 @@ def test_resolve_missing_model_without_ui_skips_directly():
     assert res["output"]["needs_model_kind"] == "vision"
 
 
-def test_pdf_internal_context_shows_tools_and_workspace():
-    from plugins.core_plugins.pdf_create.tool import _internal_context
+def test_studio_store_creates_numbered_backup_ready_studio():
+    from core.studio import store as _store
 
-    ctx = _internal_context()
-    assert "pdf_create" in ctx and "tool_search" in ctx
-    assert "Workspace" in ctx
-    assert len(ctx) <= 12000
+    created = _store.create_studio(title="UT Studio", pages=2)
+    try:
+        assert created["studio_id"].startswith("pdf_")
+        info = _store.get_studio(created["studio_id"])
+        assert len(info["pages"]) == 2
+        assert (info["meta"]["studio_id"] == created["studio_id"])
+    finally:
+        import shutil
+        shutil.rmtree(str(_store.studios_root() / created["studio_id"]), ignore_errors=True)

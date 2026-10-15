@@ -1,0 +1,154 @@
+"""
+file_to_base64 - encode any Workspace file to base64 WITHOUT polluting context.
+
+Base64 text is ~33% larger than the file and would destroy the conversation
+context, so the tool NEVER returns it: it writes the base64 into a .b64.txt
+file in Workspace (same folder) and returns one short sentence plus metadata
+(paths, sizes, mime, sha256, data-url prefix, short preview). The model must
+reference the saved path in later calls instead of pasting the text.
+JAILED inside X5Agent/Workspace only, bounded input size, no secrets.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import mimetypes
+import re
+from pathlib import Path
+
+from .events import format_event
+
+MAX_INPUT_BYTES = 20 * 1024 * 1024  # 20MB source cap (-> ~27MB text file)
+MAX_NAME_LEN = 100
+PREVIEW_CHARS = 64
+
+
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def _workspace_root() -> Path:
+    try:
+        import sys as _sys
+        proj = Path(__file__).resolve().parents[3]
+        if str(proj) not in _sys.path:
+            _sys.path.insert(0, str(proj))
+        from core.paths import workspace_root as _ws
+        ws = _ws()
+        try:
+            ws.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return ws.resolve()
+    except Exception:
+        repo = Path(__file__).resolve().parents[4]
+        ws = repo / "X5Agent" / "Workspace"
+        try:
+            ws.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return ws.resolve()
+
+
+def _validate_path(p: str) -> tuple[Path, Path]:
+    """Resolve model-supplied path inside Workspace. Returns (ws, abs)."""
+    if not isinstance(p, str):
+        raise TypeError("path must be string")
+    s = p.strip()
+    if not s:
+        raise ValueError("path must be non-empty")
+    if len(s) > 500:
+        raise ValueError("path too long")
+    ws = _workspace_root()
+    cand = Path(s)
+    if not cand.is_absolute():
+        cand = (ws / s).resolve()
+    else:
+        cand = cand.resolve()
+    try:
+        cand.relative_to(ws)
+    except ValueError:
+        raise ValueError(f"Blocked: path must be inside Workspace: {ws}") from None
+    if not cand.exists():
+        raise FileNotFoundError(f"File not found: {s[:120]}")
+    if not cand.is_file():
+        raise ValueError("path is not a file")
+    size = cand.stat().st_size
+    if size <= 0:
+        raise ValueError("File is empty")
+    if size > MAX_INPUT_BYTES:
+        raise ValueError(f"File too large ({size} bytes, max {MAX_INPUT_BYTES})")
+    return ws, cand
+
+
+def _validate_output_name(v, src: Path) -> str:
+    if v is None:
+        return src.stem + ".b64.txt" if not src.name.endswith(".b64.txt") else src.name
+    if not isinstance(v, str):
+        raise TypeError("output_name must be string")
+    s = v.strip().replace("\\", "/").split("/")[-1].strip()
+    if not s:
+        raise ValueError("output_name must be non-empty")
+    if len(s) > MAX_NAME_LEN:
+        raise ValueError(f"output_name too long (max {MAX_NAME_LEN})")
+    if "\x00" in s or s in (".", ".."):
+        raise ValueError("Blocked: invalid output_name")
+    s = re.sub(r'[<>:"|?*\x00-\x1f]', "_", s).strip(". ")
+    if not s:
+        raise ValueError("Blocked: invalid output_name")
+    if not s.lower().endswith(".txt"):
+        s += ".txt"
+    return s
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def execute(path: str, output_name: str | None = None, cancel_flag=None) -> dict:
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
+    event = format_event(path=path if isinstance(path, str) else "")
+    ws, src = _validate_path(path)
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
+    raw = src.read_bytes()
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
+    text = base64.b64encode(raw).decode("ascii")
+    out_name = _validate_output_name(output_name, src)
+    dest = (src.parent / out_name).resolve()
+    try:
+        dest.relative_to(ws)
+    except ValueError:
+        raise ValueError("Blocked: output escapes Workspace") from None
+    dest.write_text(text, encoding="utf-8")
+    digest = _sha256(src)
+    mime, _ = mimetypes.guess_type(src.name)
+    rel_src = str(src.relative_to(ws)).replace("\\", "/")
+    rel_out = str(dest.relative_to(ws)).replace("\\", "/")
+    prefix = f"data:{mime or 'application/octet-stream'};base64,"
+    return {
+        "event": event,
+        "message": (f"Encoded {src.name} ({len(raw)} bytes -> {len(text)} base64 chars) "
+                    f"into Workspace file {rel_out}. Reference this path in later calls "
+                    "(read it in pieces with read_file when needed) — "
+                    "never paste the base64 text into the conversation."),
+        "source_path": rel_src,
+        "source_name": src.name,
+        "source_size": len(raw),
+        "sha256": digest,
+        "mime": mime or "application/octet-stream",
+        "output_path": rel_out,
+        "output_name": dest.name,
+        "base64_size": len(text),
+        "data_url_prefix": prefix,
+        "preview": text[:PREVIEW_CHARS],
+    }

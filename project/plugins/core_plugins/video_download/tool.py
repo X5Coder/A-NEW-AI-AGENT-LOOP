@@ -98,7 +98,16 @@ def _safe_title(name: str, video_id: str) -> str:
     return base
 
 
-def execute(url: str, filename: str | None = None, quality: str | None = None) -> dict:
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def execute(url: str, filename: str | None = None, quality: str | None = None, cancel_flag=None) -> dict:
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
     event = format_event(url=url if isinstance(url, str) else "")
     clean_url = _validate_url(url)
     custom_name = _validate_filename(filename)
@@ -135,18 +144,36 @@ def execute(url: str, filename: str | None = None, quality: str | None = None) -
         "nocheckcertificate": False,
     }
 
-    try:
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(clean_url, download=True)
-            try:
-                saved = ydl.prepare_filename(info)
-            except Exception:
-                saved = ""
-    except Exception as e:
+    # yt-dlp has no abort handle: run it in a daemon thread and poll in
+    # 1s slices so STOP returns at once (bounded orphan: socket_timeout 30s
+    # + 3 retries max, result discarded, partial .part resumes next time).
+    import threading as _th
+    _box: dict = {}
+    _ydl = YoutubeDL(opts)
+    def _fetch() -> None:
+        try:
+            with _ydl:
+                _box["info"] = _ydl.extract_info(clean_url, download=True)
+                try:
+                    _box["saved"] = _ydl.prepare_filename(_box["info"])
+                except Exception:
+                    _box["saved"] = ""
+        except Exception as e:
+            _box["error"] = e
+    _t = _th.Thread(target=_fetch, daemon=True)
+    _t.start()
+    while _t.is_alive():
+        if _cancelled(cancel_flag):
+            raise RuntimeError("Cancelled.")
+        _t.join(timeout=1.0)
+    if "error" in _box:
+        e = _box["error"]
         msg = str(e)[:500]
         if "Unsupported URL" in msg or "No video" in msg:
             raise ValueError(f"Download failed: unsupported or private video ({msg[:200]})") from None
         raise RuntimeError(f"Download failed: {msg}") from None
+    info = _box.get("info")
+    saved = _box.get("saved") or ""
 
     if not saved:
         raise RuntimeError("Download failed: no file produced")

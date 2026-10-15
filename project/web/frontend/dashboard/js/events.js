@@ -17,6 +17,8 @@
  */
 "use strict";
 
+import { loadBootCache, saveBootCache } from "./boot_cache.js?v=1";
+
 const handlers = new Map(); // type -> Set<fn>
 const lastState = new Map(); // state types only (replayed to late subscribers)
 const lastHash = new Map(); // section -> last seen server hash
@@ -26,9 +28,47 @@ let sseSource = null; // the ONE stream: created once, never duplicated
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 
+// Persistent hash-cache: restore BEFORE any module subscribes, so the
+// first onPush replay paints cached data instantly on refresh. The hello
+// snapshot then reconciles: unchanged hash = cached render stays, broken
+// hash = re-render + cache rewritten with the new hash.
+let cacheLoaded = false;
+try {
+  const cached = loadBootCache();
+  if (cached) {
+    for (const [k, v] of Object.entries(cached.hashes || {})) {
+      if (typeof k === "string" && typeof v === "string") lastHash.set(k, v);
+    }
+    for (const [k, v] of Object.entries(cached.states || {})) {
+      if (typeof k === "string" && STATE_TYPES.has(k)) lastState.set(k, v);
+    }
+    cacheLoaded = lastState.size > 0;
+  }
+} catch (_) {}
+
+export function hasBootCache() {
+  return cacheLoaded;
+}
+
+function persistBootCache() {
+  // Best-effort: writes ALWAYS go through here, so a data update mints a
+  // new stored hash in the same step.
+  try {
+    const hashes = {};
+    const states = {};
+    for (const [k, v] of lastHash) {
+      if (typeof v === "string") hashes[k] = v;
+    }
+    for (const [k, v] of lastState) {
+      if (STATE_TYPES.has(k)) states[k] = v;
+    }
+    saveBootCache(hashes, states);
+  } catch (_) {}
+}
 // Boot barrier: resolves once the first hello snapshot (chat + dashboard +
 // everything else) is applied. The app.js boot splash waits on this plus
-// every module's first load, so the splash lifts only when all data is in.
+// every module's first load — or lifts early on the fast path when a
+// hash-cache already painted the shell.
 let helloSeen = false;
 let helloResolve = null;
 const helloPromise = new Promise((resolve) => {
@@ -60,14 +100,22 @@ function emit(type, data) {
 
 function applySection(name, section) {
   // {hash, data} sections: skip when the hash is unchanged (cache still
-  // valid). Returns true when the data was actually applied.
+  // valid — cached render stays). A broken hash re-renders AND rewrites
+  // the stored hash in the same step. Returns true when data was applied.
   if (!section || typeof section !== "object") return false;
   try {
     const h = section.hash;
-    if (typeof h === "string" && lastHash.get(name) === h) return false;
+    if (typeof h === "string" && lastHash.get(name) === h) {
+      // Hash match but first boot after refresh: the cached state may hold
+      // the same data without ever emitting to the fresh subscribers.
+      // Replay it once so modules paint, without rewriting the cache.
+      if (lastState.has(name)) emit(name, lastState.get(name));
+      return false;
+    }
     if (typeof h === "string") lastHash.set(name, h);
     lastState.set(name, section.data);
     emit(name, section.data);
+    persistBootCache();
     return true;
   } catch (_) {
     return false;
@@ -96,6 +144,7 @@ function onHello(snap) {
       lastHash.set("rest", snap.rest.hash);
     } catch (_) {}
   }
+  persistBootCache();
 }
 
 function onServerPush(channel, data) {
@@ -111,6 +160,7 @@ function onServerPush(channel, data) {
     try {
       lastHash.delete("chat_last50");
       lastHash.delete("rest");
+      persistBootCache();
     } catch (_) {}
     emit("chat_done", data);
     return;
@@ -119,6 +169,7 @@ function onServerPush(channel, data) {
     // Dashboard changed: drop its hash so the next hello re-renders it.
     try {
       lastHash.delete("dashboard");
+      persistBootCache();
     } catch (_) {}
   }
   if (STATE_TYPES.has(channel)) {
@@ -127,6 +178,11 @@ function onServerPush(channel, data) {
     } catch (_) {}
   }
   emit(channel, data);
+  // Live state changed: keep the stored snapshot fresh so the next
+  // refresh paints the newest data instantly.
+  try {
+    if (STATE_TYPES.has(channel)) persistBootCache();
+  } catch (_) {}
 }
 
 function reconnectDelay() {

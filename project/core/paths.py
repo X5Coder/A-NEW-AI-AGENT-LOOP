@@ -92,6 +92,8 @@ def ensure_x5agent() -> dict[str, str]:
             workspace_root() / "outbox" / "ready_upload",
             data_root(),
             data_root() / "database",
+            data_root() / "database" / "studio_sessions",
+            data_root() / "studios",
             data_root() / "vector",
             data_root() / "files" / "images",
             data_root() / "files" / "audio",

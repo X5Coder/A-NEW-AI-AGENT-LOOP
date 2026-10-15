@@ -1,17 +1,22 @@
 """
-video_analyze - async video frame-by-frame analysis via the connected AI Vision Model.
-Each operation has job_id, model polls every wait period. Frames analyzed concurrently via ThreadPool for speed.
-Video not saved, only metadata sent to text model.
+video_analyze - async video understanding via the connected AI Vision Videos Model.
+
+Sends the video bytes themselves (never still-image frames) to the "video"
+template only: some video models cannot read images at all, so frames would
+fail there. Each operation has job_id, model polls every wait period.
+Oversize videos are downscaled via ffmpeg to fit one request (max ~3.5MB).
+Video not saved, only the answer is returned.
 """
 from __future__ import annotations
 
+import base64
 import json
+import shutil
 import time
 import uuid
 import tempfile
 import subprocess
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 from .events import format_event
@@ -57,8 +62,17 @@ def _is_inside(cand: Path, root: Path) -> bool:
     except ValueError:
         return False
 MAX_VIDEO_SIZE = 50 * 1024 * 1024
+# One request body caps at 5MB (AIP/1): ~3.5MB raw video fits after base64.
+MAX_SEND_BYTES = 3500000
 MAX_JOBS = 50
 _LOCK = threading.Lock()
+
+_VIDEO_MIME = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
+    ".mov": "video/quicktime", ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo", ".flv": "video/x-flv",
+    ".mpg": "video/mpeg", ".mpeg": "video/mpeg",
+}
 
 
 def _load_jobs() -> list[dict]:
@@ -178,96 +192,132 @@ def _extract_metadata(video_path: Path) -> dict:
     meta.setdefault("frame_count", 0)
     return meta
 
-def _extract_frames(video_path: Path, max_frames: int = 12) -> list[Path]:
-    """Extract frames via ffmpeg at 1 fps, up to max_frames, to temp dir."""
-    tmpdir = Path(tempfile.mkdtemp(prefix="video_frames_"))
+def _mime_for(video_path: Path) -> str:
+    return _VIDEO_MIME.get(video_path.suffix.lower(), "video/mp4")
+
+
+def _compress_for_send(src: Path, width: int, crf: int) -> Path:
+    """Downscale via ffmpeg into a temp mp4. Raises RuntimeError when impossible."""
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("Video is too large to send and ffmpeg is missing (needed to shrink it).")
+    out = Path(tempfile.mkdtemp(prefix="video_send_")) / "small.mp4"
+    cmd = ["ffmpeg", "-y", "-i", str(src),
+           "-vf", f"scale='min({width},iw)':-2",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+           "-an", "-movflags", "+faststart", str(out)]
     try:
-        # Extract at 1 fps
-        pattern = str(tmpdir / "frame_%04d.jpg")
-        cmd = ["ffmpeg", "-y", "-i", str(video_path), "-vf", "fps=1", "-q:v", "2", "-frames:v", str(max_frames), pattern]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0:
-            # fallback: try without fps filter, just extract first frame
-            cmd2 = ["ffmpeg", "-y", "-i", str(video_path), "-vframes", "1", str(tmpdir / "frame_0001.jpg")]
-            subprocess.run(cmd2, capture_output=True, timeout=30)
-        frames = sorted(tmpdir.glob("frame_*.jpg"))
-        # If still no frames, return empty
-        return frames
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        raise RuntimeError("Video is too large to send and ffmpeg is missing (needed to shrink it).")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Video compression took too long — trim the video and try again.")
+    if result.returncode != 0 or not out.exists():
+        raise RuntimeError("Video compression failed — trim the video and try again.")
+    return out
+
+
+def _prepare_sendable(video_path: Path) -> tuple[bytes, str]:
+    """Video bytes + mime fitting one request. Compresses oversize videos (max 2 passes)."""
+    if video_path.stat().st_size <= MAX_SEND_BYTES:
+        return video_path.read_bytes(), _mime_for(video_path)
+    tmp: Path | None = None
+    try:
+        for width, crf in ((640, 30), (426, 35)):
+            try:
+                if tmp is not None:
+                    shutil.rmtree(str(tmp.parent), ignore_errors=True)
+                tmp = _compress_for_send(video_path, width, crf)
+                if tmp.stat().st_size <= MAX_SEND_BYTES:
+                    return tmp.read_bytes(), "video/mp4"
+            except RuntimeError:
+                raise
+            except Exception:
+                continue
+        raise RuntimeError(
+            "Video is too large even after compression — trim it under ~1 minute and try again.")
+    finally:
+        if tmp is not None:
+            try:
+                shutil.rmtree(str(tmp.parent), ignore_errors=True)
+            except Exception:
+                pass
+
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
     except Exception:
-        return []
+        return False
 
-def _analyze_frame(frame_path: Path, prompt: str) -> dict:
-    """Analyze single frame via the connected AI Vision Model."""
-    try:
-        from core.ai_models.media import image_to_base64
-        from core.ai_models.store import require_model
-        from core.ai_models.engine import analyze
-        record = require_model("vision")  # fixed refusal + model link when missing
-        b64, mime = image_to_base64(frame_path)
-        ans = analyze(record, {"prompt": prompt, "image_base64": b64, "image_mime": mime})
-        return {"frame": frame_path.name, "analysis": ans, "success": True}
-    except Exception as e:
-        return {"frame": frame_path.name, "analysis": f"Failed: {e}", "success": False}
 
-def _process_job_async(job_id: str, video_path: Path, prompt: str, metadata: dict):
-    """Background thread: extract frames, analyze concurrently, update job store."""
+def _analyze_video_bytes(blob: bytes, mime: str, prompt: str, cancel_flag=None) -> str:
+    """Single video-model call (AI Vision Videos template only)."""
+    from core.ai_models.store import require_model
+    from core.ai_models.engine import analyze_video
+    record = require_model("video")  # fixed refusal + model link when missing
+    options = {"cancel_event": cancel_flag} if cancel_flag is not None else None
+    return analyze_video(record, {
+        "prompt": prompt,
+        "video_base64": base64.b64encode(blob).decode("ascii"),
+        "video_mime": mime,
+    }, options)
+
+def _fail_job(job_id: str, message: str) -> None:
+    with _LOCK:
+        jobs = _load_jobs()
+        for j in jobs:
+            if j["job_id"] == job_id:
+                j["status"] = "failed"
+                j["error"] = str(message)[:500]
+                j["progress"] = "failed"
+                break
+        _save_jobs(jobs)
+
+
+def _delete_temp_video(video_path: Path) -> None:
+    # Video was saved locally so path could be sent - now delete it from storage after analysis
     try:
-        # Update to processing
+        project_root = Path(__file__).resolve().parents[3]
+        try:
+            video_path.resolve().relative_to((project_root / "storage" / "files").resolve())
+            if video_path.exists():
+                video_path.unlink(missing_ok=True)
+        except ValueError:
+            # not inside storage/files, don't delete (may be persistent elsewhere)
+            pass
+    except Exception:
+        pass
+
+def _process_job_async(job_id: str, video_path: Path, prompt: str, metadata: dict, cancel_flag=None):
+    """Background thread: send the video bytes to the video model once, store the answer."""
+    try:
         with _LOCK:
             jobs = _load_jobs()
             for j in jobs:
                 if j["job_id"] == job_id:
                     j["status"] = "processing"
-                    j["progress"] = "extracting frames"
+                    j["progress"] = "sending video to the video model"
                     break
             _save_jobs(jobs)
 
-        frames = _extract_frames(video_path, max_frames=12)
-        if not frames:
-            with _LOCK:
-                jobs = _load_jobs()
-                for j in jobs:
-                    if j["job_id"] == job_id:
-                        j["status"] = "failed"
-                        j["error"] = "No frames extracted (ffmpeg may have failed)"
-                        j["progress"] = "failed"
-                        break
-                _save_jobs(jobs)
+        if _cancelled(cancel_flag):
+            _fail_job(job_id, "Cancelled.")
+            return
+        try:
+            blob, mime = _prepare_sendable(video_path)
+        except (RuntimeError, ValueError, OSError) as e:
+            _fail_job(job_id, e)
             return
 
-        # Update progress
-        with _LOCK:
-            jobs = _load_jobs()
-            for j in jobs:
-                if j["job_id"] == job_id:
-                    j["status"] = "processing"
-                    j["progress"] = f"analyzing {len(frames)} frames concurrently"
-                    j["frame_count"] = len(frames)
-                    break
-            _save_jobs(jobs)
-
-        # Analyze concurrently via ThreadPool for speed (bounded 4 workers)
-        results = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_frame = {executor.submit(_analyze_frame, fp, prompt): fp for fp in frames}
-            for future in as_completed(future_to_frame):
-                try:
-                    res = future.result(timeout=60)
-                    results.append(res)
-                except Exception as e:
-                    fp = future_to_frame[future]
-                    results.append({"frame": fp.name, "analysis": f"Error: {e}", "success": False})
-
-        # Sort by frame name
-        results.sort(key=lambda x: x["frame"])
-
-        # Build JSON per frame
-        output = {
-            "metadata": metadata,
-            "frame_count": len(frames),
-            "frames": results,
-            "summary": f"Analyzed {len(results)} frames. " + "; ".join([f"{r['frame']}: {r['analysis'][:60]}" for r in results[:3]])
-        }
+        if _cancelled(cancel_flag):
+            _fail_job(job_id, "Cancelled.")
+            return
+        try:
+            answer = _analyze_video_bytes(blob, mime, prompt, cancel_flag)
+        except RuntimeError:
+            raise
+        except Exception as e:
+            _fail_job(job_id, f"Video analysis failed: {e}")
+            return
 
         with _LOCK:
             jobs = _load_jobs()
@@ -275,55 +325,21 @@ def _process_job_async(job_id: str, video_path: Path, prompt: str, metadata: dic
                 if j["job_id"] == job_id:
                     j["status"] = "completed"
                     j["progress"] = "completed"
-                    j["result"] = output
+                    j["result"] = {"metadata": metadata, "answer": answer}
                     j["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     break
             _save_jobs(jobs)
 
-        # Cleanup temp frames
-        import shutil
-        try:
-            if frames:
-                shutil.rmtree(str(frames[0].parent), ignore_errors=True)
-        except Exception:
-            pass
-        # Video was saved locally so path could be sent as metadata - now delete it from storage after analysis
-        try:
-            project_root = Path(__file__).resolve().parents[3]
-            # Only delete if inside storage/files/videos or storage/files (temp)
-            try:
-                video_path.resolve().relative_to((project_root / "storage" / "files").resolve())
-                if video_path.exists():
-                    video_path.unlink(missing_ok=True)
-            except ValueError:
-                # not inside storage/files, don't delete (may be persistent elsewhere)
-                pass
-        except Exception:
-            pass
+        _delete_temp_video(video_path)
     except Exception as e:
-        with _LOCK:
-            jobs = _load_jobs()
-            for j in jobs:
-                if j["job_id"] == job_id:
-                    j["status"] = "failed"
-                    j["error"] = str(e)[:500]
-                    j["progress"] = "failed"
-                    break
-            _save_jobs(jobs)
+        _fail_job(job_id, e)
         # Also try to delete original video on failure (still temp)
-        try:
-            project_root = Path(__file__).resolve().parents[3]
-            try:
-                video_path.resolve().relative_to((project_root / "storage" / "files").resolve())
-                if video_path.exists():
-                    video_path.unlink(missing_ok=True)
-            except ValueError:
-                pass
-        except Exception:
-            pass
+        _delete_temp_video(video_path)
 
 
-def execute(video_path: str | None = None, video_id: str | None = None, prompt: str | None = None, job_id: str | None = None) -> dict:
+def execute(video_path: str | None = None, video_id: str | None = None, prompt: str | None = None, job_id: str | None = None, cancel_flag=None) -> dict:
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
     event = format_event(video_path=video_path, video_id=video_id, job_id=job_id)
     # If job_id provided, poll status
     if job_id:
@@ -346,7 +362,7 @@ def execute(video_path: str | None = None, video_id: str | None = None, prompt: 
     # Else start new job
     # Validate video
     vp = _validate_video_path(video_path, video_id)
-    prompt_text = prompt.strip() if prompt and isinstance(prompt, str) and prompt.strip() else "Describe this video frame in detail."
+    prompt_text = prompt.strip() if prompt and isinstance(prompt, str) and prompt.strip() else "Describe this video in detail."
     if prompt and len(prompt) > 2000:
         raise ValueError("prompt too long")
     # Check job limit
@@ -357,7 +373,7 @@ def execute(video_path: str | None = None, video_id: str | None = None, prompt: 
         _save_jobs(jobs)
         jobs = _load_jobs()
     metadata = _extract_metadata(vp)
-    # Video not saved - only metadata to be sent to text model (as per spec)
+    # Video bytes go to the video model (never still-image frames).
     new_id = str(uuid.uuid4())[:8]
     job_entry = {
         "job_id": new_id,
@@ -374,7 +390,7 @@ def execute(video_path: str | None = None, video_id: str | None = None, prompt: 
 
     # Start async processing in background thread
     import threading
-    t = threading.Thread(target=_process_job_async, args=(new_id, vp, prompt_text, metadata), daemon=True)
+    t = threading.Thread(target=_process_job_async, args=(new_id, vp, prompt_text, metadata, cancel_flag), daemon=True)
     t.start()
 
     return {

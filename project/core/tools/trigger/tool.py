@@ -389,7 +389,14 @@ def _load_chat_snippet(limit: int = 10) -> str:
                 continue
     return ""
 
-def _generate_trigger_skill(trigger_name: str, task: str, config: dict | None, todo_snapshot: dict | None = None) -> str:
+def _cancelled(cancel_flag) -> bool:
+    try:
+        return bool(cancel_flag is not None and cancel_flag.is_set())
+    except Exception:
+        return False
+
+
+def _generate_trigger_skill(trigger_name: str, task: str, config: dict | None, todo_snapshot: dict | None = None, cancel_flag=None) -> str:
     """Internal LLM request using trigger_skill_system.md.
 
     UNIFIED model for ALL triggers (same as scheduler): event (trigger_name +
@@ -431,7 +438,7 @@ def _generate_trigger_skill(trigger_name: str, task: str, config: dict | None, t
             ],
         }
         try:
-            res = _aip.execute(_record, canonical, "text")
+            res = _aip.execute(_record, canonical, "text", cancel_event=cancel_flag)
             content = (res.get("text") if isinstance(res, dict) else "") or ""
         except Exception as e:
             raise RuntimeError(
@@ -446,7 +453,7 @@ def _generate_trigger_skill(trigger_name: str, task: str, config: dict | None, t
             content = _legacy_chat(
                 _record,
                 [{"role": "user", "content": user_prompt}],
-                {"system": system_prompt},
+                {"system": system_prompt, "cancel_event": cancel_flag},
             )
         except Exception as e:
             raise RuntimeError(
@@ -458,7 +465,7 @@ def _generate_trigger_skill(trigger_name: str, task: str, config: dict | None, t
         raise RuntimeError("Trigger skill generation returned empty content from the configured text model.")
     return content.strip()
 
-def _save_trigger_skill(trigger_id: str, trigger_name: str, task: str, config: dict | None, todo_snapshot: dict | None = None) -> tuple[str, str]:
+def _save_trigger_skill(trigger_id: str, trigger_name: str, task: str, config: dict | None, todo_snapshot: dict | None = None, cancel_flag=None) -> tuple[str, str]:
     project_root = Path(__file__).resolve().parents[3]
     base_dir = project_root / "skills" / "trigger_skills"
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -475,7 +482,7 @@ def _save_trigger_skill(trigger_id: str, trigger_name: str, task: str, config: d
         target = base_dir / safe
     # Generate skill via internal LLM on the SAME AIP/1 path as the loop
     # (event + task + last-10 chat + todo -> same text model). No fallback.
-    skill_content = _generate_trigger_skill(trigger_name, task, config, todo_snapshot)
+    skill_content = _generate_trigger_skill(trigger_name, task, config, todo_snapshot, cancel_flag)
     target.mkdir(parents=True, exist_ok=True)
     skill_data = {
         "name": safe,
@@ -512,7 +519,9 @@ def _delete_trigger_skill(skill_ref: str) -> bool:
     except Exception:
         return False
 
-def execute(action: str, trigger_name: str | None = None, task: str | None = None, config: dict | None = None, trigger_id: str | None = None) -> dict:
+def execute(action: str, trigger_name: str | None = None, task: str | None = None, config: dict | None = None, trigger_id: str | None = None, cancel_flag=None) -> dict:
+    if _cancelled(cancel_flag):
+        raise RuntimeError("Cancelled.")
     act = _validate_action(action)
     event = format_event(action=act, trigger_name=trigger_name or "", trigger_id=trigger_id or "")
     triggers = _load_triggers()
@@ -559,7 +568,7 @@ def execute(action: str, trigger_name: str | None = None, task: str | None = Non
         # (AIP/1: system prompt + task + last-10 chat + todo), saved
         # temporarily under skills/trigger_skills until the event fires.
         todo_snap = _find_recent_todo_for_task(task.strip())
-        skill_ref, skill_content = _save_trigger_skill(new_id, trigger_name.strip(), task.strip(), cfg, todo_snap)
+        skill_ref, skill_content = _save_trigger_skill(new_id, trigger_name.strip(), task.strip(), cfg, todo_snap, cancel_flag)
         lib_id = ""
         if is_library:
             # Arm the library side AFTER the skill exists. On failure the
@@ -714,7 +723,7 @@ def execute(action: str, trigger_name: str | None = None, task: str | None = Non
             todo_snap = _find_recent_todo_for_task(triggers[idx].get("task", ""))
             skill_content = _generate_trigger_skill(
                 triggers[idx].get("trigger_name", ""), triggers[idx].get("task", ""),
-                triggers[idx].get("config") or {}, todo_snap)
+                triggers[idx].get("config") or {}, todo_snap, cancel_flag)
             project_root = Path(__file__).resolve().parents[3]
             target = project_root / "skills" / "trigger_skills" / (triggers[idx].get("skill_ref") or "")
             try:

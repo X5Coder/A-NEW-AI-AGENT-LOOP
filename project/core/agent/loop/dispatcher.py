@@ -18,6 +18,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # decision. There is no "trigger" tool: trigger_search alone searches AND
 # manages all library + project triggers (core.tools.trigger.tool is only its
 # internal implementation module, never exposed to the model).
+# studio_page + studio_read stay registered here ONLY so the studio branch
+# loop can execute them (pre-seeded there directly): tool_search never
+# returns them and the main loop rejects them, so the main agent never
+# sees or runs the session-only studio tools. http_request is a normal
+# discoverable tool that is additionally allowed inside studio sessions.
 _CORE_MAP = {
     "tool_search": "core.tools.tool_search.tool",
     "trigger_search": "core.tools.trigger_search.tool",
@@ -39,17 +44,23 @@ _DISCOVERABLE_MAP = {
     "write_file": "plugins.core_plugins.write_file.tool",
     "search_files": "plugins.core_plugins.search_files.tool",
     "vision_analyze": "plugins.core_plugins.vision_analyze.tool",
+    "file_to_base64": "plugins.core_plugins.file_to_base64.tool",
+    "file_metadata": "plugins.core_plugins.file_metadata.tool",
     "video_analyze": "plugins.core_plugins.video_analyze.tool",
     "video_transcribe": "plugins.core_plugins.video_transcribe.tool",
     "video_download": "plugins.core_plugins.video_download.tool",
     "audio_extract": "plugins.core_plugins.audio_extract.tool",
     "embedding_memory": "plugins.core_plugins.embedding_memory.tool",
     "text_to_speech": "plugins.core_plugins.text_to_speech.tool",
+    "generate_image": "plugins.core_plugins.generate_image.tool",
     "image_memory": "plugins.core_plugins.image_memory.tool",
     "important_memory": "plugins.core_plugins.important_memory.tool",
     "http_request": "plugins.core_plugins.http_request.tool",
-    "pdf_create": "plugins.core_plugins.pdf_create.tool",
+    "pdf_studio": "plugins.core_plugins.pdf_studio.tool",
+    "studio_page": "plugins.core_plugins.studio_page.tool",
+    "studio_read": "plugins.core_plugins.studio_read.tool",
     "svg_maker": "plugins.core_plugins.svg_maker.tool",
+    "image_search": "plugins.core_plugins.image_search.tool",
 }
 
 _ALL = {**_CORE_MAP, **_DISCOVERABLE_MAP}
@@ -131,9 +142,13 @@ def execute_tool(name: str, arguments: dict | str | None, cancel_flag: Any = Non
             return {"error": f"Tool {n} arguments invalid JSON: {e}", "tool": n}
     else:
         return {"error": f"Tool {n} arguments must be dict or JSON string", "tool": n}
-    # Size limits: args JSON stringify truncated 10000 chars
+    # Size limits: args JSON stringify truncated 10000 chars.
+    # studio_page is exempt: a full page design is legitimately large (its
+    # own trial-build + the 200KB store cap are the real guards). Without
+    # this, every full-code delivery would be rejected and no design could
+    # ever land.
     try:
-        if len(json.dumps(args, ensure_ascii=False)) > 10000:
+        if n != "studio_page" and len(json.dumps(args, ensure_ascii=False)) > 10000:
             return {"error": f"Tool {n} arguments too large (max 10000 chars)", "tool": n}
     except Exception:
         pass

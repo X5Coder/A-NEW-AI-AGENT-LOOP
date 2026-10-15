@@ -68,7 +68,7 @@ def mock_skill_llm(monkeypatch):
 
     seen = {}
 
-    def fake_execute(record, canonical, kind=None):
+    def fake_execute(record, canonical, kind=None, cancel_event=None):
         seen["kind"] = kind
         seen["canonical"] = canonical
         return {"status": "ok", "text": "# Test Skill\n\n## Steps\n1. Do the task."}
@@ -200,7 +200,7 @@ def test_update_task_regenerates_skill(guard, monkeypatch):
     from core.tools.scheduler.tool import execute as sch
     texts = iter(["# Skill ONE", "# Skill TWO"])
 
-    def fake_execute(record, canonical, kind=None):
+    def fake_execute(record, canonical, kind=None, cancel_event=None):
         return {"status": "ok", "text": next(texts)}
 
     monkeypatch.setattr(aip_mod, "execute", fake_execute)

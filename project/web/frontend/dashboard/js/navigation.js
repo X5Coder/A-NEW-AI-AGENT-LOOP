@@ -11,7 +11,7 @@ import { animateIn, hideChartTip } from "./ui.js?v=13";
 const BP_MOBILE = 1024;
 const COLLAPSE_KEY = "x5_sidebar";
 
-const PAGES = ["dashboard", "agent", "workspace", "gateway", "plugins", "skills", "ai-models", "settings"];
+const PAGES = ["dashboard", "agent", "workspace", "gateway", "skills", "ai-models", "settings"];
 
 function routeFromPath() {
   try {
@@ -31,7 +31,6 @@ const TITLES = {
   agent: { title: "Agent", sub: "Chat with your AI assistant" },
   workspace: { title: "Workspace", sub: "Your agent's files and folders" },
   gateway: { title: "WhatsApp gateway", sub: "Connect and manage your WhatsApp agent" },
-  plugins: { title: "Plugins", sub: "Extend your agent capabilities" },
   skills: { title: "Skills", sub: "Reusable instructions for your agent" },
   "ai-models": { title: "AI Models", sub: "Connect any AI model" },
   settings: { title: "Settings", sub: "Preferences and account" },
@@ -114,6 +113,10 @@ export function navigate(name, opts) {
   }
   window.dispatchEvent(new CustomEvent("x5:page-open", { detail: name }));
   try {
+    // A studio session owns its URL (/studio-pdf/<id>): never rewrite it
+    // underneath the overlay, or the next refresh loses the studio.
+    const m = (location.pathname || "").match(/^\/studio-pdf\/([A-Za-z0-9_-]+)/);
+    if (m && m[1] !== "shell" && m[1] !== "assets") return void closeDrawer();
     if (push) history.pushState({ page: name }, "", urlFor(name));
     else history.replaceState({ page: name }, "", urlFor(name));
   } catch (_) {}

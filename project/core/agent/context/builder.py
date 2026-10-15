@@ -253,7 +253,10 @@ def _workspace_block() -> str:
             + "\n(Use these exact file path links as-is in any code or HTML: images, fonts, any file. "
               "An @<file-id> mention in the user message refers to the map entry with that id. "
               "You may copy any Workspace file into the folder you work in so everything lives in one "
-              "folder, then reference it by its file name.)")
+              "folder, then reference it by its file name. "
+              "In your reply text, mention a Workspace file ONLY as [label](workspace:folder/file.ext) "
+              "with the exact Workspace-relative path — this renders as a blue underlined link. "
+              "Never write bare folder/file paths or absolute paths as reply-text links; plain text stays plain.)")
 
 
 def _embedding_memory_block() -> str:
@@ -396,6 +399,17 @@ def _documents_block() -> str:
             "  Supported: PDF, Word, Excel, PowerPoint, csv/txt/md/html/json/xml.\n"
             "  Search one file with document_search(file_id, query, top_k).\n"
             + "\n".join(lines) + more)
+
+
+def _studios_hint() -> str:
+    # PDF Studios are NEVER auto-listed: one fixed pointer line only. The
+    # model calls pdf_studio action=list (via tool_search) to see every
+    # studio with its state, or action=get for one studio's full details.
+    # No studio data travels here — no IDs, no titles, no counts.
+    return ("[PDF Studios - L4: not auto-listed — call pdf_studio action=list "
+            "(via tool_search) to see all studios with state, action=get "
+            "for one studio's details; reuse an empty (0 designed) studio "
+            "via action=open before creating]")
 
 
 def _todo_block() -> str:
@@ -556,7 +570,85 @@ def _core_tools_block() -> list[dict]:
     return tools
 
 
-def build_context(user_input: str, include_todo: bool = True, isolated: bool = False, todo_snapshot: dict | None = None, session_history: str | None = None, chat_limit: int = 30, resume_stopped: bool = False) -> tuple[str, str, list[dict]]:
+def _studio_env_block() -> str:
+    """Tiny env for studio-isolated turns (no maps, no memories, no Workspace).
+
+    The studio is self-contained: every file the turn touches lives in the
+    studio's own assets. Never raises.
+    """
+    try:
+        from datetime import datetime as _dt
+        now = _dt.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    except Exception:
+        now = "unknown time"
+    return ("[Studio Env]\n"
+            f"- Time: {now}\n"
+            "- Every file you use lives in THIS studio's assets (exact src "
+            "paths are listed under Studio assets — use them verbatim).\n"
+            "- Photos: image_search with this studio id (pictures land in the "
+            "studio assets with src paths). Fonts/links: http_request.")
+
+
+def _studio_vision_available() -> bool:
+    """True when a vision model is configured (vision_analyze then shows).
+
+    The tool stays hidden otherwise — never advertised without a model
+    behind it. Never raises (file read only, no network).
+    """
+    try:
+        import sys as _sys2
+        _proj2 = Path(__file__).resolve().parents[3]
+        if str(_proj2) not in _sys2.path:
+            _sys2.path.insert(0, str(_proj2))
+        from core.ai_models.store import has_model as _has_model
+        return bool(_has_model("vision"))
+    except Exception:
+        return False
+
+
+def _studio_tool_names() -> list[str]:
+    """Studio tools in-context: the 4 base + vision_analyze when configured."""
+    names = ["studio_page", "studio_read", "image_search", "http_request"]
+    try:
+        if _studio_vision_available():
+            names.append("vision_analyze")
+    except Exception:
+        pass
+    return names
+
+
+def _studio_core_tools() -> list[dict]:
+    """Studio tools in-context (no tool_search in studio).
+
+    image_search rides with its studio face (no Workspace words), same as
+    the engine pre-seed — one override, two readers.
+    """
+    out: list[dict] = []
+    try:
+        base = Path(__file__).resolve().parents[3] / "plugins" / "core_plugins"
+        for tname in _studio_tool_names():
+            try:
+                if tname == "image_search":
+                    import sys as _sys9
+                    _proj9 = Path(__file__).resolve().parents[3]
+                    if str(_proj9) not in _sys9.path:
+                        _sys9.path.insert(0, str(_proj9))
+                    from plugins.core_plugins.image_search.tool import studio_spec
+                    spec = studio_spec()
+                else:
+                    spec = json.loads((base / tname / "spec.json").read_text(encoding="utf-8"))
+                if not isinstance(spec.get("name"), str) or not isinstance(spec.get("description"), str):
+                    continue
+                out.append(openai_tool_from_spec(spec.get("name"), spec.get("description", ""),
+                                                spec.get("inputs", {})))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def build_context(user_input: str, include_todo: bool = True, isolated: bool = False, todo_snapshot: dict | None = None, session_history: str | None = None, chat_limit: int = 30, resume_stopped: bool = False, studio_mode: bool = False) -> tuple[str, str, list[dict]]:
     """
     8-layer context order (fixed):
       L1 core_identity.md + L2 general_mission.md + L3 policy.md -> system role
@@ -582,10 +674,32 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
         raise TypeError("user_input must be string")
     # L1+L2+L3
     system_prompt = _read_system_prompt()
+    if studio_mode:
+        # Studio-isolated turn: sentence + state only. No main-session
+        # baggage (workspace map, docs, memories, todos, triggers) and
+        # exactly 4 tools in-context (no tool_search in studio).
+        # Old page codes are NEVER sent — the model reads via the tools.
+        _s_ctx = "\n\n".join([
+            _studio_env_block(),
+            "[Memories L5: skipped — studio turns are stateless]",
+            "[Chat L6: studio-isolated — the main session never enters studio turns. "
+            "All parallel per-slide turns share this one branch session.]",
+            "[Available CORE tools L7 (only these exist here): "
+            "studio_page (approve the tasked slide: read / deliver / patch / test its file, "
+            "fetch to save a web font into assets) "
+            "| studio_read (read-only view of any other slide) "
+            "| image_search (find photos: this studio id + query words -> pictures land in the studio assets with src paths) "
+            "| http_request (fonts/links only, never photos)"
+            f"{' | vision_analyze (inspect image content: pass studio assets as '
+               'image_path=studio:<id>/images/<name>)' if _studio_vision_available() else ''}]",
+            "[Bridge] Based on the studio task below, execute it.\n\n"
+            f"[Current User Input - L8]\n{user_input.strip()}"])
+        return system_prompt, _s_ctx, _studio_core_tools()
     # L4
     env = _env_block()
     ws_block = _workspace_block()
     docs_block = _documents_block()
+    studios_hint = _studios_hint()
     # L5
     mem = _memories_block()
     # L6: chat + todo + triggers (explicit separate layer)
@@ -609,6 +723,8 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
         parts.append(ws_block)
     if docs_block:
         parts.append(docs_block)
+    if studios_hint:
+        parts.append(studios_hint)
     if mem:
         parts.append(mem)
     else:
