@@ -1,7 +1,8 @@
 /**
  * live-url.js — remote-safe live viewer URLs (pure, no DOM).
  *
- * The library mints viewer links on 127.0.0.1:6080. Opened from the same
+ * The library mints viewer links on loopback (the gated viewer port, 8790 by
+ * default). Opened from the same
  * machine that is fine; opened from a remote console page those links point
  * at the VIEWER'S own localhost ("refused to connect"). When this console
  * page itself is remote, rewrite only the host/scheme to this page's host,

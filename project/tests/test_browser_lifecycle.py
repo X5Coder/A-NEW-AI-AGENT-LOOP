@@ -38,6 +38,40 @@ def test_close_noop_never_boots():
     assert svc._browser is None and svc._started is False
 
 
+def test_state_satisfied_refusals_are_success():
+    # The service layer boots/verifies the browser itself, so the library
+    # answers already_running on a real start (already_closed on a close).
+    # The requested end state holds: that is a success with a notice, not a
+    # failed step.
+    from X5Browser.tools import _apply_state_notice, _normalize
+
+    raw = {"ok": False,
+           "message": "error: already_running - the browser is already running "
+                      "(uptime 3s). Use browser_status for info or "
+                      "restart_browser to restart it."}
+    out = _apply_state_notice("open_browser", _normalize("open_browser", "Opening the browser", raw))
+    assert out["ok"] is True
+    assert out["notice"] == "already_running"
+    assert "already up" in out["message"]
+
+    raw_closed = {"ok": False, "message": "error: already_closed - not running"}
+    out = _apply_state_notice("close_browser", _normalize("close_browser", "Stopping browser", raw_closed))
+    assert out["ok"] is True and out["notice"] == "already_closed"
+
+
+def test_real_refusals_stay_failures():
+    from X5Browser.tools import _apply_state_notice, _normalize
+
+    for name, message in (
+        ("open_browser", "error: launch_failed - chrome missing"),
+        ("open_browser", "error: already_running_in_a_foreign_profile - nope"),
+        ("navigate", "error: already_running - the browser is already running"),
+    ):
+        out = _apply_state_notice(name, _normalize(name, "Working", {"ok": False, "message": message}))
+        assert out["ok"] is False, (name, message)
+        assert "notice" not in out, (name, message)
+
+
 def test_explicit_lifecycle_gate():
     _skip_if_running()
     # Probes stay read-only.

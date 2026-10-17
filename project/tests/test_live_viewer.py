@@ -1,0 +1,257 @@
+"""Gated live-viewer port (X5Browser.liveviewer): token gate + mode forcing.
+
+Safe: no browser, no relay, no listening socket. Handlers are called directly
+with aiohttp's mocked request, so the whole gate contract is checked without
+binding a port or touching a live session.
+"""
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+import pytest
+
+pytest.importorskip("aiohttp", reason="the gate is an aiohttp server")
+
+from aiohttp.test_utils import make_mocked_request  # noqa: E402
+
+from X5Browser import liveviewer as lv  # noqa: E402
+
+CONTROL = "C" * 43
+PREVIEW = "P" * 43
+
+
+def _request(path: str, cookies: dict | None = None, match_info: dict | None = None):
+    headers = {}
+    if cookies:
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    if match_info is None:
+        return make_mocked_request("GET", path, headers=headers)
+    return make_mocked_request("GET", path, headers=headers, match_info=match_info)
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+@pytest.fixture()
+def live_tokens(monkeypatch):
+    """A live session: both tokens known (the library links are not touched)."""
+    monkeypatch.setattr(
+        lv, "tokens", lambda links=None: {"control": CONTROL, "preview": PREVIEW}
+    )
+
+
+# -- configuration ----------------------------------------------------------
+
+
+def test_viewer_port_default_and_env(monkeypatch):
+    monkeypatch.delenv("X5_LIVE_VIEWER_PORT", raising=False)
+    assert lv.DEFAULT_PORT == 8790
+    assert lv.viewer_port() == lv.DEFAULT_PORT
+    monkeypatch.setenv("X5_LIVE_VIEWER_PORT", "8123")
+    assert lv.viewer_port() == 8123
+
+
+def test_viewer_port_rejects_nonsense(monkeypatch):
+    for bad in ("", "abc", "0", "-1", "70000", "6080.5"):
+        monkeypatch.setenv("X5_LIVE_VIEWER_PORT", bad)
+        assert lv.viewer_port() == lv.DEFAULT_PORT, bad
+
+
+def test_gate_base_is_loopback_on_its_own_port(monkeypatch):
+    monkeypatch.setenv("X5_LIVE_VIEWER_PORT", "8791")
+    assert lv.gate_base() == "http://127.0.0.1:8791/view"
+
+
+def test_publish_base_sets_the_switch_once(monkeypatch):
+    monkeypatch.delenv("X5_LIVE_PUBLIC_URL", raising=False)
+    assert lv.publish_base() is True
+    assert os.environ["X5_LIVE_PUBLIC_URL"] == lv.gate_base()
+    # An operator who set the variable stays in charge.
+    monkeypatch.setenv("X5_LIVE_PUBLIC_URL", "https://live.example.com/view")
+    assert lv.publish_base() is True
+    assert os.environ["X5_LIVE_PUBLIC_URL"] == "https://live.example.com/view"
+
+
+def test_relay_port_is_the_library_default():
+    # The gate proxies the library's own loopback relay, never a public port.
+    assert lv.relay_port() == 6080
+
+
+# -- tokens and authorization ----------------------------------------------
+
+
+def test_tokens_read_out_of_the_library_links():
+    links = {
+        "running": True,
+        "control": f"http://127.0.0.1:8790/view?scale=true&token={CONTROL}",
+        "preview": f"http://127.0.0.1:8790/view?scale=true&token={PREVIEW}&view_only=true",
+        "owner": "agent",
+    }
+    assert lv.tokens(links) == {"control": CONTROL, "preview": PREVIEW}
+
+
+def test_tokens_empty_without_a_session():
+    assert lv.tokens({}) == {}
+    assert lv.tokens({"running": True, "control": "", "preview": ""}) == {}
+    assert lv.tokens({"control": "http://x/view?scale=true"}) == {}
+
+
+def test_authorize_modes_and_rejections():
+    links = {
+        "control": f"http://x/view?token={CONTROL}",
+        "preview": f"http://x/view?token={PREVIEW}",
+    }
+    assert lv.authorize(CONTROL, links) == "control"
+    assert lv.authorize(PREVIEW, links) == "preview"
+    assert lv.authorize("", links) == ""
+    assert lv.authorize(None, links) == ""
+    assert lv.authorize("C" * 42, links) == ""
+    assert lv.authorize("Z" * 43, links) == ""
+
+
+# -- mode forcing -----------------------------------------------------------
+
+
+def test_inject_mode_forces_the_token_mode():
+    html = "        rfb.resizeSession = false;\n"
+    preview = lv.inject_mode(html, "preview")
+    assert "rfb.viewOnly = true;" in preview
+    assert "rfb.viewOnly = false;" not in preview
+    control = lv.inject_mode(html, "control")
+    assert "rfb.viewOnly = false;" in control
+    assert "rfb.viewOnly = true;" not in control
+    # An unknown mode and a page without the marker are left exactly as they are.
+    assert lv.inject_mode(html, "bogus") == html
+    assert lv.inject_mode("no marker here", "preview") == "no marker here"
+
+
+def test_viewer_page_comes_from_the_library():
+    pytest.importorskip("x5browser", reason="library page under test")
+    html = lv.viewer_html()
+    assert lv.MODE_MARKER in html  # this is the marker the gate patches
+
+
+# -- handlers (no socket) --------------------------------------------------
+
+
+def test_view_without_token_is_not_connect():
+    response = _run(lv.handle_view(_request("/view")))
+    assert response.status == 410
+    assert response.headers["Access-Control-Allow-Origin"] == "*"
+
+
+def test_view_with_unknown_token_is_not_connect(live_tokens):
+    response = _run(lv.handle_view(_request("/view?token=" + "Z" * 43)))
+    assert response.status == 410
+
+
+def test_view_serves_the_page_and_sets_the_gate_cookie(live_tokens):
+    response = _run(lv.handle_view(_request("/view?token=%s&view_only=false" % PREVIEW)))
+    assert response.status == 200
+    assert response.content_type == "text/html"
+    cookie = response.cookies[lv.COOKIE_NAME]
+    assert cookie.value == PREVIEW
+    assert cookie["httponly"] is True
+    # The token decides the mode: the query string cannot make it interactive.
+    assert b"rfb.viewOnly = true;" in response.body
+
+
+def test_websockify_requires_the_gate_cookie(live_tokens):
+    response = _run(lv.handle_websockify(_request("/websockify")))
+    assert response.status == 410
+    bogus = {lv.COOKIE_NAME: "bogus"}
+    response = _run(lv.handle_websockify(_request("/websockify", bogus)))
+    assert response.status == 410
+
+
+def test_asset_proxy_rejects_traversal():
+    from aiohttp import web
+
+    request = _request("/core/rfb.js", match_info={"tail": "../../etc/passwd"})
+    with pytest.raises(web.HTTPNotFound):
+        _run(lv.handle_asset(request))
+    empty = _request("/", match_info={"tail": ""})
+    with pytest.raises(web.HTTPNotFound):
+        _run(lv.handle_asset(empty))
+
+
+def test_asset_content_type_is_a_bare_media_type():
+    assert lv._content_type("text/html; charset=utf-8") == "text/html"
+    assert lv._content_type(None) == "application/octet-stream"
+
+
+# -- app surface -----------------------------------------------------------
+
+
+def test_app_exposes_only_the_three_routes():
+    app = lv._app()
+    paths = {resource.canonical for resource in app.router.resources()}
+    assert paths == {"/view", "/websockify", "/{tail}"}
+
+
+def test_start_and_stop_are_safe_to_repeat(monkeypatch):
+    monkeypatch.setattr(lv, "_runner", None)
+    monkeypatch.setattr(lv, "_port", 0)
+    assert lv.is_started() is False
+    assert lv.started_port() == 0
+    # Never started -> nothing to close.
+    assert _run(lv.stop_async()) is True
+    assert lv.is_started() is False
+
+
+def test_gate_binds_gates_and_closes(monkeypatch):
+    """End to end on a free port: bind, serve the viewer, refuse, ungate."""
+    pytest.importorskip("x5browser", reason="the gate serves the library page")
+    import socket
+
+    monkeypatch.setattr(lv, "_runner", None)
+    monkeypatch.setattr(lv, "_port", 0)
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    free_port = probe.getsockname()[1]
+    probe.close()
+    monkeypatch.setattr(lv, "viewer_port", lambda: free_port)
+
+    async def scenario():
+        import aiohttp
+
+        assert await lv.start_async() is True
+        assert lv.is_started() is True
+        assert lv.started_port() == free_port
+        try:
+            async with aiohttp.ClientSession() as client:
+                # No token -> the library's own Not Connect contract.
+                async with client.get(f"http://127.0.0.1:{free_port}/view") as response:
+                    assert response.status == 410
+                    assert (await response.json()) == lv.NOT_CONNECT
+                # A hand-made token is not a session token either.
+                async with client.get(
+                    f"http://127.0.0.1:{free_port}/view?token={'Z' * 43}"
+                ) as response:
+                    assert response.status == 410
+                # A real token serves the page with the gate cookie.
+                monkeypatch.setattr(lv, "tokens", lambda links=None: {"preview": PREVIEW})
+                async with client.get(
+                    f"http://127.0.0.1:{free_port}/view?token={PREVIEW}"
+                ) as response:
+                    assert response.status == 200
+                    body = await response.text()
+                    assert "rfb.viewOnly = true;" in body
+                    assert response.cookies[lv.COOKIE_NAME].value == PREVIEW
+                # The asset proxy answers 404/503 without a relay, never HTML.
+                async with client.get(
+                    f"http://127.0.0.1:{free_port}/core/rfb.js"
+                ) as resp:
+                    assert resp.status in (404, 503)
+        finally:
+            assert await lv.stop_async() is True
+        assert lv.is_started() is False
+        assert lv.started_port() == 0
+
+    _run(scenario())

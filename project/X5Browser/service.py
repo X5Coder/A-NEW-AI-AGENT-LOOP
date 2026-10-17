@@ -850,6 +850,10 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
     global _browser, _started
     lock = _lifecycle_lock()
     async with lock:
+        # Publish the gated live-viewer port BEFORE the library builds this
+        # session's links: the links must name the addressed viewer, not the
+        # raw loopback relay (which carries no authentication at all).
+        await _ensure_live_viewer()
         if _launcher_alive(_browser) and _started:
             # Reuse only while the endpoint truly answers: the relay flaps
             # (units stay active), and a blind reuse hands out a dead link.
@@ -1140,6 +1144,17 @@ async def _close_async() -> Any:
     Runs under the lifecycle lock: a close overlapping a start wins, and the
     overlapped start shuts itself back down (see _get_browser_async).
     """
+    try:
+        return await _close_browser_async()
+    finally:
+        # No live session is left to serve, so the gated viewer port closes
+        # with the browser (the next open publishes it again). Its session
+        # tokens die with the session, exactly like the library's links.
+        await _stop_live_viewer()
+
+
+async def _close_browser_async() -> Any:
+    """The close itself (see _close_async for the contract and the lock)."""
     global _browser, _started, _gen
     lock = _lifecycle_lock()
     async with lock:
@@ -1288,6 +1303,36 @@ def _housekeep_viewers() -> None:
         _threading.Thread(target=_run, daemon=True).start()
     except Exception:
         pass
+
+
+async def _ensure_live_viewer() -> bool:
+    """Publish the ONE token-gated live-viewer port (best-effort, never fatal).
+
+    With the gate up, the library mints this session's viewer links on the
+    gated port instead of the raw loopback relay, so the live view can be
+    watched from another machine without exposing the unauthenticated relay.
+    Any failure leaves the library's own links untouched — the browser keeps
+    working exactly as before. Never raises.
+    """
+    try:
+        from . import liveviewer
+
+        if not await liveviewer.start_async():
+            return False
+        liveviewer.publish_base()
+        return True
+    except Exception:
+        return False
+
+
+async def _stop_live_viewer() -> bool:
+    """Close the gated viewer port (no session left to serve). Never raises."""
+    try:
+        from . import liveviewer
+
+        return await liveviewer.stop_async()
+    except Exception:
+        return False
 
 
 def _empty_links() -> dict:

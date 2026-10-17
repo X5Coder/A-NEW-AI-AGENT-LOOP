@@ -310,7 +310,9 @@ def _normalize(name: str, event: str, raw: Any) -> dict:
         return {"event": event, "ok": True, "text": _truncate(raw.strip()), "has_screenshot": False}
     if isinstance(raw, dict):
         # The library reports ok=False for refusals (already_running,
-        # already_closed, ...): never mask one as a success.
+        # already_closed, ...): never mask a real one as a success. The two
+        # refusals that only report an already-satisfied state are handled by
+        # _state_notice below, not silently dropped here.
         bounded: dict[str, Any] = {"event": event,
                                    "ok": bool(raw.get("ok", True)),
                                    "has_screenshot": False}
@@ -335,6 +337,50 @@ def _normalize(name: str, event: str, raw: Any) -> dict:
     if isinstance(raw, list):
         return {"event": event, "ok": True, "items": raw[:100], "has_screenshot": False}
     return {"event": event, "ok": True, "result": str(raw)[:4000], "has_screenshot": False}
+
+
+def _state_notice(name: str, out: dict) -> str:
+    """The notice key when a refusal only reports an already-satisfied state.
+
+    The service layer boots and verifies the browser itself, so the library's
+    own open_browser answers ``already_running`` on every real start (and
+    close_browser may answer ``already_closed``). The requested end state
+    holds either way, so these two are success-with-notice — anything else
+    stays a failure. Returns "" when the output is a real result/failure.
+    """
+    if not isinstance(out, dict) or out.get("ok") or name not in (
+        "open_browser",
+        "close_browser",
+    ):
+        return ""
+    message = str(out.get("message") or out.get("error") or "")
+    for notice in ("already_running", "already_closed"):
+        prefix = f"error: {notice}"
+        if not message.startswith(prefix):
+            continue
+        rest = message[len(prefix):]
+        # The notice must be the whole code ("error: already_running - ..."):
+        # a different refusal that merely starts the same way
+        # (already_running_in_a_foreign_profile) stays a failure.
+        if rest == "" or rest.startswith(" -"):
+            return notice
+    return ""
+
+
+def _apply_state_notice(name: str, out: dict) -> dict:
+    """Turn a state-satisfied refusal into a clear success (in place)."""
+    notice = _state_notice(name, out)
+    if not notice:
+        return out
+    out["notice"] = notice
+    out["ok"] = True
+    out["message"] = (
+        "browser running (it was already up). Use browser_status for info or "
+        "restart_browser to restart it."
+        if notice == "already_running"
+        else "browser stopped (it was already closed)."
+    )
+    return out
 
 
 def _attach_auto_preview(out: dict) -> None:
@@ -605,6 +651,11 @@ def execute_browser_tool(name: str, args: Any) -> dict:
         except Exception:
             pass
     out = _normalize(name, event, raw)
+    # The service layer boots/verifies the browser before the library tool
+    # runs, so "already running" (and "already closed") is the normal answer
+    # for a satisfied request: report it as the success it is, keeping the
+    # reason visible in the message.
+    out = _apply_state_notice(name, out)
     if name == "open_browser":
         if not already_running:
             # Fresh start only: homepage tab in front, every other tab closed.

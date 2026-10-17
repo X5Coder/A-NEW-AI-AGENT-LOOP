@@ -135,9 +135,14 @@ async function init() {
       initGateway(),
       initSettings(),
     ]);
-    // Let the cached paint land + the entrance play, then reveal.
+    // Lift when the cached paint is really on screen, not on a fixed timer:
+    // a floor keeps the entrance beat readable, a ceiling keeps one slow
+    // fetch from trapping the splash. Revealing earlier is what made the
+    // chat pop in after the splash had already gone.
+    const beat = new Promise((resolve) => setTimeout(resolve, 700));
+    const ceiling = new Promise((resolve) => setTimeout(resolve, 2500));
     try {
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      await Promise.race([Promise.all([beat, background]), ceiling]);
     } catch (_) {}
     hideBootSplash();
     replayEntrance();

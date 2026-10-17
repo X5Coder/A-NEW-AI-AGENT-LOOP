@@ -13,7 +13,8 @@ Flow (exactly, nothing else):
      (HF_TOKEN optional: higher HuggingFace rate limits on slow networks;
      the model fetch runs in a child process so its progress bars can never
      draw over the owner prompt - see _fetch_embedding_model)
-  6. firewall step (best-effort open of TCP 7777)
+  6. firewall step (best-effort open of TCP 7777 console + the gated
+     live-viewer port 8790; the raw loopback relay stays closed)
   7. browser check (X5Browser doctor: Chrome + environment, offers --fix)
   8. email + password (flags/env X5_EMAIL+X5_PASSWORD or prompt; rules from
      web.server.console_auth: an English Gmail address + a min 8 character
@@ -654,6 +655,35 @@ def ensure_firewall(port: int = CONSOLE_PORT) -> None:
     manual command. The console binds every interface, so this port is what
     lets other machines reach it; without it only this host can open it.
     """
+    for target in _firewall_ports(port):
+        _open_firewall_port(target)
+
+
+def _firewall_ports(console_port: int) -> tuple[int, ...]:
+    """Console port + the gated live-viewer port (one public port each).
+
+    The live view publishes its own token-gated port; the raw loopback relay
+    behind it is never opened.
+    """
+    ports: list[int] = []
+    for candidate in (console_port, _live_viewer_port()):
+        if isinstance(candidate, int) and 1 <= candidate <= 65535 and candidate not in ports:
+            ports.append(candidate)
+    return tuple(ports)
+
+
+def _live_viewer_port() -> int:
+    """The live-viewer port from its single owner (X5Browser.liveviewer)."""
+    try:
+        from X5Browser.liveviewer import viewer_port
+
+        return int(viewer_port())
+    except Exception:
+        return 8790
+
+
+def _open_firewall_port(port: int) -> None:
+    """Open ONE TCP port with whichever firewall tool this host has."""
     _step(f"firewall (open TCP port {port}, best-effort)")
     try:
         if shutil.which("ufw"):

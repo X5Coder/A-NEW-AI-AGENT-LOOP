@@ -1,7 +1,13 @@
 {
-  "version": "0.63.0",
-  "description": "Remote access no longer uses Tailscale: the whole tunnel/Funnel layer is removed. The console now binds every interface and is reached directly at http://<your-ip>:7777/ (the owner login is still the only gate), so a VPS install opens by its own address with no extra service, no registration link and no admin approval step. Remote links in chat replies point at that same address.",
+  "version": "0.64.0",
+  "description": "The live browser view is now reachable from anywhere through one gated port: the viewer link carries the session's own token, so a remote console opens the live page at http://<your-ip>:8790/ (the raw relay port stays closed, never exposed). Also: starting the browser reports success with a note when it is already running instead of a failed step, the boot splash lifts only after the cached data has painted, and the insecure-connection notice shows once per tab.",
   "features": [
+    "Remote live browser view: the browser publishes one token-gated viewer port (8790 by default, X5_LIVE_VIEWER_PORT to change it) and the viewer link carries the session token, so the live page opens on your console address from any machine.",
+    "The raw relay port (6080) stays loopback-only: the gate serves the library's own viewer page, proxies the stream and the noVNC assets, forces the mode from the token (a preview link can never become interactive), and answers Not Connect (410) to anything without a live token.",
+    "The gate opens with the browser and closes with it, and the installer opens its port in the firewall next to the console port (best-effort, never fatal).",
+    "Starting the browser no longer shows a failed step when it is already running (uptime note kept); real refusals still fail clearly.",
+    "Refresh paints under the black splash: the splash lifts only after the cached data really landed (700ms floor, 2.5s ceiling), so chat and dashboard no longer pop in after the reveal.",
+    "The insecure-connection notice about the live view appears once per tab instead of on every refresh.",
     "Tailscale/Funnel is gone: no tunnel, no registration link, no admin approval, no tailscale.json.",
     "The console binds every interface on port 7777, so it opens directly at http://<your-ip>:7777/.",
     "Setup is six steps instead of seven (the public-link step was removed) and the report shows the local and the reachable URL.",

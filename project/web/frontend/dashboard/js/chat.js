@@ -5540,7 +5540,13 @@ function liveFrame(url) {
 // "noVNC requires a secure context (TLS)" when the console is opened over
 // plain http on a LAN IP. localhost and https are secure contexts and stay
 // quiet. This explains it once instead of letting the console warn alone.
+// The flag lives in sessionStorage, so a refresh does not repeat a notice
+// the user already read in this tab.
+const INSECURE_NOTICE_KEY = "x5_insecure_live_notice";
 let insecureLiveWarned = false;
+try {
+  insecureLiveWarned = sessionStorage.getItem(INSECURE_NOTICE_KEY) === "1";
+} catch (_) {}
 function warnInsecureLiveOnce() {
   if (insecureLiveWarned) return;
   let insecure = false;
@@ -5549,6 +5555,9 @@ function warnInsecureLiveOnce() {
   } catch (_) {}
   if (!insecure) return;
   insecureLiveWarned = true;
+  try {
+    sessionStorage.setItem(INSECURE_NOTICE_KEY, "1");
+  } catch (_) {}
   try {
     toast("Live view is on an insecure connection — open via localhost or HTTPS to silence the noVNC secure-context warning");
   } catch (_) {}
