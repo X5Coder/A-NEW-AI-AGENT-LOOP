@@ -19,6 +19,7 @@ Lifecycle (explicit, owned here):
 from __future__ import annotations
 
 import json
+import queue
 import re
 import shutil
 import subprocess
@@ -32,6 +33,7 @@ TAILNET_INSTALL_URL = "https://tailscale.com/download"
 LOGIN_URL_RE = re.compile(r"https://login\.tailscale\.com/[^\s'\"]+")
 CMD_TIMEOUT = 30
 LOGIN_WAIT_SEC = 180
+LOGIN_MAX_ATTEMPTS = 3
 FUNNEL_PORT = 443
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -213,15 +215,29 @@ def _open_url_best_effort(url: str) -> bool:
     return False
 
 
-def login_interactive(bin_path: str) -> bool:
-    """Run `tailscale login`, print + open the registration URL, wait for login.
+def _announce_login_url(url: str, attempt: int) -> None:
+    """Print one registration link in a clean action box (a fresh link per try)."""
+    if attempt > 1:
+        print(f"  link expired - issuing a fresh one "
+              f"(attempt {attempt}/{LOGIN_MAX_ATTEMPTS}) ...")
+    print("  " + "=" * 66)
+    print("  >>> OPEN THIS LINK TO REGISTER TAILSCALE:")
+    print(f"  >>> {url}")
+    print("  " + "=" * 66)
+    _open_url_best_effort(url)
 
-    Returns True when `tailscale status --json` reports Running.
-    Never raises; bounded wait (LOGIN_WAIT_SEC).
+
+def _login_once(bin_path: str, attempt: int) -> bool:
+    """One `tailscale login` run: show its link, wait up to LOGIN_WAIT_SEC.
+
+    Returns True once `tailscale status` reports Running or when the login
+    process exits (bounded either way). The process is always terminated on
+    exit so a later attempt can mint a fresh link. Never raises.
+
+    The child's output is drained by a daemon thread into a queue so the wait
+    loop never blocks on a silent process: a plain `for line in stdout` hangs
+    forever when `tailscale login` stops printing after the link.
     """
-    print("  Tailscale registration (one time, ~30 seconds).")
-    print("  Waiting up to 3 minutes - finish in your browser and this "
-          "continues by itself ...")
     try:
         proc = subprocess.Popen(
             [bin_path, "login"],
@@ -231,48 +247,86 @@ def login_interactive(bin_path: str) -> bool:
     except OSError as e:
         print(f"  ERROR: cannot start tailscale login ({e})", file=sys.stderr)
         return False
+
+    lines: queue.Queue = queue.Queue()
+    end = object()
+
+    def _pump() -> None:
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                lines.put(line)
+        except Exception:
+            pass
+        finally:
+            lines.put(end)
+
+    threading.Thread(target=_pump, daemon=True).start()
+
     opened = False
     start = time.time()
     last_beat = start
+    last_check = start
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.strip()
-            if line:
-                print(f"  tailscale: {line[:200]}")
-            url = _extract_login_url(line)
-            if url and not opened:
-                opened = True
-                print("  " + "=" * 66)
-                print("  >>> REGISTER HERE (open on YOUR computer or phone):")
-                print(f"  >>> {url}")
-                print("  " + "=" * 66)
-                if _open_url_best_effort(url):
-                    print("  (opened in a browser automatically)")
-                else:
-                    print("  (no browser on this server - copy the link above "
-                          "into your own browser)")
-            if login_status(bin_path).get("logged_in"):
-                break
+        while True:
+            try:
+                item = lines.get(timeout=0.5)
+            except queue.Empty:
+                item = None
+            if item is end:
+                return bool(login_status(bin_path).get("logged_in"))
+            if isinstance(item, str):
+                text = item.strip()
+                # The URL (and its boilerplate) is shown once in the box below,
+                # so only other output (errors, notes) is echoed.
+                if text and not _extract_login_url(text) \
+                        and "to authenticate" not in text.lower():
+                    print(f"  tailscale: {text[:200]}")
+                url = _extract_login_url(text)
+                if url and not opened:
+                    opened = True
+                    _announce_login_url(url, attempt)
             now = time.time()
+            if now - last_check >= 3:
+                last_check = now
+                if login_status(bin_path).get("logged_in"):
+                    return True
             if now - last_beat >= 20:
                 last_beat = now
                 left = max(0, int(LOGIN_WAIT_SEC - (now - start)))
-                print(f"  still waiting for the browser login ... "
+                print(f"  waiting for you to finish in the browser ... "
                       f"({left // 60}:{left % 60:02d} left)")
             if now - start > LOGIN_WAIT_SEC:
-                break
+                return False
     except Exception:
-        pass
+        return False
     finally:
         try:
             if proc.poll() is None:
                 proc.terminate()
         except Exception:
             pass
-    ok = bool(login_status(bin_path).get("logged_in"))
-    print("  OK: Tailscale logged in" if ok else "  WARN: login not completed (run `tailscale login` manually)")
-    return ok
+
+
+def login_interactive(bin_path: str) -> bool:
+    """Register Tailscale, auto-renewing the one-time link when it expires.
+
+    A registration link is single-use and times out; when it does (the wait
+    window elapses or the login process exits without auth) a fresh link is
+    minted automatically, up to LOGIN_MAX_ATTEMPTS times, so the user never
+    has to re-run the installer just because they were slow to open it.
+    Returns True when `tailscale status --json` reports Running. Never raises.
+    """
+    print("  Tailscale registration (one time, ~30 seconds).")
+    print("  Open the link below on your own computer or phone; this continues "
+          "by itself. If it expires, a fresh link is issued automatically.")
+    for attempt in range(1, LOGIN_MAX_ATTEMPTS + 1):
+        if _login_once(bin_path, attempt) \
+                or login_status(bin_path).get("logged_in"):
+            print("  OK: Tailscale logged in")
+            return True
+    print("  WARN: login not completed (run `tailscale login` manually)")
+    return False
 
 
 FUNNEL_APPROVAL_RE = re.compile(r"https://login\.tailscale\.com/f/funnel[^\s'\"]*")

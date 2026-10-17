@@ -53,6 +53,46 @@ def test_login_status_logged_in(monkeypatch):
     assert info == {"logged_in": True, "dns": "desk.example.ts.net"}
 
 
+def test_announce_login_url_clean_box(monkeypatch, capsys):
+    monkeypatch.setattr(ts, "_open_url_best_effort", lambda url: False)
+    ts._announce_login_url("https://login.tailscale.com/a/xyz", attempt=1)
+    out = capsys.readouterr().out
+    assert "https://login.tailscale.com/a/xyz" in out
+    assert "no browser" not in out.lower()
+    ts._announce_login_url("https://login.tailscale.com/a/abc", attempt=2)
+    out = capsys.readouterr().out
+    assert "https://login.tailscale.com/a/abc" in out
+    assert "fresh" in out.lower()
+
+
+def test_login_interactive_renews_until_success(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_once(bin_path, attempt):
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    monkeypatch.setattr(ts, "_login_once", fake_once)
+    monkeypatch.setattr(ts, "login_status",
+                        lambda b: {"logged_in": False, "dns": None})
+    assert ts.login_interactive("tailscale") is True
+    assert calls["n"] == 3
+
+
+def test_login_interactive_bounded(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_once(bin_path, attempt):
+        calls["n"] += 1
+        return False
+
+    monkeypatch.setattr(ts, "_login_once", fake_once)
+    monkeypatch.setattr(ts, "login_status",
+                        lambda b: {"logged_in": False, "dns": None})
+    assert ts.login_interactive("tailscale") is False
+    assert calls["n"] == ts.LOGIN_MAX_ATTEMPTS
+
+
 def test_enable_funnel_saves_record(monkeypatch, tmp_path):
     class Proc:
         returncode = 0
