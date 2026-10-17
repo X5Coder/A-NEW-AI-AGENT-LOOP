@@ -17,9 +17,10 @@ Flow (exactly, nothing else):
   7. browser check (X5Browser doctor: Chrome + environment, offers --fix)
   8. email + password (flags/env X5_EMAIL+X5_PASSWORD or prompt; salted hash
      in Data, never plaintext)
-  9. opens the console in the browser + prints the local and reachable URLs
-     (the console binds every interface, so the machine's own address works;
-     the owner login is the only gate)
+   9. completion screen on every run: the X5 logo, then the public link and
+      the local link (nothing else between them), then the console is opened
+      (the console binds every interface, so the machine's own address works;
+      the owner login is the only gate)
    10. with --run: starts the console detached (persistent, survives SSH
        close; same server as `python -m web.server.server`) so install+start
        is one command. `--foreground` keeps the old blocking behavior.
@@ -824,6 +825,94 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
         return False
 
 
+# --- completion screen: the X5 logo, then the two console links ------------
+# Presentation only. Colour appears on a real terminal and never when NO_COLOR
+# is set; the block art falls back to plain text when the console cannot
+# encode it. Same screen on every run (install and update).
+
+_LOGO_ART = (
+    "██╗  ██╗███████╗",
+    "╚██╗██╔╝██╔════╝",
+    " ╚███╔╝ ███████╗",
+    " ██╔██╗ ╚════██║",
+    "██╔╝ ██╗███████║",
+    "╚═╝  ╚═╝╚══════╝",
+)
+_LOGO_WORD = ("  A G E N T", "", "  ─────────────", "  terminal-native",
+              "  autonomous agent", "")
+_LOGO_PLAIN = "X5  A G E N T"
+_LOGO_START, _LOGO_MID, _LOGO_END = (34, 211, 238), (167, 139, 250), (244, 114, 182)
+_GRAY_TEXT, _WHITE_TEXT, _CYAN_TEXT = (120, 130, 145), (235, 240, 245), (34, 211, 238)
+_RESET = "\033[0m"
+
+
+def _use_color() -> bool:
+    """ANSI output only on a real terminal (and never when NO_COLOR is set)."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    try:
+        return bool(sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _can_encode(text: str) -> bool:
+    try:
+        text.encode(getattr(sys.stdout, "encoding", None) or "utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _lerp_rgb(a: tuple, b: tuple, t: float) -> tuple:
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def _paint(text: str, rgb=None, style: str = "") -> str:
+    """Colour/style one run of text; a no-op when colour is off."""
+    if not _use_color():
+        return text
+    prefix = f"\033[38;2;{rgb[0]};{rgb[1]};{rgb[2]}m" if rgb else ""
+    return f"{style}{prefix}{text}{_RESET}"
+
+
+def _gradient_text(text: str, start: tuple, end: tuple) -> str:
+    """Left-to-right colour ramp over one line."""
+    if not _use_color():
+        return text
+    last = max(len(text) - 1, 1)
+    return "".join(_paint(ch, _lerp_rgb(start, end, i / last))
+                   for i, ch in enumerate(text))
+
+
+def logo_banner() -> str:
+    """The X5 logo with its cyan-to-pink gradient (plain text when colour is off)."""
+    if not _can_encode("".join(_LOGO_ART)):
+        return "  " + _LOGO_PLAIN
+    rows = []
+    last = max(len(_LOGO_ART) - 1, 1)
+    for i, art in enumerate(_LOGO_ART):
+        t = i / last
+        row = _gradient_text(art, _lerp_rgb(_LOGO_START, _LOGO_MID, t),
+                             _lerp_rgb(_LOGO_MID, _LOGO_END, t))
+        word = _LOGO_WORD[i] if i < len(_LOGO_WORD) else ""
+        rows.append("  " + row + _paint(word, _WHITE_TEXT, "\033[1m"))
+    return "\n".join(rows)
+
+
+_BOLD = "\033[1m"
+
+
+def print_completion(local_url: str = UI_URL, public_url: str = "") -> None:
+    """The logo, then the public + local links - nothing else between them."""
+    print("\n" + logo_banner(), flush=True)
+    print(f"  {_paint('Public', _GRAY_TEXT)}  {_paint(public_url, _CYAN_TEXT, _BOLD)}",
+          flush=True)
+    print(f"  {_paint('Local ', _GRAY_TEXT)}  {_paint(local_url, _WHITE_TEXT)}  "
+          f"{_paint('(this machine only)', _GRAY_TEXT)}", flush=True)
+    print(flush=True)
+
+
 def main(argv=None) -> int:
     enable_ordered_output()
     args = parse_args(argv)
@@ -865,11 +954,7 @@ def main(argv=None) -> int:
             webbrowser.open(web_url)
         except Exception:
             pass
-    print("\n" + "=" * 70)
-    print(f"  Web Server (Local):     {UI_URL}")
-    print(f"  Web Server (Reachable): {web_url}")
-    print("  Server Running Now" if args.run else "  Server Ready")
-    print("=" * 70)
+    print_completion(UI_URL, web_url)
     if args.run:
         already, stopper = False, None
         try:
@@ -907,13 +992,12 @@ def main(argv=None) -> int:
         os.chdir(str(PROJECT_ROOT))
         pid, log_path = _launch(CONSOLE_PORT)
         if _probe2 is not None and _probe2(CONSOLE_PORT):
-            print(f"  console running persistently at {web_url} "
-                  f"(pid {pid}, log {log_path})")
-            print("  safe to close this terminal/SSH now - re-run the same "
-                  "one-liner to restart, `x5agent --off` to stop")
+            _ok(f"console running now (pid {pid}) - safe to close this window "
+                "(stop: x5agent --off)")
             return 0
         print(f"  start failed - see log: {log_path}", file=sys.stderr)
         return 1
+    _ok("ready - start the console with: x5agent")
     return 0
 
 

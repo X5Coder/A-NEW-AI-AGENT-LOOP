@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import io
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -281,3 +282,62 @@ def test_fetch_worker_is_valid_python_and_never_in_process():
     assert "ensure_embedding_model(sync=True)" not in body, (
         "in-process download draws \\r bars that overwrite the owner prompt")
     assert "import ensure_embedding_model" not in body
+
+
+# --- completion screen: the logo, then the two links ----------------------
+
+LOCAL_URL = "http://127.0.0.1:7777/"
+PUBLIC_URL = "http://13.140.164.29:7777/"
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def _completion_output(tty: bool) -> str:
+    fake = _FakeTerminal(tty=tty)
+    original = sys.stdout
+    sys.stdout = fake  # type: ignore[assignment]
+    try:
+        install.print_completion(LOCAL_URL, PUBLIC_URL)
+    finally:
+        sys.stdout = original
+    return fake.getvalue()
+
+
+def test_completion_shows_the_logo_then_both_links(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    out = _completion_output(tty=True)
+    assert "\033[38;2;" in out, "a terminal gets the gradient colour"
+    plain = _ANSI_RE.sub("", out)
+    assert install._LOGO_ART[0] in plain, "the X5 logo must be printed"
+    assert "A G E N T" in plain, "the wordmark must be printed"
+    lines = plain.splitlines()
+    public = next(i for i, line in enumerate(lines) if PUBLIC_URL in line)
+    local = next(i for i, line in enumerate(lines) if LOCAL_URL in line)
+    assert public < local, "public link first, local link second"
+    assert lines[public].strip().startswith("Public"), "the public line is labelled"
+    assert lines[local].strip().startswith("Local"), "the local line is labelled"
+    assert plain.count("http://") == 2, "only the two links belong under the logo"
+
+
+def test_completion_is_plain_when_not_a_terminal(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    out = _completion_output(tty=False)
+    assert "\033" not in out, "no escape codes when piped (curl|bash logs)"
+    assert install._LOGO_ART[0] in out and PUBLIC_URL in out and LOCAL_URL in out
+
+
+def test_completion_respects_no_color(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert "\033" not in _completion_output(tty=True)
+
+
+def test_completion_falls_back_to_plain_text_when_art_cannot_be_encoded():
+    assert install._can_encode(install._LOGO_ART[0])
+    assert install.logo_banner().startswith("  ")
+
+
+def test_main_always_prints_the_completion_screen():
+    source = INSTALL_PY.read_text(encoding="utf-8")
+    body = source[source.index("def main("):]
+    assert body.count("print_completion(") == 1
+    assert body.index("print_completion(") < body.index("if args.run:")
+    assert "Web Server (Local)" not in body, "the old boxed report must be gone"
