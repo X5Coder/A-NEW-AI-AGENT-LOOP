@@ -288,7 +288,11 @@ def test_fetch_worker_is_valid_python_and_never_in_process():
 
 LOCAL_URL = "http://127.0.0.1:7777/"
 PUBLIC_URL = "http://13.140.164.29:7777/"
-_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_CONTROL_RE = re.compile(r"\033\]8;;[^\033]*\033\\|\033\[[0-9;]*m")
+
+
+def _completion_text(tty: bool) -> str:
+    return _CONTROL_RE.sub("", _completion_output(tty))
 
 
 def _completion_output(tty: bool) -> str:
@@ -305,8 +309,8 @@ def _completion_output(tty: bool) -> str:
 def test_completion_shows_the_logo_then_both_links(monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     out = _completion_output(tty=True)
-    assert "\033[38;2;" in out, "a terminal gets the gradient colour"
-    plain = _ANSI_RE.sub("", out)
+    assert "\033[38;2;" in out, "a terminal gets colour"
+    plain = _completion_text(tty=True)
     assert install._LOGO_ART[0] in plain, "the X5 logo must be printed"
     assert "A G E N T" in plain, "the wordmark must be printed"
     lines = plain.splitlines()
@@ -316,6 +320,23 @@ def test_completion_shows_the_logo_then_both_links(monkeypatch):
     assert lines[public].strip().startswith("Public"), "the public line is labelled"
     assert lines[local].strip().startswith("Local"), "the local line is labelled"
     assert plain.count("http://") == 2, "only the two links belong under the logo"
+
+
+def test_logo_is_white_and_carries_no_tagline(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    white = "\033[38;2;255;255;255m"
+    assert white in _completion_output(tty=True), "the X5 art must be white"
+    plain = _completion_text(tty=True)
+    assert "terminal-native" not in plain
+    assert "autonomous agent" not in plain
+
+
+def test_completion_links_are_ctrl_clickable_on_a_terminal(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    out = _completion_output(tty=True)
+    assert f"\033]8;;{PUBLIC_URL}\033\\" in out, "public link must be a terminal hyperlink"
+    assert f"\033]8;;{LOCAL_URL}\033\\" in out, "local link must be a terminal hyperlink"
+    assert out.count("\033]8;;") == 4, "two links = two open + two close sequences"
 
 
 def test_completion_is_plain_when_not_a_terminal(monkeypatch):
@@ -341,3 +362,5 @@ def test_main_always_prints_the_completion_screen():
     assert body.count("print_completion(") == 1
     assert body.index("print_completion(") < body.index("if args.run:")
     assert "Web Server (Local)" not in body, "the old boxed report must be gone"
+    assert "starting console now" not in body, "the end screen stays logo + links only"
+    assert "console running now" not in body, "the end screen stays logo + links only"
