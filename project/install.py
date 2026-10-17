@@ -10,7 +10,9 @@ Flow (exactly, nothing else):
   4. source-only update (git pull --ff-only: tracked code only,
      NEVER touches X5Agent/Data, embedding_model/, or any user data)
   5. bundled embedding check (offline) + tool/trigger embeddings ready
-     (HF_TOKEN optional: higher HuggingFace rate limits on slow networks)
+     (HF_TOKEN optional: higher HuggingFace rate limits on slow networks;
+     the model fetch runs in a child process so its progress bars can never
+     draw over the owner prompt - see _fetch_embedding_model)
   6. firewall step (best-effort open of TCP 7777)
   7. browser check (X5Browser doctor: Chrome + environment, offers --fix)
   8. email + password (flags/env X5_EMAIL+X5_PASSWORD or prompt; salted hash
@@ -37,6 +39,8 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -263,14 +267,21 @@ def enable_ordered_output() -> None:
     Block-buffered stdout is what makes the owner prompt look broken: the
     prompt is written straight to the terminal, while everything printed
     before it (step titles, download progress) sits in the buffer and gets
-    flushed afterwards - so the download output appears to swallow the
-    prompt. Line buffering keeps every line in the order it happened.
+    flushed afterwards - so the earlier output appears to swallow the prompt.
+
+    write_through (not just line_buffering) matters because progress bars are
+    drawn as \\r-rewritten frames WITHOUT a newline: line buffering alone keeps
+    them pending until some later write/read flushes the buffer, which is how
+    the last frames of a download ended up drawn on top of the email prompt.
     """
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(line_buffering=True)
+            stream.reconfigure(line_buffering=True, write_through=True)
         except Exception:
-            pass
+            try:
+                stream.reconfigure(line_buffering=True)
+            except Exception:
+                pass
 
 
 def _step(title: str) -> None:
@@ -435,6 +446,92 @@ def update_source() -> bool:
         return False
 
 
+def _last_log_tail(path: Path, limit: int = 4000) -> str:
+    """Tail of a log file without ever loading a big file into memory."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > limit:
+                fh.seek(size - limit)
+            return fh.read().decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+
+
+def _model_size_mb() -> float:
+    """Bytes already on disk for the embedding model (installer progress line)."""
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from core.embedding.bootstrap import embedding_dir
+
+        total = 0
+        for item in embedding_dir().rglob("*"):
+            try:
+                if item.is_file():
+                    total += item.stat().st_size
+            except OSError:
+                continue
+        return total / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+
+# The model download runs in a CHILD process on purpose. huggingface_hub (tqdm)
+# and hf_xet (compiled Rust) both draw \\r progress bars, and the xet bar thread
+# keeps drawing its final frames a moment AFTER the call returns - those frames
+# landed on top of the owner prompt, so the "email:" line looked swallowed and
+# untypable. A child whose stdout/stderr point at a temp log cannot touch the
+# console at all, and this process prints its own plain progress lines.
+_WORKER_FETCH = (
+    "import sys; sys.path.insert(0, sys.argv[1]);"
+    "from core.embedding.bootstrap import ensure_embedding_model;"
+    "ensure_embedding_model(sync=True)"
+)
+
+
+def _fetch_embedding_model(timeout: int = 3600) -> tuple[bool, str]:
+    """Fetch/verify the embedding model with its console output isolated.
+
+    Returns (ok, detail): detail is the log tail on failure, empty on success.
+    """
+    handle, log_name = tempfile.mkstemp(prefix="x5-embed-fetch-", suffix=".log")
+    os.close(handle)
+    log_path = Path(log_name)
+    env = os.environ.copy()
+    # Python-side bars stay out of the log (the Rust ones may still write there,
+    # which is harmless: the file is diagnostics-only and deleted right after).
+    env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    stop = threading.Event()
+
+    def _report_size() -> None:
+        while not stop.wait(5):
+            print(f"  ... embedding model: {_model_size_mb():.0f} MB on disk", flush=True)
+
+    reporter = threading.Thread(target=_report_size, daemon=True)
+    reporter.start()
+    try:
+        with log_path.open("wb") as log_file:
+            proc = subprocess.run(
+                [sys.executable, "-c", _WORKER_FETCH, str(PROJECT_ROOT)],
+                cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL,
+                stdout=log_file, stderr=subprocess.STDOUT,
+                timeout=timeout, env=env,
+            )
+        if proc.returncode == 0:
+            return True, ""
+        return False, (_last_log_tail(log_path) or f"exit {proc.returncode}")
+    except subprocess.TimeoutExpired:
+        return False, f"download timed out after {timeout}s - re-run to resume"
+    except Exception as e:
+        return False, str(e)[:200]
+    finally:
+        stop.set()
+        try:
+            log_path.unlink()
+        except OSError:
+            pass
+
+
 def ensure_resources(hf_token: str = "") -> bool:
     """Embedding model (auto-download on first run, delta check on updates) + prebuilt tool/trigger embeddings.
 
@@ -443,9 +540,6 @@ def ensure_resources(hf_token: str = "") -> bool:
     slow networks). Anonymous download is the default and works fine.
     """
     _step("4/6 resources (embedding auto-fetch + prebuilt embeddings)")
-    sys.path.insert(0, str(PROJECT_ROOT))
-    from core.embedding.bootstrap import ensure_embedding_model
-
     token = (hf_token or os.environ.get("HF_TOKEN") or "").strip()
     if token:
         os.environ["HF_TOKEN"] = token
@@ -453,11 +547,10 @@ def ensure_resources(hf_token: str = "") -> bool:
     else:
         print("  info: no HF_TOKEN — anonymous HuggingFace download "
               "(fine on normal networks; set HF_TOKEN=hf_xxx on slow/capped ones)")
-    try:
-        # sync=True: check first - current files are skipped, only deltas download.
-        ensure_embedding_model(sync=True)
-    except Exception as e:
-        print(f"  ERROR: embedding model not ready: {e}", file=sys.stderr)
+    # sync=True: check first - current files are skipped, only deltas download.
+    ok, detail = _fetch_embedding_model()
+    if not ok:
+        print(f"  ERROR: embedding model not ready: {detail}", file=sys.stderr)
         return False
     _ok("embedding model ready")
     try:
@@ -614,14 +707,29 @@ def _owner_exists() -> bool:
     return False
 
 
+def _flush_streams() -> None:
+    """Push already-written output out before the screen is wiped.
+
+    Anything still buffered at clear time would otherwise be flushed later and
+    drawn on top of the prompt (the \\r-frame case). Never raises.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+
+
 def _clear_screen() -> None:
     """Wipe the screen (and scrollback) before the owner prompt.
 
-    The download progress bars are extremely long \\r-rewritten lines; only
-    an explicit ANSI clear removes them, so the email prompt is never buried
-    under leftover install output. Blank lines are the fallback when stdout
-    is not a terminal.
+    Progress output (pip, model download) leaves extremely long \\r-rewritten
+    lines behind; only an explicit ANSI clear removes them, so the email prompt
+    is never buried under leftover install output. Pending output is flushed
+    first so nothing can land on the prompt afterwards. Blank lines are the
+    fallback when stdout is not a terminal.
     """
+    _flush_streams()
     if sys.stdout.isatty():
         try:
             sys.stdout.write("\033[H\033[2J\033[3J")

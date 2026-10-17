@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import io
+import subprocess
 import sys
 from pathlib import Path
 
@@ -68,6 +69,53 @@ def test_helpers_print_with_flush():
         body = source[source.index(helper):]
         body = body[:body.index("\n\n\n", 0) if "\n\n\n" in body else len(body)]
         assert "flush=True" in body, f"{helper} must flush"
+
+
+def test_enable_ordered_output_writes_through():
+    """\\r progress frames carry no newline: they must flush when written.
+
+    Line buffering alone left the last download frames pending until the next
+    read, so they were drawn on top of the email prompt.
+    """
+    stream = io.TextIOWrapper(io.BytesIO(), line_buffering=False, write_through=False)
+    original = sys.stdout
+    sys.stdout = stream  # type: ignore[assignment]
+    try:
+        install.enable_ordered_output()
+        assert stream.write_through is True
+    finally:
+        sys.stdout = original
+
+
+class _RecordingTerminal(_FakeTerminal):
+    """Terminal that records the order of writes and flushes."""
+
+    def __init__(self, tty: bool, events: list[str]) -> None:
+        super().__init__(tty)
+        self.events = events
+
+    def write(self, text):  # type: ignore[override]
+        self.events.append("write:" + text)
+        return super().write(text)
+
+    def flush(self) -> None:  # type: ignore[override]
+        self.events.append("flush")
+        super().flush()
+
+
+def test_clear_screen_flushes_pending_output_before_clearing():
+    events: list[str] = []
+    out = _RecordingTerminal(True, events)
+    err = _RecordingTerminal(True, events)
+    original_out, original_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err  # type: ignore[assignment]
+    try:
+        install._clear_screen()
+    finally:
+        sys.stdout, sys.stderr = original_out, original_err
+    assert "flush" in events, "already-written output must be pushed out"
+    assert events.index("flush") < events.index("write:\033[H\033[2J\033[3J"), (
+        "flush must happen before the screen is wiped, never after")
 
 
 # --- clean prompt screen --------------------------------------------------
@@ -165,3 +213,71 @@ def test_installer_imports_stdlib_only():
             roots.add(node.module.split(".")[0])
     external = sorted(roots - stdlib - {"__future__"})
     assert external == [], f"top-level imports must be stdlib: {external}"
+
+
+# --- the model fetch is isolated from the console -------------------------
+
+class _FakeProc:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+
+def _capture_fetch_run(monkeypatch, *, returncode=0, log_text=b"", timeout=None):
+    """Replace subprocess.run, record the call, optionally fail/timeout."""
+    calls: list[dict] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append({"argv": argv, **kwargs})
+        fileobj = kwargs.get("stdout")
+        if log_text and hasattr(fileobj, "write"):
+            fileobj.write(log_text)
+            fileobj.flush()
+        if timeout is not None:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return _FakeProc(returncode)
+
+    monkeypatch.setattr(install.subprocess, "run", fake_run)
+    return calls
+
+
+def test_fetch_runs_in_a_child_with_its_output_in_a_log_file(monkeypatch):
+    calls = _capture_fetch_run(monkeypatch)
+    ok, detail = install._fetch_embedding_model()
+    assert ok is True and detail == ""
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["argv"] == [
+        sys.executable, "-c", install._WORKER_FETCH, str(install.PROJECT_ROOT)]
+    assert call["stdin"] == subprocess.DEVNULL
+    assert call["stderr"] == subprocess.STDOUT
+    assert call["cwd"] == str(install.PROJECT_ROOT)
+    assert call["env"]["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+    log_file = call["stdout"]
+    assert str(log_file.name).endswith(".log"), (
+        "child output must go to a file, never straight to the console")
+    assert not Path(str(log_file.name)).exists(), "the log is deleted after the call"
+
+
+def test_fetch_returns_the_log_tail_when_the_child_fails(monkeypatch):
+    _capture_fetch_run(monkeypatch, returncode=3, log_text=b"[WARN] attempt 1/3: 503\n")
+    ok, detail = install._fetch_embedding_model()
+    assert ok is False
+    assert "503" in detail, "the failure reason must reach the installer output"
+
+
+def test_fetch_reports_a_timeout_clearly(monkeypatch):
+    _capture_fetch_run(monkeypatch, timeout=1)
+    ok, detail = install._fetch_embedding_model()
+    assert ok is False
+    assert "timed out" in detail
+
+
+def test_fetch_worker_is_valid_python_and_never_in_process():
+    ast.parse(install._WORKER_FETCH)
+    source = INSTALL_PY.read_text(encoding="utf-8")
+    body = source[source.index("def ensure_resources("):]
+    body = body[:body.index("\ndef ", 10)]
+    assert "_fetch_embedding_model(" in body, "resources step must use the isolated fetch"
+    assert "ensure_embedding_model(sync=True)" not in body, (
+        "in-process download draws \\r bars that overwrite the owner prompt")
+    assert "import ensure_embedding_model" not in body
