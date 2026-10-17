@@ -233,20 +233,36 @@ def ensure_dependencies() -> bool:
     return True
 
 
+def enable_ordered_output() -> None:
+    """Print in real order even when stdout is a pipe/file (curl|bash, panels).
+
+    Block-buffered stdout is what makes the owner prompt look broken: the
+    prompt is written straight to the terminal, while everything printed
+    before it (step titles, download progress) sits in the buffer and gets
+    flushed afterwards - so the download output appears to swallow the
+    prompt. Line buffering keeps every line in the order it happened.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except Exception:
+            pass
+
+
 def _step(title: str) -> None:
-    print(f"\n[install] {title}")
+    print(f"\n[install] {title}", flush=True)
 
 
 def _ok(msg: str) -> None:
-    print(f"  OK: {msg}")
+    print(f"  OK: {msg}", flush=True)
 
 
 def _warn(msg: str) -> None:
-    print(f"  WARN: {msg}")
+    print(f"  WARN: {msg}", flush=True)
 
 
 def _fail(msg: str) -> int:
-    print(f"  ERROR: {msg}", file=sys.stderr)
+    print(f"  ERROR: {msg}", file=sys.stderr, flush=True)
     return 1
 
 
@@ -575,17 +591,21 @@ def _owner_exists() -> bool:
 
 
 def _clear_screen() -> None:
-    """Best-effort terminal clear before the owner prompt (fresh screen).
+    """Wipe the screen (and scrollback) before the owner prompt.
 
-    Falls back to blank lines when there is no terminal clearer.
+    The download progress bars are extremely long \\r-rewritten lines; only
+    an explicit ANSI clear removes them, so the email prompt is never buried
+    under leftover install output. Blank lines are the fallback when stdout
+    is not a terminal.
     """
-    try:
-        if sys.stdout.isatty() and shutil.which("clear"):
-            subprocess.run(["clear"], timeout=5)
+    if sys.stdout.isatty():
+        try:
+            sys.stdout.write("\033[H\033[2J\033[3J")
+            sys.stdout.flush()
             return
-    except Exception:
-        pass
-    print("\n\n", end="")
+        except Exception:
+            pass
+    print("\n\n", flush=True)
 
 
 def _read_password() -> str | None:
@@ -618,13 +638,15 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
     _step("6/6 console owner")
     if not email and not password and _owner_exists():
         return True
+    print("  everything else is ready - the console login is the only thing "
+          "left (used once, stored as a salted hash)", flush=True)
     email = (email or "").strip().lower()
     while True:
         if not email:
             try:
                 email = input("  email: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
-                print(file=sys.stderr)
+                print(file=sys.stderr, flush=True)
                 return False
         if EMAIL_RE.match(email):
             break
@@ -671,6 +693,7 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
 
 
 def main(argv=None) -> int:
+    enable_ordered_output()
     args = parse_args(argv)
     print("=" * 70)
     print("  X5Agent install / update (one command)")

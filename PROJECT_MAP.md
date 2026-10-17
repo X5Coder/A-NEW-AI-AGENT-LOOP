@@ -318,7 +318,7 @@ project/                           # == X5Agent/System Core (immutable engine, r
 │   └── test_documents.py             # documents: 300-word chunks + markitdown + vision fallback + delete purges embeddings + wiring
 │   └── test_streaming.py             # SSE decoding (no mojibake) + tool-delta rebuild
 │   └── test_browser_lifecycle.py     # browser close-noop (no boot) + lifecycle lock
-│   └── test_install_unified.py     # unified installer: OS report + port validation + stdlib-only (4 passed)
+│   └── test_install_prompt.py        # installer prompt safety: ordered output (line-buffered + flush) + clean ANSI prompt screen + resources/firewall before owner + console launch after owner + stdlib-only top-level imports (7 passed, no LLM)
 │   └── test_ai_models_engine.py      # Universal Connection Engine: mock-server A/B/C/D + NDJSON + messages_map + injection + all error categories (secret-free copyable) + validation + gating + kinds vision/video/image/tts/stt + binary body + poll flow (V/VV/I/T/S/P checks, all green)
 │   └── test_ai_models_engine.py      # Universal Connection Engine: mock-server A/B/C/D + NDJSON + messages_map + injection + all error categories (secret-free copyable) + validation + gating (21 checks green)
 │   │   └── test_aip.py                   # AIP/1 interpreter: ops + missing-vs-null + malicious-parser reject + URL/SSRF policy + OpenAI body build (secret never in parser) + response/tool-call normalize + bad-args skip + mock end-to-end + parts/modalities/vision/async + private-server shape/errors + auto unknown-JSON + nameless shapes + auth placements + compile-once + AIP/1 setup prompts (29 passed)
