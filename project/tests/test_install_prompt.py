@@ -1,10 +1,14 @@
-"""Installer prompt safety: ordered output + a clean, visible owner prompt.
+"""Installer safety: ordered output, a clean owner prompt, honest dep checks.
 
 Locks the flow the user sees: every heavy step (dependencies, embedding
 download, browser check, firewall) finishes first, then the owner email +
 password prompt appears on a clean screen. Block-buffered stdout used to
 flush AFTER the prompt, so the download output looked like it swallowed the
 prompt and the email question "disappeared".
+
+Also locks the dependency check: it must run in a FRESH interpreter. Checking
+in-process after pip replaced numpy/scipy reported a healthy install as
+"still missing: sentence_transformers" and aborted the install.
 """
 from __future__ import annotations
 
@@ -108,6 +112,36 @@ def test_prompt_line_survives_a_pipe_and_shows_the_step():
     assert '"6/6 console owner"' in body
     assert body.index("_clear_screen()") < body.index('input("  email: ")')
     assert body.index('input("  email: ")') < body.index("_read_password()")
+
+
+# --- dependency check runs in a fresh interpreter -------------------------
+
+def test_modules_missing_reports_only_broken_names(tmp_path, monkeypatch):
+    (tmp_path / "x5_probe_good.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "x5_probe_bad.py").write_text(
+        "raise RuntimeError('broken')\n", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    assert install._modules_missing(("x5_probe_good",)) == []
+    assert install._modules_missing(("x5_probe_bad",)) == ["x5_probe_bad"]
+    assert install._modules_missing(("x5_probe_good", "x5_probe_bad")) == ["x5_probe_bad"]
+    assert install._modules_missing(("x5_probe_missing",)) == ["x5_probe_missing"]
+
+
+def test_modules_missing_sees_the_file_pip_just_replaced(tmp_path, monkeypatch):
+    """The regression: numpy imported fine, pip replaced it, check must see disk."""
+    probe = tmp_path / "x5_probe_swap.py"
+    probe.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    assert install._modules_missing(("x5_probe_swap",)) == []
+    probe.write_text("raise RuntimeError('replaced by pip')\n", encoding="utf-8")
+    assert install._modules_missing(("x5_probe_swap",)) == ["x5_probe_swap"]
+
+
+def test_required_imports_are_the_dependency_guard():
+    assert install.REQUIRED_IMPORTS == ("sentence_transformers", "numpy")
+    source = INSTALL_PY.read_text(encoding="utf-8")
+    assert source.count("_modules_missing(REQUIRED_IMPORTS)") == 2, (
+        "both the before and after checks must use a fresh interpreter")
 
 
 # --- installer must run before dependencies exist -------------------------

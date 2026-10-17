@@ -49,6 +49,8 @@ CONSOLE_PORT = 7777
 MIN_PYTHON = (3, 10)
 BROWSER_PYTHON = (3, 12)  # x5browser 1.6.1 floor is 3.10; 3.12 still recommended for full browser support
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Imported by the dependency check (fresh interpreter, never this process).
+REQUIRED_IMPORTS = ("sentence_transformers", "numpy")
 
 
 def parse_args(argv=None):
@@ -144,6 +146,37 @@ def _has_nvidia_gpu() -> bool:
         return False
 
 
+def _modules_missing(names: tuple[str, ...]) -> list[str]:
+    """Which of `names` fail to import in a FRESH interpreter.
+
+    A subprocess is the only honest check. The installer process itself has
+    already imported numpy from whatever pip is about to replace (Ubuntu
+    ships numpy 1.21.5), so re-importing in-process after pip upgraded
+    numpy/scipy fails on stale half-old modules and reports a perfectly
+    healthy install as broken ("still missing: sentence_transformers").
+    """
+    probe = (
+        "import importlib, sys\n"
+        "missing = []\n"
+        "for name in sys.argv[1:]:\n"
+        "    try:\n"
+        "        importlib.import_module(name)\n"
+        "    except Exception:\n"
+        "        missing.append(name)\n"
+        "sys.stdout.write(' '.join(missing))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", probe, *names],
+            capture_output=True, text=True, timeout=300, env=_pip_env(),
+        )
+    except Exception:
+        return list(names)
+    if proc.returncode != 0:
+        return list(names)
+    return (proc.stdout or "").split()
+
+
 def ensure_dependencies() -> bool:
     """Install project dependencies once when missing (pip install -e .).
 
@@ -159,14 +192,10 @@ def ensure_dependencies() -> bool:
     Bounded: three pip runs max (toolchain 10min, torch-CPU 20min,
     project 30min), never loops. A timeout keeps pip's cache, so just
     re-running the installer resumes where it stopped.
-    Returns True when the required packages import cleanly afterwards.
+    Returns True when the required packages import cleanly afterwards
+    (always verified in a fresh interpreter - never in this process).
     """
-    missing = []
-    for pkg in ("sentence_transformers", "numpy"):
-        try:
-            __import__(pkg)
-        except Exception:
-            missing.append(pkg)
+    missing = _modules_missing(REQUIRED_IMPORTS)
     want_cmd = shutil.which("x5agent") is None
     if not missing and not want_cmd:
         return True
@@ -220,12 +249,7 @@ def ensure_dependencies() -> bool:
     except Exception as e:
         print(f"  ERROR: pip install failed ({str(e)[:120]})", file=sys.stderr)
         return False
-    still_missing = []
-    for pkg in ("sentence_transformers", "numpy"):
-        try:
-            __import__(pkg)
-        except Exception:
-            still_missing.append(pkg)
+    still_missing = _modules_missing(REQUIRED_IMPORTS)
     if still_missing:
         print(f"  ERROR: still missing: {', '.join(still_missing)}", file=sys.stderr)
         return False
