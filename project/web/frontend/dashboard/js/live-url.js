@@ -2,12 +2,12 @@
  * live-url.js — remote-safe live viewer URLs (pure, no DOM).
  *
  * The library mints viewer links on 127.0.0.1:6080. Opened from the same
- * machine that is fine; opened through the public funnel it points at the
- * VIEWER'S own localhost ("refused to connect"). When this console page
- * itself is remote, rewrite those links to the funnel /live/ route on this
- * page's own host (same hostname, same TLS), preserving every query param
- * (token, scale, view_only) and pointing the viewer websocket at the
- * routed path. Anything else passes through untouched.
+ * machine that is fine; opened from a remote console page those links point
+ * at the VIEWER'S own localhost ("refused to connect"). When this console
+ * page itself is remote, rewrite only the host/scheme to this page's host,
+ * keeping the viewer's own port and every query param (token, scale,
+ * view_only) exactly as the library produced them. Anything else passes
+ * through untouched.
  */
 "use strict";
 
@@ -38,11 +38,8 @@ export function remoteLiveUrl(viewerUrl, pageLocation) {
   }
   const uh = String(u.hostname || "");
   if (uh !== "127.0.0.1" && uh !== "localhost" && uh !== "::1") return raw;
-  const proto = String((loc && loc.protocol) || "https:") === "http:" ? "http:" : "https:";
-  const pagePort = String((loc && loc.port) || "");
-  const host = pagePort ? `${pageHost}:${pagePort}` : pageHost;
-  const file = String(u.pathname || "").split("/").pop() || "x5-live.html";
-  const params = new URLSearchParams(u.search || "");
-  if (!params.get("path")) params.set("path", "live/websockify");
-  return `${proto}//${host}/live/${file}?${params.toString()}`;
+  // Point the viewer at this machine's address, keeping its own port.
+  u.protocol = String((loc && loc.protocol) || "http:");
+  u.hostname = pageHost;
+  return u.toString();
 }

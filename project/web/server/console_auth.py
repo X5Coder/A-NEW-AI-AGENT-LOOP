@@ -7,9 +7,9 @@ by `python install.py` is honored here immediately (and vice versa):
 
 Sessions are in-memory random tokens (30 days); a server restart logs
 everyone out (fail-closed, documented). Cookie: HttpOnly + SameSite=Lax,
-no Secure (the console is plain HTTP on 127.0.0.1, so a Secure cookie is
-never stored by the browser; the funnel serves the same host, so the
-first-party Lax session survives there too — see server._session_cookie).
+no Secure (the console is plain HTTP, so a Secure cookie would never be
+stored by the browser; the first-party Lax session is what keeps the login
+alive — see server._session_cookie).
 Secrets are never logged and never returned (reads expose email only).
 """
 

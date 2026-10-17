@@ -1,7 +1,7 @@
 """X5Agent single install/update command.
 
 Flow (exactly, nothing else):
-  1. python install.py [--run] [--yes] [--email E --password P] [--public|--no-public]
+  1. python install.py [--run] [--yes] [--email E --password P]
   2. environment check (python, CPU/GPU, disk, dependencies auto-installed
      via `pip install -e .` when missing; below 3.12 warns:
      x5browser 1.6.1 runs on 3.10+, 3.12 recommended for full browser support)
@@ -11,16 +11,16 @@ Flow (exactly, nothing else):
      NEVER touches X5Agent/Data, embedding_model/, or any user data)
   5. bundled embedding check (offline) + tool/trigger embeddings ready
      (HF_TOKEN optional: higher HuggingFace rate limits on slow networks)
-  6. firewall step (best-effort open of TCP 7777 via ufw/firewalld)
+  6. firewall step (best-effort open of TCP 7777)
   7. browser check (X5Browser doctor: Chrome + environment, offers --fix)
   8. email + password (flags/env X5_EMAIL+X5_PASSWORD or prompt; salted hash
      in Data, never plaintext)
-  9. public link via Tailscale Funnel (install check -> login URL
-     shown + opened -> funnel on -> permanent public URL printed)
-  10. opens the console in the browser + prints local and public URLs
-   11. with --run: starts the console detached (persistent, survives SSH
-      close; same server as `python -m web.server.server`) so install+start
-      is one command. `--foreground` keeps the old blocking behavior.
+  9. opens the console in the browser + prints the local and reachable URLs
+     (the console binds every interface, so the machine's own address works;
+     the owner login is the only gate)
+   10. with --run: starts the console detached (persistent, survives SSH
+       close; same server as `python -m web.server.server`) so install+start
+       is one command. `--foreground` keeps the old blocking behavior.
 
 Run from the project/ directory:  python install.py --run
 Start the console only after:     python -m web.server.server
@@ -56,8 +56,8 @@ def parse_args(argv=None):
 
     Examples:
       python install.py --run
-      python install.py --run --email owner@mail.com --password S3cret123 --public
-      HF_TOKEN=hf_xxx python install.py --run --email a@b.c --password S3cret123 --no-public
+      python install.py --run --email owner@mail.com --password S3cret123
+      HF_TOKEN=hf_xxx python install.py --run --email a@b.c --password S3cret123
       X5_EMAIL=a@b.c X5_PASSWORD=S3cret123 python install.py --run --yes
     Env fallbacks: X5_EMAIL / X5_PASSWORD / HF_TOKEN.
     """
@@ -69,11 +69,7 @@ def parse_args(argv=None):
     p.add_argument("--password", default=os.environ.get("X5_PASSWORD", ""),
                    help="Owner password, min 8 chars (env X5_PASSWORD preferred over CLI)")
     p.add_argument("--yes", "-y", action="store_true",
-                   help="Assume yes to optional prompts (Chrome install, public link)")
-    p.add_argument("--public", dest="public", action="store_true", default=None,
-                   help="Enable the Tailscale Funnel public link without prompting")
-    p.add_argument("--no-public", dest="public", action="store_false",
-                   help="Skip the public link without prompting")
+                   help="Assume yes to optional prompts (Chrome install)")
     p.add_argument("--skip-browser", action="store_true",
                    help="Skip the browser doctor check")
     p.add_argument("--skip-firewall", action="store_true",
@@ -84,14 +80,40 @@ def parse_args(argv=None):
     p.add_argument("--no-open-browser", action="store_true",
                    help="Do not open the console URL in a browser at the end")
     p.add_argument("--run", action="store_true",
-                   help="Install + start in one step: no prompts, the public "
-                        "link is attempted automatically unless --no-public, "
-                        "then the console server starts detached on 7777 "
-                        "(persistent: survives SSH close)")
+                   help="Install + start in one step: no prompts, then the "
+                        "console server starts detached on 7777 (persistent: "
+                        "survives SSH close)")
     p.add_argument("--foreground", action="store_true",
                    help="With --run: keep the server in the foreground "
                         "(closing SSH stops it). Default is detached.")
     return p.parse_args(argv)
+
+
+def _reachable_url(port: int = CONSOLE_PORT) -> str:
+    """Best-effort reachable console URL (trailing slash).
+
+    The console binds every interface, so the address a browser or phone
+    needs is this machine's primary IPv4, never 0.0.0.0. Falls back to
+    loopback when there is no route. Never raises.
+    """
+    sock = None
+    try:
+        import socket as _socket
+
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = str(sock.getsockname()[0])
+        if ip and not ip.startswith("127."):
+            return f"http://{ip}:{int(port)}/"
+    except Exception:
+        pass
+    finally:
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
+    return f"http://127.0.0.1:{int(port)}/"
 
 
 def _pip_env() -> dict:
@@ -230,7 +252,7 @@ def _fail(msg: str) -> int:
 
 def check_environment() -> bool:
     """Python version, CPU/GPU (once), disk, required packages. Returns True when ready."""
-    _step("1/7 environment check")
+    _step("1/6 environment check")
     if sys.version_info < MIN_PYTHON:
         print(f"  ERROR: python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required, got {sys.version.split()[0]}",
               file=sys.stderr)
@@ -301,7 +323,7 @@ def _latest_version() -> str | None:
 
 def check_project_state() -> dict:
     """Missing / complete / has live data. Never modifies anything."""
-    _step("2/7 project state check")
+    _step("2/6 project state check")
     sys.path.insert(0, str(PROJECT_ROOT))
     from core.embedding.bootstrap import is_complete as _emb_ok
 
@@ -349,7 +371,7 @@ def update_source() -> bool:
     Returns True when the pull moved to a newer commit (caller may need a
     restart to run the new code).
     """
-    _step("3/7 source update (code only, data untouched)")
+    _step("3/6 source update (code only, data untouched)")
     if not (shutil.which("git") and GIT_ROOT is not None):
         _warn("no git checkout - skipping update (download the release zip instead)")
         return False
@@ -380,7 +402,7 @@ def ensure_resources(hf_token: str = "") -> bool:
     used only to authenticate HuggingFace downloads (higher rate limits on
     slow networks). Anonymous download is the default and works fine.
     """
-    _step("4/7 resources (embedding auto-fetch + prebuilt embeddings)")
+    _step("4/6 resources (embedding auto-fetch + prebuilt embeddings)")
     sys.path.insert(0, str(PROJECT_ROOT))
     from core.embedding.bootstrap import ensure_embedding_model
 
@@ -423,7 +445,7 @@ def check_browser(assume_yes: bool = False) -> bool:
     profile, display). Never fatal: problems only warn, the install
     continues so the console still works without the browser.
     """
-    _step("5/7 browser check (X5Browser doctor: Chrome + environment)")
+    _step("5/6 browser check (X5Browser doctor: Chrome + environment)")
     try:
         from x5browser import run_doctor
     except Exception as e:
@@ -496,8 +518,8 @@ def ensure_firewall(port: int = CONSOLE_PORT) -> None:
 
     Tries `ufw allow <port>/tcp` when ufw exists, else `firewall-cmd`
     (--add-port/--reload) when firewalld exists. Otherwise prints the exact
-    manual command. The console on localhost works without this; it is only
-    needed to reach the console from other machines / the public link.
+    manual command. The console binds every interface, so this port is what
+    lets other machines reach it; without it only this host can open it.
     """
     _step(f"firewall (open TCP port {port}, best-effort)")
     try:
@@ -593,7 +615,7 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
     the only rules are a valid email shape and min 8 password chars.
     """
     _clear_screen()
-    _step("6/7 console owner")
+    _step("6/6 console owner")
     if not email and not password and _owner_exists():
         return True
     email = (email or "").strip().lower()
@@ -648,110 +670,12 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
         return False
 
 
-def setup_public_share(mode=None, assume_yes: bool = False) -> tuple[str | None, str]:
-    """Step 7/7: Tailscale install + login. Returns (url, reason).
-
-    Funnel itself is NOT enabled here on purpose: it needs a listening
-    server (enabling it against a dead port hangs), so the server turns it
-    on in the background when started with --public, after the port answers.
-    Returns the expected public URL (tailnet DNS) when logged in, else None
-    with a short reason. Never fatal: the local console works regardless.
-    mode: True/False/None (flag --public/--no-public/unset). With --run and
-    no explicit flag the login is attempted automatically (no prompt).
-    """
-    _step("7/7 public link (Tailscale Funnel — anyone can open)")
-    if mode is False:
-        _ok("skipped (--no-public) - local console only")
-        return None, "skipped (--no-public)"
-    try:
-        sys.path.insert(0, str(PROJECT_ROOT))
-        from web.server.tailscale_share import (
-            is_installed, login_interactive, login_status)
-    except Exception as e:
-        _warn(f"public link skipped ({str(e)[:120]}) - local console still works")
-        return None, "unavailable"
-    auto = bool(mode) or assume_yes
-    if not auto:
-        try:
-            ans = input("  Enable the public internet link? [Y/n]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            return None, "skipped"
-        if ans == "n":
-            _ok("skipped - local console only")
-            return None, "skipped"
-    installed, bin_path = is_installed()
-    if not installed and not _install_tailscale():
-        return None, "needs Tailscale (see above)"
-    installed, bin_path = is_installed()
-    if not installed or not bin_path:
-        _warn("install Tailscale, then re-run with --public")
-        return None, "needs Tailscale (see above)"
-    info = login_status(bin_path)
-    if not info.get("logged_in"):
-        if not login_interactive(bin_path):
-            _warn("login not completed - re-run to retry it")
-            return None, "login incomplete (re-run to retry)"
-        info = login_status(bin_path)
-    dns = str(info.get("dns") or "")
-    if dns:
-        _ok(f"logged in ({dns}) - funnel activates when the server starts with --public")
-        return f"https://{dns}", ""
-    _warn("login state unclear - re-run to retry it")
-    return None, "login unclear (re-run to retry)"
-
-
-def _install_tailscale() -> bool:
-    """Best-effort Tailscale install on Linux via the official script.
-
-    Mirrors the browser Chrome --fix pattern: one attempt, bounded
-    (5 minutes), never fatal - the local console works without it.
-    Returns True when `tailscale` is on PATH afterwards.
-    """
-    import platform
-
-    if platform.system() != "Linux":
-        _warn("automatic Tailscale install supports Linux only - "
-              "install manually: https://tailscale.com/download")
-        return False
-    if shutil.which("tailscale"):
-        return True
-    if shutil.which("curl") is None:
-        _warn("cannot auto-install Tailscale (curl missing) - "
-              "install manually: https://tailscale.com/download")
-        return False
-    needs_root = hasattr(os, "geteuid") and os.geteuid() != 0
-    if needs_root and shutil.which("sudo") is None:
-        _warn("cannot auto-install Tailscale (needs root) - "
-              "install manually: https://tailscale.com/download")
-        return False
-    print("  installing Tailscale (official script)...")
-    try:
-        cmd = "curl -fsSL https://tailscale.com/install.sh | sh"
-        if needs_root:
-            cmd = "curl -fsSL https://tailscale.com/install.sh | sudo sh"
-        proc = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=300,
-        )
-        if proc.returncode == 0 and shutil.which("tailscale"):
-            _ok("Tailscale installed")
-            return True
-        _warn("Tailscale auto-install failed - "
-              "install manually: https://tailscale.com/download")
-        return False
-    except Exception as e:
-        _warn(f"Tailscale auto-install failed ({str(e)[:120]}) - "
-              "install manually: https://tailscale.com/download")
-        return False
-
-
 def main(argv=None) -> int:
     args = parse_args(argv)
     print("=" * 70)
     print("  X5Agent install / update (one command)")
     print("=" * 70)
-    # --run means fully automatic: no prompts (browser fix + public link),
-    # and the public link is attempted unless explicitly disabled.
+    # --run means fully automatic: no prompts (browser fix included).
     auto = args.yes or args.run
     if not check_environment():
         return 1
@@ -778,20 +702,17 @@ def main(argv=None) -> int:
               "flags (or X5_EMAIL/X5_PASSWORD env) for non-interactive use",
               file=sys.stderr)
         return 1
-    public_mode = args.public
-    if args.run and public_mode is None:
-        public_mode = True
-    public_url, public_reason = setup_public_share(mode=public_mode, assume_yes=auto)
+    web_url = _reachable_url(CONSOLE_PORT)
     if not args.no_open_browser:
         try:
             import webbrowser
 
-            webbrowser.open(UI_URL)
+            webbrowser.open(web_url)
         except Exception:
             pass
     print("\n" + "=" * 70)
-    print(f"  Web Server (Local):  {UI_URL}")
-    print(f"  Web Server (Public): {public_url or 'off - ' + public_reason}")
+    print(f"  Web Server (Local):     {UI_URL}")
+    print(f"  Web Server (Reachable): {web_url}")
     print("  Server Running Now" if args.run else "  Server Ready")
     print("=" * 70)
     if args.run:
@@ -817,9 +738,7 @@ def main(argv=None) -> int:
         if args.foreground:
             print("\n[install] starting console now (--run --foreground)...")
             cmd = [sys.executable, "-m", "web.server.server",
-                   "--host", "127.0.0.1", "--port", "7777"]
-            if public_mode:
-                cmd.append("--public")
+                   "--host", "0.0.0.0", "--port", "7777"]
             os.chdir(str(PROJECT_ROOT))
             os.execv(sys.executable, cmd)
         print("\n[install] starting console now (persistent, detached) ...")
@@ -831,9 +750,9 @@ def main(argv=None) -> int:
             print("  ERROR: persistent launcher unavailable", file=sys.stderr)
             return 1
         os.chdir(str(PROJECT_ROOT))
-        pid, log_path = _launch(CONSOLE_PORT, bool(public_mode))
+        pid, log_path = _launch(CONSOLE_PORT)
         if _probe2 is not None and _probe2(CONSOLE_PORT):
-            print(f"  console running persistently at {UI_URL} "
+            print(f"  console running persistently at {web_url} "
                   f"(pid {pid}, log {log_path})")
             print("  safe to close this terminal/SSH now - re-run the same "
                   "one-liner to restart, `x5agent --off` to stop")

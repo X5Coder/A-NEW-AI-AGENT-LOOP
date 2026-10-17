@@ -1,7 +1,12 @@
 {
-  "version": "0.62.3",
-  "description": "The one-time Tailscale registration link now renews itself: when it expires while you are still registering, a fresh link is issued automatically (up to 3 attempts) instead of the setup giving up and making you re-run the installer. The registration output is also a single clean box showing the link once — the noisy raw lines and the redundant 'no browser on this server' note are gone.",
+  "version": "0.63.0",
+  "description": "Remote access no longer uses Tailscale: the whole tunnel/Funnel layer is removed. The console now binds every interface and is reached directly at http://<your-ip>:7777/ (the owner login is still the only gate), so a VPS install opens by its own address with no extra service, no registration link and no admin approval step. Remote links in chat replies point at that same address.",
   "features": [
+    "Tailscale/Funnel is gone: no tunnel, no registration link, no admin approval, no tailscale.json.",
+    "The console binds every interface on port 7777, so it opens directly at http://<your-ip>:7777/.",
+    "Setup is six steps instead of seven (the public-link step was removed) and the report shows the local and the reachable URL.",
+    "x5agent, install.py --run and Docker all serve on 0.0.0.0:7777; the public-link flags (--public/--no-public, X5_PUBLIC) are removed.",
+    "Remote live-browser view: the viewer link now points at your console host (open the viewer port to watch the browser from elsewhere).",
     "Typing @ mid-word in Arabic opens the file picker; emails like mail@x never trigger it.",
     "@file and /skill boundaries match between editor paint and server injection, including Arabic adjacency.",
     "Browser downloads auto-move to Workspace/downloads; no empty folder hides the live view anymore.",

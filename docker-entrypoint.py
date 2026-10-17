@@ -9,10 +9,10 @@ Flow (exactly, nothing else):
   3. Seed the models volume when empty (tracked configs from the image;
      the 1.1GB weights download once via the embedding bootstrap, then persist).
   4. Ensure X5Agent dirs exist inside the data volume (idempotent).
-  4. Browser engine check: headless Chrome smoke test (bounded, warn-only —
+  5. Browser engine check: headless Chrome smoke test (bounded, warn-only —
      proves the X5Browser engine can run on this headless server).
-  5. exec() the console server on 0.0.0.0:7777 (port mapping needs a
-     non-loopback bind; the funnel public link stays opt-in via X5_PUBLIC=1).
+  6. exec() the console server on 0.0.0.0:7777 (port mapping needs a
+     non-loopback bind; the owner login is the only gate).
 
 Stdlib only. Never raises past step 1: the console always boots.
 """
@@ -228,14 +228,7 @@ def main() -> None:
     os.chdir(PROJECT_ROOT)
     cmd = [sys.executable, "-m", "web.server.server",
            "--host", "0.0.0.0", "--port", "7777"]
-    if os.environ.get("X5_PUBLIC") == "1":
-        cmd.append("--public")
-    else:
-        # Explicit skip note: funnel needs an interactive logged-in tailscale
-        # client, which a container does not have — the console stays reachable
-        # directly (local port / VPS IP) instead of failing silently.
-        _log("public link off (X5_PUBLIC=0) — Tailscale funnel skipped")
-    _log("console: http://localhost:7777/ (exec server, signals pass through)")
+    _log("console: http://localhost:7777/ (container port 7777 is published)")
     os.execv(sys.executable, cmd)
 
 

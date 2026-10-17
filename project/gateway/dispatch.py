@@ -407,22 +407,13 @@ def _live_update(channel: str, chat: str, reason: str) -> None:
         pass
 
 
-def _public_base() -> str:
-    """Clickable base for gateway links: the live funnel URL when the public
-    link is on, else the configured loopback (phones can't open loopback —
-    the reply still carries the text, but only a funnel link truly opens).
-    Read fresh per message (cheap JSON read, no subprocess): the funnel can
-    come up after the server started. Never raises."""
-    try:
-        import json as _json
-        from core.paths import data_root as _data_root
-        saved = _json.loads(
-            (_data_root() / "database" / "tailscale.json").read_text(encoding="utf-8"))
-        url = str((saved or {}).get("public_url") or "").strip()
-        if url.startswith("https://") and len(url) < 200:
-            return url if url.endswith("/") else url + "/"
-    except Exception:
-        pass
+def _link_base() -> str:
+    """Clickable base for gateway links (studio links, dashboard link).
+
+    A phone can never open loopback, so this is the console's reachable base
+    (this machine's address on the console port), handed to the gateway at
+    server startup. Falls back to loopback when unset. Never raises.
+    """
     try:
         base = str(_dashboard_url or "").strip() or "http://127.0.0.1:7777/"
         return base if base.endswith("/") else base + "/"
@@ -433,13 +424,13 @@ def _public_base() -> str:
 def _expand_studio_links(text: str) -> str:
     """Gateway has no OPEN button: turn every [STUDIO:id] card token and every
     bare /studio-pdf/<id> path into a full clickable studio link (plain text).
-    Dead loopback absolutes the model may have written become the live base
-    too (a phone can never open 127.0.0.1). Website rendering is untouched
-    (it owns the card). Never raises."""
+    Dead loopback absolutes the model may have written become the console's
+    reachable base too (a phone can never open 127.0.0.1). Website rendering
+    is untouched (it owns the card). Never raises."""
     try:
         import re as _re
 
-        base = _public_base()
+        base = _link_base()
         t = str(text or "")
         if not t or ("[STUDIO:" not in t and "/studio-pdf/" not in t
                      and "127.0.0.1" not in t and "localhost" not in t):

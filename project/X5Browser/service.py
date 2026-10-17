@@ -949,7 +949,7 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
                 raise RuntimeError(STOPPED_MESSAGE)
             _browser = adopted_browser
             _started = True
-            _ensure_remote_live()
+            _housekeep_viewers()
             _hold_distro(adopt_stack)
             return adopted_browser
         _started = False
@@ -1024,7 +1024,7 @@ async def _get_browser_async(allow_boot: bool = True) -> Any:
             raise RuntimeError("Browser failed to start (process died immediately)")
         _browser = browser
         _started = True
-        _ensure_remote_live()
+        _housekeep_viewers()
         _hold_distro(stack)
         # Fresh boot only (reached only via open_browser/restart_browser).
         await _boot_home_tab(browser)
@@ -1267,28 +1267,18 @@ def call_tool(name: str, kwargs: dict) -> Any:
     return _submit(lambda: _call_async(name.strip(), dict(kwargs)))
 
 
-def _ensure_remote_live() -> None:
-    """Best-effort /live/ viewer route for remote (funnel) viewing.
+def _housekeep_viewers() -> None:
+    """Best-effort viewer housekeeping after a successful boot/adopt.
 
-    Called once per successful boot/adopt in a daemon thread (never blocks
-    the boot): if Tailscale funnel is on and the viewer answers locally,
-    its route is (re)ensured so funnel links keep working. Also hides the
-    library viewer overlay dot in every deployed copy (idempotent).
-    Never raises.
+    Kills stale/extra viewer websockify processes and orphaned headless
+    Chrome profiles so the live viewer stays healthy (the X5 live Chrome is
+    never touched). Runs once per boot/adopt in a daemon thread (never blocks
+    the boot). Never raises.
     """
     def _run() -> None:
         try:
-            from web.server.tailscale_share import ensure_live_route, strip_deployed_viewer_dots
-            ensure_live_route()
-            try:
-                strip_deployed_viewer_dots()
-            except Exception:
-                pass
-            try:
-                from X5Browser.service import reap_stale_viewers
-                reap_stale_viewers()
-            except Exception:
-                pass
+            from X5Browser.service import reap_stale_viewers
+            reap_stale_viewers()
         except Exception:
             pass
 

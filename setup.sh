@@ -5,7 +5,7 @@
 # starts a fresh one on the same port 7777; stop with `x5agent --off`):
 #   curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bash
 # With options (passed through to project/install.py):
-#   curl -fsSL .../setup.sh | bash -s -- --email owner@mail.com --password S3cret123 --public
+#   curl -fsSL .../setup.sh | bash -s -- --email owner@mail.com --password S3cret123
 # Re-running updates the source only (git pull --ff-only, data never touched).
 set -euo pipefail
 

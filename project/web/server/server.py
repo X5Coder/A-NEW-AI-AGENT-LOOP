@@ -52,7 +52,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DASHBOARD_ROOT = PROJECT_ROOT / "web" / "frontend" / "dashboard"
 
 DEFAULT_PORT = 7777
-DEFAULT_HOST = "127.0.0.1"
+# Bind every interface: remote access is by direct address (http://<host>:7777/).
+# The owner gate (login mandatory, cookie session) is the only protection, so a
+# public IP needs the firewall to be intentional about this port.
+DEFAULT_HOST = "0.0.0.0"
 
 SERVER_START = time.time()
 
@@ -998,8 +1001,8 @@ class _ChatError(Exception):
 def _read_request_body(rfile, headers, max_bytes: int) -> bytes:
     """Read a request body with Content-Length or chunked framing.
 
-    Reverse proxies (Tailscale funnel included) may forward a POST with
-    Transfer-Encoding: chunked and no Content-Length. The old
+    Some proxies/browsers forward a POST with Transfer-Encoding: chunked and
+    no Content-Length. The old
     Content-Length-only reads saw an empty body there, so login arrived
     with empty credentials and answered 401 even with a correct password.
     Bounded by max_bytes in both modes. Never raises (empty on failure).
@@ -1064,8 +1067,7 @@ def _session_cookie(token: str, clear: bool = False) -> str:
 
     The console is plain HTTP on 127.0.0.1, so a Secure cookie is never
     stored by the browser (that was the endless 401 loop: login succeeded
-    but the session cookie was dropped). Lax still blocks third-party
-    send; the funnel serves the same host so the session survives there.
+    but the session cookie was dropped). Lax still blocks third-party send.
     Max-Age = 30 days so the login persists across browser restarts
     (sessions are also persisted server-side in console_sessions.json).
     """
@@ -2062,9 +2064,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/embedding_status":
             self._handle_embedding_status_get()
             return
-        if parsed.path == "/api/public_share":
-            self._handle_public_share_get()
-            return
         if parsed.path == "/api/update_check":
             self._handle_update_check_get()
             return
@@ -3042,7 +3041,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         One stream per open tab: a `hello` snapshot first, then one frame per
         state change (browser/live/chat/chat_done/dashboard/workspace) plus a
-        15s heartbeat (keeps Tailscale Funnel / NAT idle timeouts alive).
+        15s heartbeat (keeps NAT/proxy idle timeouts alive).
         EventSource reconnects natively; every reconnect gets
         a fresh hello, so no last-event-id bookkeeping is needed.
         Server cost is O(1): singleton watchers broadcast only on change no
@@ -3070,9 +3069,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
             except Exception:
                 return
-            # Funnel/proxy-safe preamble: the retry hint tells the browser
-            # when to redial, the comment forces intermediaries (funnel,
-            # nginx) to flush headers now instead of buffering the hello.
+            # Proxy-safe preamble: the retry hint tells the browser
+            # when to redial, the comment forces intermediaries (nginx,
+            # any reverse proxy) to flush headers now instead of buffering.
             try:
                 self.wfile.write(b"retry: 3000\n: connected\n\n")
                 self.wfile.flush()
@@ -4202,16 +4201,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(status)
         except Exception as e:
             self._send_json({"state": "unknown", "detail": str(e)[:200]}, status=500)
-
-    def _handle_public_share_get(self):
-        """GET /api/public_share — Tailscale Funnel snapshot (read-only, never enables)."""
-        try:
-            if str(PROJECT_ROOT) not in sys.path:
-                sys.path.insert(0, str(PROJECT_ROOT))
-            from web.server.tailscale_share import status as _ts_status
-            self._send_json(_ts_status(port=DEFAULT_PORT))
-        except Exception as e:
-            self._send_json({"installed": False, "error": str(e)[:200]}, status=500)
 
     def _handle_update_check_get(self):
         """GET /api/update_check — local vs remote state + notes (never raises, always 200)."""
@@ -5875,9 +5864,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         "/api/auth/login", "/api/auth/setup",  # setup passes the gate only to be told 410 (gone)
     })
     # Internal gateway dispatcher (same machine, cookie-less) may POST only
-    # these endpoints from loopback. NOTHING else is exempt from login: the
-    # Tailscale funnel also arrives via 127.0.0.1, so a blanket loopback
-    # bypass would let the whole internet in without a session.
+    # these endpoints from loopback. NOTHING else is exempt from login: a
+    # remote client hitting the public port would otherwise get in without
+    # a session if loopback were blanket-trusted (a local proxy/reverse
+    # proxy connects from 127.0.0.1 too).
     _GATEWAY_LOOPBACK_POST = frozenset({
         "/api/chat_stream", "/api/chat_answer", "/api/chat_cancel",
     })
@@ -6144,60 +6134,41 @@ def _warmup_models() -> None:
 threading.Thread(target=_warmup_models, daemon=True).start()
 
 
-def _enable_public_share_bg(port: int) -> None:
-    """Background Funnel enable after the port answers (best-effort, never raises)."""
+def _primary_ipv4() -> str | None:
+    """Best-effort primary non-loopback IPv4 of this machine (no traffic sent).
+
+    Used only to print a reachable URL; never fatal. None when there is no
+    route (offline / no NIC).
+    """
     import socket as _socket
 
-    for _ in range(30):
-        try:
-            probe = _socket.create_connection(("127.0.0.1", port), timeout=2.0)
-            try:
-                probe.close()
-            except Exception:
-                pass
-            break
-        except Exception:
-            time.sleep(1)
+    sock = None
     try:
-        if str(PROJECT_ROOT) not in sys.path:
-            sys.path.insert(0, str(PROJECT_ROOT))
-        from web.server.tailscale_share import ensure_public
-        snap = ensure_public(port=port, open_browser=False)
-        if snap.get("public_url"):
-            print(f"  PUBLIC console (anyone can open): {snap['public_url']}")
-            _print_final_report(port, snap["public_url"])
-    except Exception as e:
-        print(f"[WARN] Public share failed: {e}", file=sys.stderr)
-
-
-def _print_final_report(port: int, public_url: str) -> None:
-    """Clear screen + the final 3-line report (Web Server Local/Public/Running).
-
-    Runs after funnel succeeds: everything the user needs, nothing else.
-    Skips the clear when stdout is not a terminal (logs stay intact).
-    Never raises.
-    """
-    try:
-        local = f"http://127.0.0.1:{port}/"
-        cleared = False
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = str(sock.getsockname()[0])
+        return ip if ip and not ip.startswith("127.") else None
+    except Exception:
+        return None
+    finally:
         try:
-            import shutil as _shutil
-            import subprocess as _sp
-
-            if sys.stdout.isatty() and _shutil.which("clear"):
-                _sp.run(["clear"], timeout=5)
-                cleared = True
+            if sock is not None:
+                sock.close()
         except Exception:
             pass
-        if not cleared:
-            print()
-        print("=" * 70)
-        print(f"  Web Server (Local):  {local}")
-        print(f"  Web Server (Public): {public_url}")
-        print("  Server Running Now")
-        print("=" * 70)
-    except Exception:
-        pass
+
+
+def reachable_base(host: str, port: int) -> str:
+    """Reachable base URL (trailing slash) for links + other components.
+
+    A concrete host gives http://host:port/; the wildcard bind (0.0.0.0/::)
+    resolves to the machine's primary IPv4 so phone/browser links actually
+    open instead of pointing at 0.0.0.0.
+    """
+    if host and host not in ("0.0.0.0", "::", "::0"):
+        return f"http://{host}:{int(port)}/"
+    ip = _primary_ipv4() or "127.0.0.1"
+    return f"http://{ip}:{int(port)}/"
 
 
 def _ensure_owner_from_terminal() -> bool:
@@ -6285,7 +6256,7 @@ def _ensure_owner_from_terminal() -> bool:
         return False
 
 
-def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False) -> int:
+def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> int:
     if not DASHBOARD_ROOT.exists():
         print(f"[ERROR] Dashboard root not found: {DASHBOARD_ROOT}", file=sys.stderr)
         return 1
@@ -6327,7 +6298,7 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
             sys.path.insert(0, str(PROJECT_ROOT))
         from gateway.service import start as _gw_start
 
-        _gw_start(f"http://{host}:{port}/")
+        _gw_start(reachable_base(host, port))
     except Exception as e:
         print(f"[WARN] Gateway ingestion failed to start: {e}", file=sys.stderr)
 
@@ -6365,16 +6336,16 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, public: bool = False
 
     try:
         with ThreadedServer((host, port), DashboardHandler) as httpd:
-            url = f"http://{host}:{port}/"
+            base = reachable_base(host, port)
             print("=" * 70)
             print(f"  X5Agent — your private AI gateway console")
             print(f"  {DashboardHandler.SERVER_DESCRIPTION}")
             print(f"  Serving: {DASHBOARD_ROOT}")
-            print(f"  URL:     {url}")
-            if public:
-                print(f"  Public:  enabling Tailscale Funnel ...")
-                threading.Thread(target=_enable_public_share_bg, args=(port,),
-                                 name="x5-public-share", daemon=True).start()
+            print(f"  URL:     {base}")
+            if host in ("0.0.0.0", "::", "::0"):
+                print(f"  Local:   http://127.0.0.1:{port}/")
+                print("  Reached by any address that routes here (open the port "
+                      "in the firewall to allow it).")
             print(f"  Press Ctrl+C to stop")
             print("=" * 70)
             try:
@@ -6412,14 +6383,17 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="X5Agent local server")
-    parser.add_argument("--host", default=DEFAULT_HOST, help="Host to bind (default 127.0.0.1)")
+    parser.add_argument("--host", default=DEFAULT_HOST,
+                        help="Host to bind (default 0.0.0.0 — reachable by address)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port to bind (default 7777)")
-    parser.add_argument("--public", action="store_true",
-                        help="Also expose via Tailscale Funnel (permanent public https URL)")
     args = parser.parse_args()
 
-    # Validate host is loopback for safety (no 0.0.0.0 exposure by default)
-    if args.host not in ("127.0.0.1", "localhost"):
-        print(f"[WARN] Binding to non-loopback host {args.host} — ensure firewall", file=sys.stderr)
+    # The console is owner-gated (login mandatory, cookie session only); a
+    # wildcard bind is the norm so the VPS address works. Firewalling the
+    # port is the deliberate opt-in for who may reach it.
+    if args.host in ("0.0.0.0", "::", "::0"):
+        print(f"[INFO] Binding every interface on port {args.port} — "
+              f"reachable at {reachable_base(args.host, args.port)} (owner login required).",
+              file=sys.stderr)
 
-    raise SystemExit(run(host=args.host, port=args.port, public=args.public))
+    raise SystemExit(run(host=args.host, port=args.port))

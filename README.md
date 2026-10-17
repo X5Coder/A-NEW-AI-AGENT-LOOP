@@ -28,19 +28,20 @@ automatically; else `sudo ufw allow 7777/tcp`).
 curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bash
 ```
 
-Non-interactive (email/password/public passed through to the installer):
+Non-interactive (email/password passed through to the installer):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bash -s -- --email owner@mail.com --password S3cret123 --public
+curl -fsSL https://raw.githubusercontent.com/X5Coder/X5Agent/main/setup.sh | bash -s -- --email owner@mail.com --password S3cret123
 ```
 
 What the one-liner does: clones (or fast-forward updates) the repo into
 `~/X5Agent`, auto-installs dependencies (`pip install -e .` inside
 `install.py` when missing), runs the full installer (env + browser doctor +
-owner once + firewall), then starts the console **persistently** on
-`127.0.0.1:7777` (detached — safe to close SSH; localhost only, remote
-access goes through the Tailscale Funnel public link, which always requires
-the owner login first).
+owner once + firewall), then starts the console **persistently** (detached —
+safe to close SSH). The console binds every interface, so it is reachable on
+the host itself at `http://127.0.0.1:7777/` and from anywhere that routes to
+the host at `http://<host-ip>:7777/` (open port 7777 in the firewall). The
+owner login is the only gate.
 Re-running it updates the source (`git pull --ff-only`, data untouched),
 kills the old server and starts a fresh one on the same port.
 
@@ -53,7 +54,9 @@ python3.12 install.py --run
 ```
 
 `install.py --run` = install + start in one step (dependencies auto-install,
-server binds `127.0.0.1:7777` - localhost only, never exposed publicly).
+server binds every interface on port 7777 — reachable here and at the host's
+own address; the owner login is the only gate, so firewall the port to who
+should reach it).
 The owner email + password are asked only once (saved locally, skipped on
 later runs). Every browser visit lands on the login page until the owner
 signs in (session cookie kept after that).
@@ -62,8 +65,7 @@ Without `--run` it only installs; then start manually with `x5agent`.
 **Start directly (from anywhere, no update check)**
 
 ```bash
-x5agent              # persistent serve on 127.0.0.1:7777 (survives SSH close)
-x5agent --public     # also enable the Tailscale Funnel public link (login required)
+x5agent              # persistent serve on port 7777 (survives SSH close)
 x5agent --off        # stop all project servers on the port
 ```
 
@@ -83,14 +85,13 @@ git clone https://github.com/X5Coder/X5Agent.git
 Set-Location X5Agent/project
 py -3.12 -m pip install -e .
 py -3.12 install.py              # one command: checks + updates + owner + console URL
-py -3.12 -m web.server.server   # start the console (http://127.0.0.1:7777/)
+py -3.12 -m web.server.server   # start the console (reachable at <this-machine-ip>:7777/)
 ```
 
-Non-interactive: `python install.py --email owner@mail.com --password S3cret123 --public`
+Non-interactive: `python install.py --email owner@mail.com --password S3cret123`
 (or `X5_EMAIL`/`X5_PASSWORD` env). Optional `HF_TOKEN=hf_xxx` only raises
 HuggingFace download rate limits on slow networks — never required.
-Local vs public: `scripts/x5-local` / `scripts/x5-public`
-(systemd: `scripts/x5console*.service`).
+Start helper: `scripts/x5-local` (systemd: `scripts/x5console.service`).
 
 The bundled `embedding_model/` folder (~1.2 GB) ships with the project
 copy (release zip) and is used offline - nothing is downloaded on first run

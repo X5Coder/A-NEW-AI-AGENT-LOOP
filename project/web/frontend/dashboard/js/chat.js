@@ -8,7 +8,7 @@
 import { openModal, closeModal, toast } from "./ui.js?v=13";
 import { navigate } from "./navigation.js?v=14";
 import { onPush } from "./events.js?v=5";
-import { remoteLiveUrl } from "./live-url.js?v=1";
+import { remoteLiveUrl } from "./live-url.js?v=2";
 
 // POST helpers: browser -> server is plain POST only.
 // Server -> browser streaming is SSE (the POST response body below,
@@ -5512,9 +5512,9 @@ window.addEventListener("x5:models-changed", async () => {
 
 /* ---------------- live browser: control card + floating preview ---------------- */
 function liveFrame(url) {
-  // Remote console (funnel): loopback viewer links are rewritten to the
-  // funnel /live/ route on this page's host, or the iframe can never reach
-  // them. Local pages keep the original URL untouched.
+  // Remote console: loopback viewer links are re-pointed at this page's
+  // host (same viewer port), or the iframe can never reach them. Local
+  // pages keep the original URL untouched.
   let clean = remoteLiveUrl(url);
   if (!clean) clean = String(url || "");
   // Mixed-content guard: an http viewer inside an https console is blocked
@@ -7025,8 +7025,8 @@ async function isLiveUrlAlive(url, timeoutMs = 6000) {
   // Bounded reachability probe for a persisted stream link: a no-cors fetch
   // resolves (opaque) on any answer and rejects only when nothing listens
   // (dead relay, browser closed while the library still reports running).
-  // Probes the remote-rewritten URL so a funnel page checks the server's
-  // /live/ route instead of the viewer's own localhost. Never throws.
+  // Probes the remote-rewritten URL so a remote page checks this machine's
+  // viewer instead of the viewer's own localhost. Never throws.
   // Same pattern as the live frame watcher.
   try {
     const u = remoteLiveUrl(String(url || "")) || String(url || "");

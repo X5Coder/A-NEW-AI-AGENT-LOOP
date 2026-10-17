@@ -1,8 +1,9 @@
 """Owner gate: login is mandatory, loopback is NOT a bypass.
 
-Regression: the funnel proxy arrives via 127.0.0.1, so a blanket loopback
-exemption let the whole internet in without a session. Only the gateway's
-own POST endpoints are exempt from loopback now.
+Regression: a local reverse proxy (or anything else on this host) reaches
+the console from 127.0.0.1, so a blanket loopback exemption let remote
+callers in without a session. Only the gateway's own POST endpoints are
+exempt from loopback now.
 """
 from __future__ import annotations
 
@@ -65,8 +66,8 @@ def _locked_down(monkeypatch):
     monkeypatch.setattr(ca, "session_from_cookie", lambda cookie: cookie)
 
 
-def test_funnel_loopback_page_needs_login(monkeypatch):
-    """THE hole: funnel arrives as 127.0.0.1 - must 302 without a session."""
+def test_loopback_page_needs_login(monkeypatch):
+    """THE hole: a loopback peer must still 302 without a session."""
     _locked_down(monkeypatch)
     req = _Req("/", peer="127.0.0.1", post=False)
     assert _gate(req) is True

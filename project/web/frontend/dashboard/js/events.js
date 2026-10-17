@@ -10,8 +10,8 @@
  * keeps the last hash per section and re-renders a section ONLY when its
  * hash broke (data changed) — otherwise the cached render stays.
  *
- * Funnel note: Tailscale Funnel resets long SSE streams (502 / connection
- * reset) while the session is still valid. A closed stream is therefore NOT
+ * Proxy note: a reverse proxy / idle timeout resets long SSE streams (502 /
+ * connection reset) while the session is still valid. A closed stream is NOT
  * proof of logout: login redirect happens ONLY after /api/auth/status
  * provably answers 401, otherwise the single stream redials with backoff.
  */
@@ -215,7 +215,7 @@ function scheduleReconnect() {
 }
 
 async function handleStreamError() {
-  // A closed stream is NOT proof of logout: Tailscale Funnel answers 502 /
+  // A closed stream is NOT proof of logout: a proxy/idle timeout answers 502 /
   // resets long SSE streams while the session is still valid. Redirect to
   // login ONLY when the session is provably dead; otherwise redial.
   try {
@@ -227,13 +227,13 @@ async function handleStreamError() {
       return;
     }
     if (res.ok) {
-      reconnectAttempt = 0; // session alive: fast redial on funnel blip
+      reconnectAttempt = 0; // session alive: fast redial on a stream blip
       closeStream();
       connectStream();
       return;
     }
   } catch (_) {
-    // Status itself unreachable (funnel 502 / offline): never redirect.
+    // Status itself unreachable (proxy 502 / offline): never redirect.
   }
   closeStream();
   scheduleReconnect();
@@ -273,7 +273,7 @@ function connectStream() {
   };
   src.onerror = () => {
     // Native EventSource redials by itself while CONNECTING/OPEN; act only
-    // when it gave up (CLOSED, e.g. funnel 502): verify session, then redial.
+    // when it gave up (CLOSED, e.g. proxy 502): verify session, then redial.
     try {
       if (src.readyState !== 2) return;
     } catch (_) {}

@@ -191,26 +191,6 @@ try:
         svc.call_tool = _real_call
         svc.live_links = _real_links
 
-    # Viewer overlay dot: hidden idempotently in a deployed copy.
-    import tempfile as _tf
-    with _tf.NamedTemporaryFile("w+", suffix=".html", delete=False) as _tmp:
-        _tmp.write("<html><head><style>\n    </style></head><body>"
-                   '<div id="efficiency" title="browser active"></div></body></html>')
-        _tmp_path = _tmp.name
-    try:
-        from web.server.tailscale_share import strip_viewer_dot
-        assert strip_viewer_dot(_tmp_path) is True
-        _text = Path(_tmp_path).read_text(encoding="utf-8")
-        assert "display:none" in _text.replace(" ", ""), _text[:300]
-        assert strip_viewer_dot(_tmp_path) is True  # idempotent re-run
-        assert strip_viewer_dot(_tmp_path + ".missing") is False
-        print("viewer efficiency-dot strip is idempotent OK")
-    finally:
-        try:
-            Path(_tmp_path).unlink()
-        except Exception:
-            pass
-
     # owner = user -> the interactive control link is the current card
     svc._browser = _FakeBrowser("control")
     card = srv._live_active()

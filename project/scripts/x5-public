@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# x5-public — start the X5Agent console + Tailscale Funnel public link.
-# Usage:  ./x5-public           (from project/scripts/, or anywhere)
-# Requires: tailscale installed + logged in (install.py --public does this).
-set -euo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJ="$(cd "$HERE/.." && pwd)"
-cd "$PROJ"
-exec python3 -m web.server.server --host 127.0.0.1 --port 7777 --public

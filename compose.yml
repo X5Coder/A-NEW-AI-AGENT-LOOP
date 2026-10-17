@@ -23,11 +23,6 @@ services:
     volumes:
       - x5-data:/app/X5Agent/Data
       - x5-models:/app/project/embedding_model
-    environment:
-      # X5_PUBLIC=1 also enables the Tailscale Funnel public link (needs a
-      # logged-in tailscale client; without it the server only warns and the
-      # local console keeps working). Default 0: local console only.
-      X5_PUBLIC: "0"
     restart: unless-stopped
 
 volumes:

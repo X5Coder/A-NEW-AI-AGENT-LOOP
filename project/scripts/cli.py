@@ -1,13 +1,14 @@
 """The `x5agent` command (installed on PATH via pip install -e .).
 
 Persistent serve (survives SSH close): no update check, no prompts.
-Public link on by default (like install --run); pass --no-public for local only.
+The console binds every interface (owner login is the only gate), so it is
+reachable by this machine's address as well as locally.
 Restart semantics: the console port is always freed first (ANY stale holder
 is stopped graceful-then-forced, suspended ones resumed first), so exactly
 one server ends up running on the same port. The server is launched detached
 (new session + log file), so closing the terminal/SSH never stops it.
 Stop everything with:  x5agent --off
-Usage from anywhere:  x5agent [--no-public] [--port 7777] [--foreground]
+Usage from anywhere:  x5agent [--port 7777] [--foreground]
 """
 from __future__ import annotations
 
@@ -17,6 +18,33 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7777
+
+
+def reachable_url(port: int = DEFAULT_PORT) -> str:
+    """Best-effort reachable console URL (trailing slash).
+
+    The console binds every interface, so the address a browser or phone
+    needs is this machine's primary IPv4, never 0.0.0.0. Falls back to
+    loopback when there is no route. Never raises.
+    """
+    sock = None
+    try:
+        import socket as _socket
+
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = str(sock.getsockname()[0])
+        if ip and not ip.startswith("127."):
+            return f"http://{ip}:{int(port)}/"
+    except Exception:
+        pass
+    finally:
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
+    return f"http://127.0.0.1:{int(port)}/"
 
 
 def _port_answers(port: int) -> bool:
@@ -247,7 +275,7 @@ def _console_log_path() -> Path:
         return PROJECT_ROOT / "console.log"
 
 
-def launch_detached(port: int = DEFAULT_PORT, public: bool = True):
+def launch_detached(port: int = DEFAULT_PORT):
     """Start the console detached (survives SSH/terminal close).
 
     New session + stdio redirected to the log file, so SIGHUP or a closed
@@ -258,9 +286,7 @@ def launch_detached(port: int = DEFAULT_PORT, public: bool = True):
 
     log_path = _console_log_path()
     cmd = [sys.executable, "-m", "web.server.server",
-           "--host", "127.0.0.1", "--port", str(int(port))]
-    if public:
-        cmd.append("--public")
+           "--host", "0.0.0.0", "--port", str(int(port))]
     try:
         log_fh = open(str(log_path), "a", encoding="utf-8")
     except Exception:
@@ -285,16 +311,12 @@ def launch_detached(port: int = DEFAULT_PORT, public: bool = True):
 
 
 def main(argv=None) -> int:
-    """Serve persistently on loopback, restarting a running server first."""
+    """Serve persistently, restarting a running server first."""
     import argparse
 
     p = argparse.ArgumentParser(
         prog="x5agent",
         description="X5Agent console - serve now (no update check)")
-    p.add_argument("--public", action="store_true",
-                   help="Also expose via Tailscale Funnel (permanent public https URL)")
-    p.add_argument("--no-public", action="store_true",
-                   help="Local console only (skip the funnel)")
     p.add_argument("--port", type=int, default=DEFAULT_PORT,
                    help="Port to bind (default 7777)")
     p.add_argument("--off", "--stop", dest="off", action="store_true",
@@ -320,21 +342,21 @@ def main(argv=None) -> int:
         if not _stop_server(args.port):
             print("  start aborted (see above).", file=sys.stderr)
             return 1
-    public = bool(args.public or not args.no_public)
+    url = reachable_url(args.port)
     if args.foreground:
         from web.server.server import run
 
-        # Loopback only: remote access goes through the Tailscale funnel
-        # (which proxies to 127.0.0.1 and always requires the owner login),
-        # never a public bind. Foreground ties the server to this terminal
-        # (closing SSH stops it) - for persistent runs omit the flag.
-        return run(host="127.0.0.1", port=args.port, public=public)
+        # Binds every interface: reachable at this machine's address (owner
+        # login is the only gate; the firewall decides who may connect).
+        # Foreground ties the server to this terminal (closing SSH stops it)
+        # - for persistent runs omit the flag.
+        return run(host="0.0.0.0", port=args.port)
     # Persistent (default): detached child survives SSH/terminal close.
     # Re-running this same command kills the old server above and starts
     # a fresh one on the same port.
-    pid, log_path = launch_detached(port=args.port, public=public)
+    pid, log_path = launch_detached(port=args.port)
     if _port_answers(args.port):
-        print(f"  console running persistently at http://127.0.0.1:{args.port}/ "
+        print(f"  console running persistently at {url} "
               f"(pid {pid}, log {log_path})")
         print("  safe to close this terminal/SSH now - re-run `x5agent` to "
               "restart, `x5agent --off` to stop")
