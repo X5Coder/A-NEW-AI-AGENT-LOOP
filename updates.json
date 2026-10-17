@@ -1,6 +1,6 @@
 {
-  "version": "0.62.1",
-  "description": "The browser engine is upgraded from x5browser 1.5.2 to 1.6.0 (the cut that ships the 1.5.3+1.5.4 work). No tool the agent sees changes — the library's new image_search tool is intentionally not exposed because the project's own image_search plugin owns that name and behavior — the update only brings the library's reliability fixes for browser lifecycle, sign-in popups and tab handling.",
+  "version": "0.62.2",
+  "description": "The browser engine is bumped to x5browser 1.6.1, which fixes a problem the 1.6.0 ownership check introduced: on WSL/Linux the library's own Chrome runs inside the distro, so the check could not see it and refused the endpoint as foreign (port_in_use) — the library could not attach to its own browser. Ownership is now asked from the live stack, and the command-line parser no longer matches a neighbouring profile or a longer port. No tool the agent sees changes.",
   "features": [
     "Typing @ mid-word in Arabic opens the file picker; emails like mail@x never trigger it.",
     "@file and /skill boundaries match between editor paint and server injection, including Arabic adjacency.",
@@ -193,6 +193,10 @@
     "A refused browser command no longer starts Chrome (and no longer leaks a stray Chrome process holding the debug port).",
     "Closing the active tab returns a clean result instead of an error.",
     "The browser launcher refuses to attach to a Chrome running on someone else's profile.",
-    "The agent's browser tool set is unchanged: the library's new image_search tool is not exposed, the project's own image_search plugin keeps that name and behavior."
+    "The agent's browser tool set is unchanged: the library's new image_search tool is not exposed, the project's own image_search plugin keeps that name and behavior.",
+    "Browser engine updated to x5browser 1.6.1.",
+    "Fixed on WSL/Linux: the library attaches to its own Chrome again — 1.6.0's ownership check wrongly refused the unit-driven browser inside the distro as a foreign endpoint (port_in_use).",
+    "The launcher's command-line check is stricter: a profile named like ours (…-profile-old) or a longer port (92230 vs 9223) is no longer mistaken for our browser.",
+    "The agent's browser tool set is unchanged (no tools added or removed in 1.6.1)."
   ]
 }
