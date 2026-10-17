@@ -1,6 +1,6 @@
 {
-  "version": "0.62.0",
-  "description": "The Plugins section is removed from the console entirely — sidebar, page, routing and boot no longer include it — and the tool/trigger search seeds are rebuilt so offline search matches the current tool descriptions.",
+  "version": "0.62.1",
+  "description": "The browser engine is upgraded from x5browser 1.5.2 to 1.6.0 (the cut that ships the 1.5.3+1.5.4 work). No tool the agent sees changes — the library's new image_search tool is intentionally not exposed because the project's own image_search plugin owns that name and behavior — the update only brings the library's reliability fixes for browser lifecycle, sign-in popups and tab handling.",
   "features": [
     "Typing @ mid-word in Arabic opens the file picker; emails like mail@x never trigger it.",
     "@file and /skill boundaries match between editor paint and server injection, including Arabic adjacency.",
@@ -186,6 +186,13 @@
     "pdf_studio is now the single place to see studios too: action=list shows every studio with its state (pages, designed, orientation, live designing), action=get shows one studio's full details (slide states, assets).",
     "Agent context no longer auto-lists studios — one fixed pointer line tells the model to call action=list first, so reuse-before-create still holds with a smaller, always-fresh context.",
     "The Plugins page is gone from the console: no sidebar entry, no route, no boot wait — the sidebar goes Dashboard, Agent, Workspace, Gateway, Skills, AI Models, Settings.",
-    "Tool search seeds rebuilt (57 tools, hash 383b8571) so fresh installs find tools instantly with zero model calls."
+    "Tool search seeds rebuilt (57 tools, hash 383b8571) so fresh installs find tools instantly with zero model calls.",
+    "Browser engine updated from x5browser 1.5.2 to 1.6.0.",
+    "Sign-in popups (Google/Firebase) now survive, so logins finish instead of the window closing early.",
+    "Closing the browser really closes it: Chrome is asked to quit and the debug endpoint is verified gone, so the next open starts a fresh browser.",
+    "A refused browser command no longer starts Chrome (and no longer leaks a stray Chrome process holding the debug port).",
+    "Closing the active tab returns a clean result instead of an error.",
+    "The browser launcher refuses to attach to a Chrome running on someone else's profile.",
+    "The agent's browser tool set is unchanged: the library's new image_search tool is not exposed, the project's own image_search plugin keeps that name and behavior."
   ]
 }

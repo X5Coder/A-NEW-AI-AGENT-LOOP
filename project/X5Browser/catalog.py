@@ -3,13 +3,20 @@ X5Browser tool catalog — single source of truth for all 42 browser tools.
 
 41 mirror the library's TOOL_SCHEMAS 1:1; `show_preview` is a small project
 wrapper over the library's live_preview (floating watch-only window for the UI).
-All 44 are CORE PLUGINS: always on, hidden from the UI, found via tool_search.
+All are CORE PLUGINS: always on, hidden from the UI, found via tool_search.
 4 DANGEROUS tools: fill_form, upload_files, export_page, console_command.
 In restricted mode the loop asks the user (via question) before running them;
 otherwise they run directly.
 
+Library 1.6.0 ships 42 tools (it added `image_search`). That one tool is
+deliberately NOT mirrored here: the project's own `image_search` core plugin
+(plugins/core_plugins/image_search) already owns that exact name and behavior,
+and two tools under one name would collide in the tool registry/dispatcher.
+So the catalog stays 41 library tools + show_preview = 42.
+
 Update path: bump lib pin in VERSION + adjust entries here to match the new
-TOOL_SCHEMAS. Everything else (dispatcher/registry/builder/store) reads this file.
+TOOL_SCHEMAS (add/remove/rename only what actually changed). Everything else
+(dispatcher/registry/builder/store) reads this file.
 
 Each entry mirrors our spec.json shape: {name, description, inputs}.
 Inputs shape mirrors our convention: {param: {type, required, description, ...}}.

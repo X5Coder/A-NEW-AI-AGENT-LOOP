@@ -46,7 +46,9 @@ for needed in ("_live_snapshot", "_live_active", "_live_pause_entry",
     assert hasattr(srv, needed), f"missing new server helper: {needed}"
 print("old server live_state/heal helpers removed OK")
 
-# ---- catalog surface (library 1.5.2 = 41 tools + our show_preview wrapper) ----
+# ---- catalog surface (41 mirrored library tools + our show_preview = 42) ----
+# (library 1.6.0 ships 42 tools; its `image_search` is deliberately not
+#  mirrored because the project's own image_search plugin owns that name)
 assert len(catalog.ALL_TOOLS) == 42, len(catalog.ALL_TOOLS)
 assert "browser_status" in catalog.ALL_TOOLS
 assert "show_preview" in catalog.ALL_TOOLS
@@ -67,7 +69,7 @@ for tool, param in (("choose_option", "multiple"), ("read_console", "since"),
                     ("click_verify", "modifiers"), ("click_verify", "hold_ms")):
     spec = catalog.get_spec(tool) or {}
     assert param in (spec.get("inputs") or {}), f"{tool}.{param} missing"
-print("catalog updated to 41 tools (+browser_status, new params) OK")
+print("catalog updated to 41 mirrored library tools + show_preview OK")
 
 # ---- stopped browser, simulated deterministically ------------------------
 _real_probe = svc._endpoint_alive_now
