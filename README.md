@@ -88,9 +88,11 @@ py -3.12 install.py              # one command: checks + updates + owner + conso
 py -3.12 -m web.server.server   # start the console (reachable at <this-machine-ip>:7777/)
 ```
 
-Non-interactive: `python install.py --email owner@mail.com --password S3cret123`
-(or `X5_EMAIL`/`X5_PASSWORD` env). Optional `HF_TOKEN=hf_xxx` only raises
-HuggingFace download rate limits on slow networks — never required.
+Non-interactive: `python install.py --email owner@gmail.com --password S3cret123`
+(or `X5_EMAIL`/`X5_PASSWORD` env). The owner email must be an English Gmail
+address and the password min 8 English (ASCII) characters. Optional
+`HF_TOKEN=hf_xxx` only raises HuggingFace download rate limits on slow
+networks — never required.
 Start helper: `scripts/x5-local` (systemd: `scripts/x5console.service`).
 
 The bundled `embedding_model/` folder (~1.2 GB) ships with the project

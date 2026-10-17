@@ -27,11 +27,40 @@ from pathlib import Path
 COOKIE_NAME = "x5sess"
 SESSION_DAYS = 30
 PBKDF2_ROUNDS = 200_000
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# English Gmail addresses only (the console has a single owner).
+EMAIL_RE = re.compile(r"^[a-z0-9][a-z0-9._%+-]*@gmail\.com$")
 MIN_PASSWORD = 8
+_ASCII_PRINTABLE_RE = re.compile(r"^[\x21-\x7e]+$")
 
 _sessions: dict[str, float] = {}
 _sessions_lock = threading.Lock()
+
+
+def email_problem(email: str) -> str | None:
+    """Why the email is unacceptable, else None. English Gmail addresses only.
+
+    Single owner for the rule: the installer prompt, set_owner.py, the server
+    startup prompt and the setup page all call this instead of keeping their
+    own idea of a valid owner email.
+    """
+    email = (email or "").strip()
+    if not email:
+        return "email is required"
+    if not EMAIL_RE.match(email.lower()):
+        return "email must be an English Gmail address (example@gmail.com)"
+    return None
+
+
+def password_problem(password: str) -> str | None:
+    """Why the password is unacceptable, else None. English (ASCII) only."""
+    if not password:
+        return "password is required"
+    if len(password) < MIN_PASSWORD:
+        return f"password too short (min {MIN_PASSWORD})"
+    if not _ASCII_PRINTABLE_RE.match(password):
+        return ("password must be English characters only "
+                "(letters, numbers, symbols)")
+    return None
 
 
 def owner_path(path: Path | None = None) -> Path:
@@ -69,10 +98,9 @@ def setup_owner(email: str, password: str, path: Path | None = None) -> str:
     email = (email or "").strip().lower()
     if is_setup(path):
         raise RuntimeError("owner already set")
-    if not EMAIL_RE.match(email):
-        raise ValueError("invalid email format")
-    if len(password or "") < MIN_PASSWORD:
-        raise ValueError("password too short (min 8)")
+    problem = email_problem(email) or password_problem(password)
+    if problem:
+        raise ValueError(problem)
     salt = secrets.token_hex(16)
     record = {"email": email, "salt": salt, "hash": _hash(password, salt),
               "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
@@ -108,8 +136,9 @@ def change_password(email: str, old_password: str, new_password: str,
     """Password change: verifies the old password first, then re-hashes."""
     if not verify_owner(email, old_password, path):
         raise ValueError("current password is wrong")
-    if len(new_password or "") < MIN_PASSWORD:
-        raise ValueError("password too short (min 8)")
+    problem = password_problem(new_password)
+    if problem:
+        raise ValueError(problem)
     try:
         record = json.loads(owner_path(path).read_text(encoding="utf-8"))
     except Exception as e:

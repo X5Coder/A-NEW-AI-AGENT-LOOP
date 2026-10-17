@@ -329,6 +329,7 @@ def test_logo_is_white_and_carries_no_tagline(monkeypatch):
     plain = _completion_text(tty=True)
     assert "terminal-native" not in plain
     assert "autonomous agent" not in plain
+    assert "─────" not in plain and "─────" not in plain, "no divider line"
 
 
 def test_completion_links_are_ctrl_clickable_on_a_terminal(monkeypatch):
@@ -364,3 +365,34 @@ def test_main_always_prints_the_completion_screen():
     assert "Web Server (Local)" not in body, "the old boxed report must be gone"
     assert "starting console now" not in body, "the end screen stays logo + links only"
     assert "console running now" not in body, "the end screen stays logo + links only"
+
+
+def test_port_restart_is_one_short_line():
+    source = INSTALL_PY.read_text(encoding="utf-8")
+    body = source[source.index("def main("):]
+    assert "restarting console on port" in body
+    assert "port busy - freeing it" not in body, "one concise line, no progress dump"
+    assert "stopper(CONSOLE_PORT, quiet=True)" in body, (
+        "the per-pid progress comes from cli - silence it and print one line")
+
+
+def test_installer_delegates_credential_rules():
+    source = INSTALL_PY.read_text(encoding="utf-8")
+    assert "email_problem" in source and "password_problem" in source
+    assert "EMAIL_RE" not in source, "one owner for the owner-credential rules"
+    assert "English" in source, "the prompt states the rules"
+
+
+def test_stop_server_quiet_flag_contract(monkeypatch):
+    import inspect
+
+    from scripts import cli
+
+    params = inspect.signature(cli._stop_server).parameters
+    assert params["quiet"].default is False, "x5agent --off keeps its progress"
+    assert "quiet" in inspect.signature(cli._stop_server_windows).parameters
+    printed: list = []
+    monkeypatch.setattr(cli, "_port_answers", lambda port: False)  # port already free
+    monkeypatch.setattr("builtins.print", lambda *a, **k: printed.append(a))
+    assert cli._stop_server(7777, quiet=True) is True
+    assert printed == []

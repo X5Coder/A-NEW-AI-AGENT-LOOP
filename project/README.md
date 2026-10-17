@@ -45,15 +45,15 @@ port firewalled to who should reach it.
 
 ```bash
 # Everything answered by flags — no prompts, no stdin injection:
-python install.py --email owner@mail.com --password S3cret123
+python install.py --email owner@gmail.com --password S3cret123
 
 # Same via environment (password safer here than on the CLI):
-X5_EMAIL=owner@mail.com X5_PASSWORD=S3cret123 python install.py --yes
+X5_EMAIL=owner@gmail.com X5_PASSWORD=S3cret123 python install.py --yes
 ```
 
 | Flag | Effect |
 | --- | --- |
-| `--email`, `--password` (or `X5_EMAIL`/`X5_PASSWORD`) | Owner account without prompting |
+| `--email`, `--password` (or `X5_EMAIL`/`X5_PASSWORD`) | Owner account without prompting (English Gmail address + min 8 English characters) |
 | `--yes` / `-y` | Assume yes to optional prompts (Chrome install) |
 | `--skip-browser` | Skip the browser doctor check |
 | `--skip-firewall` | Skip the firewall port step |

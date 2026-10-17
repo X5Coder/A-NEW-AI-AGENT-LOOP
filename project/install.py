@@ -15,8 +15,9 @@ Flow (exactly, nothing else):
      draw over the owner prompt - see _fetch_embedding_model)
   6. firewall step (best-effort open of TCP 7777)
   7. browser check (X5Browser doctor: Chrome + environment, offers --fix)
-  8. email + password (flags/env X5_EMAIL+X5_PASSWORD or prompt; salted hash
-     in Data, never plaintext)
+  8. email + password (flags/env X5_EMAIL+X5_PASSWORD or prompt; rules from
+     web.server.console_auth: an English Gmail address + a min 8 character
+     English password; salted hash in Data, never plaintext)
    9. completion screen on every run: the X5 logo, then the public link and
       the local link (nothing else between them), then the console is opened
       (the console binds every interface, so the machine's own address works;
@@ -35,7 +36,6 @@ import getpass
 import hashlib
 import json
 import os
-import re
 import secrets
 import shutil
 import subprocess
@@ -53,7 +53,6 @@ UI_URL = "http://127.0.0.1:7777/"
 CONSOLE_PORT = 7777
 MIN_PYTHON = (3, 10)
 BROWSER_PYTHON = (3, 12)  # x5browser 1.6.1 floor is 3.10; 3.12 still recommended for full browser support
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Imported by the dependency check (fresh interpreter, never this process).
 REQUIRED_IMPORTS = ("sentence_transformers", "numpy")
 
@@ -63,18 +62,18 @@ def parse_args(argv=None):
 
     Examples:
       python install.py --run
-      python install.py --run --email owner@mail.com --password S3cret123
-      HF_TOKEN=hf_xxx python install.py --run --email a@b.c --password S3cret123
-      X5_EMAIL=a@b.c X5_PASSWORD=S3cret123 python install.py --run --yes
+      python install.py --run --email owner@gmail.com --password S3cret123
+      HF_TOKEN=hf_xxx python install.py --run --email owner@gmail.com --password S3cret123
+      X5_EMAIL=owner@gmail.com X5_PASSWORD=S3cret123 python install.py --run --yes
     Env fallbacks: X5_EMAIL / X5_PASSWORD / HF_TOKEN.
     """
     import argparse
 
     p = argparse.ArgumentParser(description="X5Agent install / update (one command)")
     p.add_argument("--email", default=os.environ.get("X5_EMAIL", ""),
-                   help="Owner email (else prompted)")
+                   help="Owner email, English Gmail only (example@gmail.com; else prompted)")
     p.add_argument("--password", default=os.environ.get("X5_PASSWORD", ""),
-                   help="Owner password, min 8 chars (env X5_PASSWORD preferred over CLI)")
+                   help="Owner password, min 8 English characters (env X5_PASSWORD preferred over CLI)")
     p.add_argument("--yes", "-y", action="store_true",
                    help="Assume yes to optional prompts (Chrome install)")
     p.add_argument("--skip-browser", action="store_true",
@@ -750,10 +749,18 @@ def _read_password() -> str | None:
             if not line:
                 return None
             return line.rstrip("\r\n")
-        return getpass.getpass("  password (min 8, hidden): ")
+        return getpass.getpass("  password (min 8, English only, hidden): ")
     except (EOFError, KeyboardInterrupt):
         print(file=sys.stderr)
         return None
+
+
+def _credential_rules():
+    """The shared owner-credential rules (single owner: console_auth)."""
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from web.server.console_auth import email_problem, password_problem
+
+    return email_problem, password_problem
 
 
 def ask_credentials(email: str = "", password: str = "") -> bool:
@@ -764,11 +771,17 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
     stdin injection and no GetPassWarning. Interactive prompts retry until
     the value is valid (bad email or weak/unreadable password re-asks
     instead of aborting the whole install); EOF/interrupt still aborts.
-    Any letters, numbers and symbols (e.g. kimo1234##xxz) are accepted -
-    the only rules are a valid email shape and min 8 password chars.
+    Rules (shared with the console gate): an English Gmail address
+    (example@gmail.com) and a min 8 character English (ASCII) password.
     """
     _clear_screen()
     _step("6/6 console owner")
+    try:
+        email_problem, password_problem = _credential_rules()
+    except Exception as e:
+        print(f"  ERROR: credential rules unavailable ({str(e)[:120]})",
+              file=sys.stderr)
+        return False
     if not email and not password and _owner_exists():
         return True
     print("  everything else is ready - the console login is the only thing "
@@ -781,10 +794,10 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
             except (EOFError, KeyboardInterrupt):
                 print(file=sys.stderr, flush=True)
                 return False
-        if EMAIL_RE.match(email):
+        problem = email_problem(email)
+        if not problem:
             break
-        print("  ERROR: invalid email format - please type it again",
-              file=sys.stderr)
+        print(f"  ERROR: {problem} - please type it again", file=sys.stderr)
         email = ""
     pw = (password or "")
     while True:
@@ -793,20 +806,11 @@ def ask_credentials(email: str = "", password: str = "") -> bool:
             if got is None:
                 return False
             pw = got
-        if len(pw) < 8:
-            print("  ERROR: password too short (min 8) - please type it again",
-                  file=sys.stderr)
-            pw = ""
-            continue
-        try:
-            pw.encode("utf-8")
-        except UnicodeError:
-            print("  ERROR: password has unreadable characters - please "
-                  "retype it with plain letters/numbers/symbols",
-                  file=sys.stderr)
-            pw = ""
-            continue
-        break
+        problem = password_problem(pw)
+        if not problem:
+            break
+        print(f"  ERROR: {problem} - please type it again", file=sys.stderr)
+        pw = ""
     try:
         sys.path.insert(0, str(PROJECT_ROOT))
         from core.paths import data_db_file
@@ -839,7 +843,7 @@ _LOGO_ART = (
     "██╔╝ ██╗███████║",
     "╚═╝  ╚═╝╚══════╝",
 )
-_LOGO_WORD = ("  A G E N T", "", "  ─────────────", "", "", "")
+_LOGO_WORD = ("  A G E N T",)
 _LOGO_PLAIN = "X5  A G E N T"
 _GRAY_TEXT, _WHITE_TEXT, _CYAN_TEXT = (120, 130, 145), (255, 255, 255), (34, 211, 238)
 _RESET = "\033[0m"
@@ -957,15 +961,22 @@ def main(argv=None) -> int:
         except Exception:
             already, stopper = False, None
         if already:
-            print("\n[install] port busy - freeing it so exactly one server runs ...")
+            print(f"\n[install] restarting console on port {CONSOLE_PORT} ...")
             ok = False
             if stopper is not None:
                 try:
-                    ok = stopper(CONSOLE_PORT)
+                    ok = stopper(CONSOLE_PORT, quiet=True)
+                except TypeError:
+                    try:
+                        ok = stopper(CONSOLE_PORT)
+                    except Exception:
+                        ok = False
                 except Exception:
                     ok = False
             if not ok:
-                print("  start aborted (see above).", file=sys.stderr)
+                print(f"  ERROR: could not free port {CONSOLE_PORT} - "
+                      "stop the old console and retry: x5agent --off",
+                      file=sys.stderr)
                 return 1
         if args.foreground:
             cmd = [sys.executable, "-m", "web.server.server",

@@ -155,7 +155,8 @@ def _port_pids(port: int) -> list:
     return found
 
 
-def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
+def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15,
+                 quiet: bool = False) -> bool:
     """Free the console port so exactly one server ends up running.
 
     ANY process holding the port is stopped (old/suspended/stale server or
@@ -164,6 +165,8 @@ def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
     until resumed), then SIGINT (the server's clean shutdown path), then
     SIGKILL. The port is verified free afterwards. PID 1 and our own PID
     are never signalled. Posix only.
+    quiet=True silences the per-pid progress (the installer prints its own
+    one-line summary) but never the failure reason.
     Returns True when the port is free.
     """
     import platform as _plat
@@ -172,6 +175,10 @@ def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
     import subprocess as _sp
     import time as _time
 
+    def _progress(msg: str) -> None:
+        if not quiet:
+            print(msg)
+
     def _free() -> bool:
         try:
             return not _port_answers(port)
@@ -179,7 +186,7 @@ def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
             return False
 
     if _plat.system() == "Windows":
-        return _stop_server_windows(port, wait_sec)
+        return _stop_server_windows(port, wait_sec, quiet=quiet)
     if _free():
         return True
     if (_sh.which("ss") is None and _sh.which("lsof") is None
@@ -205,22 +212,27 @@ def _stop_server(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
                     os.kill(pid, wake)
                 except Exception:
                     pass
-        print(f"  freeing port {port} ({label}, pid(s) "
-              f"{', '.join(map(str, holders)) or 'name-sweep'}) ...")
+        _progress(f"  freeing port {port} ({label}, pid(s) "
+                  f"{', '.join(map(str, holders)) or 'name-sweep'}) ...")
         deadline = _time.time() + pause
         while _time.time() < deadline:
             if _free():
-                print("  port is free - exactly one server will run now")
+                _progress("  port is free - exactly one server will run now")
                 return True
             _time.sleep(1)
     print(f"  port {port} is still busy - free it manually and re-run")
     return False
 
 
-def _stop_server_windows(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
+def _stop_server_windows(port: int = DEFAULT_PORT, wait_sec: int = 15,
+                         quiet: bool = False) -> bool:
     """Windows fallback: find LISTEN holders via netstat, taskkill them."""
     import subprocess as _sp
     import time as _time
+
+    def _progress(msg: str) -> None:
+        if not quiet:
+            print(msg)
 
     def _free() -> bool:
         try:
@@ -245,7 +257,7 @@ def _stop_server_windows(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
             if pid > 1 and pid != os.getpid() and pid not in pids:
                 pids.append(pid)
         for pid in pids:
-            print(f"  freeing port {port} (pid {pid}) ...")
+            _progress(f"  freeing port {port} (pid {pid}) ...")
             try:
                 _sp.run(["taskkill", "/PID", str(pid), "/F"],
                         capture_output=True, timeout=15)
@@ -254,7 +266,7 @@ def _stop_server_windows(port: int = DEFAULT_PORT, wait_sec: int = 15) -> bool:
         deadline = _time.time() + wait_sec
         while _time.time() < deadline:
             if _free():
-                print("  port is free - exactly one server will run now")
+                _progress("  port is free - exactly one server will run now")
                 return True
             _time.sleep(1)
     except Exception:

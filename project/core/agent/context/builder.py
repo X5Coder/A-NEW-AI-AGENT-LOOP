@@ -679,6 +679,11 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
         # baggage (workspace map, docs, memories, todos, triggers) and
         # exactly 4 tools in-context (no tool_search in studio).
         # Old page codes are NEVER sent — the model reads via the tools.
+        # — f-string replacement fields must stay on ONE line (multi-line
+        # expressions inside an f-string need Python 3.12; the floor is 3.10).
+        _vision_core = (" | vision_analyze (inspect image content: pass studio assets as "
+                        "image_path=studio:<id>/images/<name>)"
+                        if _studio_vision_available() else "")
         _s_ctx = "\n\n".join([
             _studio_env_block(),
             "[Memories L5: skipped — studio turns are stateless]",
@@ -690,8 +695,7 @@ def build_context(user_input: str, include_todo: bool = True, isolated: bool = F
             "| studio_read (read-only view of any other slide) "
             "| image_search (find photos: this studio id + query words -> pictures land in the studio assets with src paths) "
             "| http_request (fonts/links only, never photos)"
-            f"{' | vision_analyze (inspect image content: pass studio assets as '
-               'image_path=studio:<id>/images/<name>)' if _studio_vision_available() else ''}]",
+            f"{_vision_core}]",
             "[Bridge] Based on the studio task below, execute it.\n\n"
             f"[Current User Input - L8]\n{user_input.strip()}"])
         return system_prompt, _s_ctx, _studio_core_tools()

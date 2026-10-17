@@ -133,3 +133,17 @@ def test_units_from_steps_tells_model_not_to_repeat():
     assert "Terminal Command" in text
     assert _units_from_steps([]) == []
     assert _units_from_steps(None) == []
+
+
+def test_run_failure_label_points_at_models_only_for_a_missing_model():
+    from core.ai_models.store import missing_message
+
+    missing = S._run_failure_payload(RuntimeError(missing_message("text")))
+    assert "AI Models" in missing["error"]
+    internal = S._run_failure_payload(
+        SyntaxError("unterminated string literal (detected at line 693)"))
+    assert "AI Models" not in internal["error"], (
+        "a broken module must never be reported as a missing model")
+    assert "693" in internal["detail"], "the real cause stays visible"
+    plain = S._run_failure_payload(RuntimeError("tool blew up"))
+    assert plain["error"] == "the agent run failed"

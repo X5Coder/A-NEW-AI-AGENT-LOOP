@@ -380,6 +380,29 @@ def _data_json(filename: str, default):
     return default
 
 
+def _run_failure_payload(err: BaseException) -> dict:
+    """Error payload for a failed agent run: label + short technical detail.
+
+    Only a missing model points the user at the AI Models page. Every other
+    failure (a broken module, a bug in a tool, ...) keeps its own cause, so
+    nobody is sent hunting for a model that is already connected.
+    """
+    label = "the agent run failed"
+    try:
+        from core.ai_models.store import kind_from_missing_error
+
+        if kind_from_missing_error(str(err)):
+            label = "LLM request failed — connect a model in AI Models"
+    except Exception:
+        pass
+    if label == "the agent run failed":
+        if isinstance(err, RuntimeError) and "model engine not available" in str(err):
+            label = "LLM request failed — connect a model in AI Models"
+        elif isinstance(err, (SyntaxError, ImportError, ModuleNotFoundError)):
+            label = "the agent run failed — server code did not load (see the console log)"
+    return {"error": label, "detail": str(err)[:200]}
+
+
 def _get_dashboard_data() -> dict:
     """Collect real dashboard stats from storage — no secrets."""
     storage_db = PROJECT_ROOT / "storage" / "database"
@@ -5352,10 +5375,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 _resume = self._resume_requested()
                 result = run_loop(loop_input, max_steps=CHAT_LOOP_STEPS, verbose=False, model=chat_model, api_key=chat_key, reuse_user_id=_reuse, chat_limit=20 if _reuse else 30, resume_stopped=_resume)
             except (ValueError, RuntimeError) as e:
-                self._send_json(
-                    {"error": "LLM request failed — connect a model in AI Models", "detail": str(e)[:200]},
-                    status=502,
-                )
+                self._send_json(_run_failure_payload(e), status=502)
                 return
             finally:
                 # Temp request files are single-use — never accumulate on disk
@@ -5793,7 +5813,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # Preview state survives (the browser may still stream).
             _live_pause_clear()
             if err is not None:
-                _emit({"type": "error", "error": "LLM request failed — connect a model in AI Models", "detail": str(err)[:200]})
+                _emit(dict({"type": "error"}, **_run_failure_payload(err)))
             else:
                 res = box.get("res") or {}
                 if res.get("cancelled"):
@@ -6181,7 +6201,6 @@ def _ensure_owner_from_terminal() -> bool:
     import getpass as _getpass
     import hashlib as _hashlib
     import os as _os
-    import re as _re
     import secrets as _secrets
     import time as _time
     try:
@@ -6195,11 +6214,9 @@ def _ensure_owner_from_terminal() -> bool:
         email = (_os.environ.get("X5_EMAIL") or "").strip().lower()
         password = _os.environ.get("X5_PASSWORD") or ""
         if email and password:
-            if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
-                print("  ERROR: X5_EMAIL is not a valid email", file=sys.stderr)
-                return False
-            if len(password) < 8:
-                print("  ERROR: X5_PASSWORD too short (min 8)", file=sys.stderr)
+            problem = _ca.email_problem(email) or _ca.password_problem(password)
+            if problem:
+                print(f"  ERROR: {problem} (X5_EMAIL/X5_PASSWORD)", file=sys.stderr)
                 return False
             salt = _secrets.token_hex(16)
             digest = _hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
@@ -6220,16 +6237,18 @@ def _ensure_owner_from_terminal() -> bool:
             except (EOFError, KeyboardInterrupt):
                 print(file=sys.stderr)
                 return False
-            if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
-                print("  ERROR: invalid email format", file=sys.stderr)
+            problem = _ca.email_problem(email)
+            if problem:
+                print(f"  ERROR: {problem}", file=sys.stderr)
                 return False
             try:
-                password = _getpass.getpass("  password (min 8, hidden): ")
+                password = _getpass.getpass("  password (min 8, English only, hidden): ")
             except (EOFError, KeyboardInterrupt):
                 print(file=sys.stderr)
                 return False
-            if len(password or "") < 8:
-                print("  ERROR: password too short (min 8)", file=sys.stderr)
+            problem = _ca.password_problem(password)
+            if problem:
+                print(f"  ERROR: {problem}", file=sys.stderr)
                 return False
             salt = _secrets.token_hex(16)
             digest = _hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),

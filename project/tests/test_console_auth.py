@@ -20,44 +20,67 @@ def _tmp(tmp_path: Path) -> Path:
 def test_setup_then_verify(tmp_path):
     p = _tmp(tmp_path)
     assert ca.is_setup(p) is False
-    assert ca.setup_owner("Owner@Example.com", "SecretPass1", p) == "owner@example.com"
+    assert ca.setup_owner("Owner@Gmail.com", "SecretPass1", p) == "owner@gmail.com"
     assert ca.is_setup(p) is True
-    assert ca.owner_email(p) == "owner@example.com"
-    assert ca.verify_owner("owner@example.com", "SecretPass1", p) is True
-    assert ca.verify_owner("owner@example.com", "wrong-pass", p) is False
-    assert ca.verify_owner("other@example.com", "SecretPass1", p) is False
+    assert ca.owner_email(p) == "owner@gmail.com"
+    assert ca.verify_owner("owner@gmail.com", "SecretPass1", p) is True
+    assert ca.verify_owner("owner@gmail.com", "wrong-pass", p) is False
+    assert ca.verify_owner("other@gmail.com", "SecretPass1", p) is False
 
 
 def test_no_plaintext_password_stored(tmp_path):
     p = _tmp(tmp_path)
-    ca.setup_owner("a@b.co", "SecretPass1", p)
+    ca.setup_owner("a@gmail.com", "SecretPass1", p)
     assert "SecretPass1" not in p.read_text(encoding="utf-8")
 
 
 def test_setup_refuses_second_owner(tmp_path):
     p = _tmp(tmp_path)
-    ca.setup_owner("a@b.co", "SecretPass1", p)
+    ca.setup_owner("a@gmail.com", "SecretPass1", p)
     with pytest.raises(RuntimeError):
-        ca.setup_owner("c@d.co", "OtherPass2", p)
+        ca.setup_owner("c@gmail.com", "OtherPass2", p)
+
+
+def test_owner_email_is_an_english_gmail_address():
+    assert ca.email_problem("kareem.diaa+work@gmail.com") is None
+    assert ca.email_problem("Kareem@Gmail.com") is None, "case is normalised"
+    for bad in ("kareem@yahoo.com", "kareem@gmail.co", "kareem@gmail.com.eg",
+                "بريد@gmail.com", "not-an-email", "", ".hidden@gmail.com"):
+        assert ca.email_problem(bad), f"{bad!r} must be refused"
+
+
+def test_owner_password_is_english_only():
+    assert ca.password_problem("Kareem1234##") is None
+    assert ca.password_problem("short") == "password too short (min 8)"
+    assert ca.password_problem("") == "password is required"
+    for bad in ("كلمةالسر123", "pass\tword", "pass word"):
+        problem = ca.password_problem(bad)
+        assert problem and "English" in problem, f"{bad!r} must be refused"
 
 
 def test_setup_validates_input(tmp_path):
     with pytest.raises(ValueError):
         ca.setup_owner("not-an-email", "SecretPass1", _tmp(tmp_path))
     with pytest.raises(ValueError):
-        ca.setup_owner("a@b.co", "short", _tmp(tmp_path))
+        ca.setup_owner("a@gmail.com", "short", _tmp(tmp_path))
+    with pytest.raises(ValueError):
+        ca.setup_owner("a@yahoo.com", "SecretPass1", _tmp(tmp_path))
+    with pytest.raises(ValueError):
+        ca.setup_owner("a@gmail.com", "كلمةالسر123", _tmp(tmp_path))
 
 
 def test_change_password(tmp_path):
     p = _tmp(tmp_path)
-    ca.setup_owner("a@b.co", "OldPass11", p)
+    ca.setup_owner("a@gmail.com", "OldPass11", p)
     with pytest.raises(ValueError):
-        ca.change_password("a@b.co", "wrong-old", "NewPass22", p)
+        ca.change_password("a@gmail.com", "wrong-old", "NewPass22", p)
     with pytest.raises(ValueError):
-        ca.change_password("a@b.co", "OldPass11", "short", p)
-    ca.change_password("a@b.co", "OldPass11", "NewPass22", p)
-    assert ca.verify_owner("a@b.co", "NewPass22", p) is True
-    assert ca.verify_owner("a@b.co", "OldPass11", p) is False
+        ca.change_password("a@gmail.com", "OldPass11", "short", p)
+    with pytest.raises(ValueError):
+        ca.change_password("a@gmail.com", "OldPass11", "كلمةالسر123", p)
+    ca.change_password("a@gmail.com", "OldPass11", "NewPass22", p)
+    assert ca.verify_owner("a@gmail.com", "NewPass22", p) is True
+    assert ca.verify_owner("a@gmail.com", "OldPass11", p) is False
 
 
 def test_sessions_lifecycle():

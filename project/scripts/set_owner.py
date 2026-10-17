@@ -1,6 +1,8 @@
 """Set/replace the console owner (terminal-only). Usage:
-  python scripts/set_owner.py --email you@mail.com   (prompts hidden password)
+  python scripts/set_owner.py --email you@gmail.com   (prompts hidden password)
   X5_EMAIL=.. X5_PASSWORD=.. python scripts/set_owner.py   (non-interactive)
+Rules are the console's own (email_problem/password_problem): an English
+Gmail address and a min 8 character English password.
 Overwrites X5Agent/Data/database/console_auth.json with a salted hash only.
 """
 from __future__ import annotations
@@ -9,7 +11,6 @@ import getpass
 import hashlib
 import json
 import os
-import re
 import secrets
 import sys
 import time
@@ -19,8 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 from core.paths import data_db_file  # noqa: E402
-
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+from web.server.console_auth import email_problem, password_problem  # noqa: E402
 
 
 def main() -> int:
@@ -35,16 +35,18 @@ def main() -> int:
             email = input("  email: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return 1
-    if not EMAIL_RE.match(email):
-        print("  ERROR: invalid email format", file=sys.stderr)
+    problem = email_problem(email)
+    if problem:
+        print(f"  ERROR: {problem}", file=sys.stderr)
         return 1
     if not password:
         try:
-            password = getpass.getpass("  password (min 8, hidden): ")
+            password = getpass.getpass("  password (min 8, English only, hidden): ")
         except (EOFError, KeyboardInterrupt):
             return 1
-    if len(password) < 8:
-        print("  ERROR: password too short (min 8)", file=sys.stderr)
+    problem = password_problem(password)
+    if problem:
+        print(f"  ERROR: {problem}", file=sys.stderr)
         return 1
     salt = secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
